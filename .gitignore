@@ -1,0 +1,13 @@
+.env
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+runtime/uploads/*
+!runtime/uploads/.gitkeep
+runtime/results/*
+!runtime/results/.gitkeep
+runtime/*.db
+runtime/*.xlsx

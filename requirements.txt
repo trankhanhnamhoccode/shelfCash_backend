@@ -1,0 +1,13 @@
+fastapi
+uvicorn[standard]
+pydantic>=2
+pydantic-settings
+python-multipart
+pandas
+openpyxl
+xlrd
+json-repair
+sqlalchemy
+httpx
+pytest
+pytest-asyncio

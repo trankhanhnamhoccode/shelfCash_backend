@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "shelfcash-backend"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi", "uvicorn[standard]", "pydantic>=2", "pydantic-settings",
+  "python-multipart", "pandas", "openpyxl", "xlrd", "json-repair",
+  "sqlalchemy", "httpx",
+]
+
+[project.optional-dependencies]
+test = ["pytest", "pytest-asyncio"]
+kaggle = ["transformers>=4.51.0", "accelerate", "bitsandbytes", "sentencepiece"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"

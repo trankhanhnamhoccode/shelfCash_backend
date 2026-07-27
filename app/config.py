@@ -1,0 +1,42 @@
+from functools import lru_cache
+from pathlib import Path
+
+from pydantic import field_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore", case_sensitive=False)
+
+    app_name: str = "shelfcash-backend"
+    environment: str = "development"
+    host: str = "0.0.0.0"
+    port: int = 8000
+    llm_provider: str = "disabled"
+    qwen_model_id: str = "Qwen/Qwen3-4B"
+    qwen_load_in_4bit: bool = True
+    qwen_max_new_tokens: int = 900
+    qwen_timeout_seconds: int = 180
+    rule_confidence_threshold: float = 0.82
+    max_files_per_request: int = 10
+    max_file_size_mb: int = 20
+    max_sheets_per_file: int = 30
+    max_rows_per_sheet: int = 100_000
+    sample_rows_per_sheet: int = 8
+    upload_dir: Path = Path("runtime/uploads")
+    result_dir: Path = Path("runtime/results")
+    database_url: str = "sqlite:///runtime/shelfcash.db"
+    shelfcash_api_key: str = ""
+    cors_origins: list[str] = ["http://localhost:5173", "http://localhost:3000"]
+
+    @field_validator("cors_origins", mode="before")
+    @classmethod
+    def parse_origins(cls, value):
+        if isinstance(value, str):
+            return [item.strip() for item in value.split(",") if item.strip()]
+        return value
+
+
+@lru_cache
+def get_settings() -> Settings:
+    return Settings()
