@@ -18,6 +18,8 @@ python -m venv .venv
 python -m pip install -r requirements.txt
 copy .env.example .env
 set LLM_PROVIDER=disabled
+alembic upgrade head
+python -m scripts.seed_database
 uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
@@ -26,6 +28,47 @@ PowerShell dùng `$env:LLM_PROVIDER="disabled"`. Linux/macOS có thể dùng:
 ```bash
 LLM_PROVIDER=disabled uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
+
+## Database và migration
+
+Database URL được đọc từ `DATABASE_URL`; mặc định local là:
+
+```dotenv
+DATABASE_URL=sqlite:///runtime/shelfcash.db
+```
+
+Sau khi cài dependencies và trước khi chạy app, tạo hoặc nâng cấp schema:
+
+```bash
+alembic upgrade head
+python -m scripts.seed_database
+```
+
+Seed tạo `STORE_001` và `STORE_TEST_001`. Có thể chạy seed nhiều lần: store đã có
+được giữ nguyên và không bị overwrite.
+
+Lệnh migration cũng áp dụng trực tiếp cho database legacy đã có bảng `imports`.
+Revision foundation kiểm tra bảng này trước khi tạo, giữ nguyên tên bảng, các cột,
+primary key, payload và rows hiện hữu, rồi bổ sung `stores`,
+`idempotency_records`, `audit_logs` và `alembic_version`. Không cần xóa database
+hoặc chạy SQL thủ công.
+
+Application startup không gọi `create_all` và không tự chạy migration. Alembic là
+nguồn quản lý schema cho development và production; cần chạy `alembic upgrade
+head` rõ ràng khi deploy. Test suite tự tạo SQLite database cô lập và chạy
+migration vào database đó.
+
+Checkpoint database foundation này chưa triển khai catalog, inventory, history,
+bootstrap/dashboard, forecast, planning hoặc Purchase Order APIs. Import payload
+legacy và các response `sheets`, `mappings`, `sheet_id`, status hiện tại vẫn được
+giữ nguyên.
+
+Import workflow hiện dùng các bảng normalized `import_jobs`, `import_files`,
+`import_sheet_profiles`, `import_mappings` và `import_issues`; bảng `imports` vẫn
+được duy trì làm compatibility cache. Upload hỗ trợ `.xlsx`, `.xls`, `.xlsm`,
+`.csv`, mặc định tối đa 10 file, 12 MB/file và 50 MB/request. `POST /imports` hỗ
+trợ `Idempotency-Key`. Chi tiết transition, status và lazy backfill:
+[`docs/IMPORT_PERSISTENCE.md`](docs/IMPORT_PERSISTENCE.md).
 
 Test và fake data:
 

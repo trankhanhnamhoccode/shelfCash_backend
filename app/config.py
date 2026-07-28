@@ -9,6 +9,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore", case_sensitive=False)
 
     app_name: str = "shelfcash-backend"
+    app_version: str = "1.0.0"
     environment: str = "development"
     host: str = "0.0.0.0"
     port: int = 8000
@@ -19,7 +20,8 @@ class Settings(BaseSettings):
     qwen_timeout_seconds: int = 180
     rule_confidence_threshold: float = 0.82
     max_files_per_request: int = 10
-    max_file_size_mb: int = 20
+    max_file_size_mb: int = 12
+    max_total_upload_size_mb: int = 50
     max_sheets_per_file: int = 30
     max_rows_per_sheet: int = 100_000
     sample_rows_per_sheet: int = 8

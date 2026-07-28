@@ -1,7 +1,7 @@
 from datetime import date
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, Header, UploadFile, status
 
 from app.dependencies import get_service, require_api_key
 from app.schemas.imports import ConfirmRequest, ImportResponse, ProcessResponse, StatusResponse
@@ -10,11 +10,37 @@ router = APIRouter(prefix="/imports", tags=["imports"], dependencies=[Depends(re
 
 
 def _public_import(record):
-    sheets = [{"sheet_id": s["sheet_id"], "profile": s["profile"], "mapping": s["mapping"]} for s in record["sheets"]]
+    sheets = [
+        {
+            "sheet_id": sheet["sheet_id"],
+            "profile_id": sheet["profile_id"],
+            "profile": sheet["profile"],
+            "mapping": sheet["mapping"],
+        }
+        for sheet in record["sheets"]
+    ]
+    profiles = [
+        {
+            "profile_id": sheet["profile_id"],
+            "sheet_id": sheet["sheet_id"],
+            **sheet["profile"],
+        }
+        for sheet in record["sheets"]
+    ]
+    suggested_mappings = [
+        {
+            "profile_id": sheet["profile_id"],
+            "sheet_id": sheet["sheet_id"],
+            "sheet_name": sheet["profile"]["sheet_name"],
+            **sheet["mapping"],
+        }
+        for sheet in record["sheets"]
+    ]
     return {
         "import_id": record["import_id"], "status": record["status"], "store_id": record.get("store_id"),
         "forecast_date": record.get("forecast_date"), "forecast_horizon": record.get("forecast_horizon"),
-        "sheets": sheets, "warnings": record.get("warnings", []), "errors": record.get("errors", []),
+        "sheets": sheets, "profiles": profiles, "suggested_mappings": suggested_mappings,
+        "warnings": record.get("warnings", []), "errors": record.get("errors", []),
         "requires_review": record.get("requires_review", False), "created_at": record.get("created_at"),
     }
 
@@ -22,46 +48,53 @@ def _public_import(record):
 @router.post("", status_code=status.HTTP_201_CREATED, response_model=ImportResponse)
 async def create_import(
     files: list[UploadFile] = File(...), store_id: str = Form(...),
-    forecast_date: date | None = Form(default=None), forecast_horizon: int = Form(default=7, ge=1),
+    forecast_date: date | None = Form(default=None), forecast_horizon: int = Form(default=7, ge=1, le=90),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     service=Depends(get_service),
 ):
-    return _public_import(await service.create_import(files, store_id, forecast_date, forecast_horizon))
+    return _public_import(
+        await service.create_import(
+            files, store_id, forecast_date, forecast_horizon, idempotency_key
+        )
+    )
 
 
 @router.get("/{import_id}", response_model=StatusResponse)
 def get_import(import_id: UUID, service=Depends(get_service)):
     record = service.get(import_id)
-    if not record:
-        raise HTTPException(404, detail={"code": "import_not_found", "message": "Import not found", "details": {}})
-    return {"import_id": record["import_id"], "status": record["status"], "mappings": _public_import(record)["sheets"], "requires_review": record["requires_review"]}
+    public = _public_import(record)
+    return {
+        "import_id": record["import_id"],
+        "status": record["status"],
+        "mappings": public["sheets"],
+        "sheets": public["sheets"],
+        "profiles": public["profiles"],
+        "suggested_mappings": public["suggested_mappings"],
+        "requires_review": record["requires_review"],
+    }
 
 
 @router.post("/{import_id}/confirm", response_model=StatusResponse)
 def confirm_import(import_id: UUID, payload: ConfirmRequest, service=Depends(get_service)):
-    try:
-        record = service.confirm(import_id, payload.mappings)
-    except KeyError:
-        raise HTTPException(404, detail={"code": "import_not_found", "message": "Import not found", "details": {}})
-    except ValueError as exc:
-        raise HTTPException(422, detail={"code": "invalid_mapping", "message": str(exc), "details": {}})
-    return {"import_id": record["import_id"], "status": record["status"], "mappings": _public_import(record)["sheets"], "requires_review": record["requires_review"]}
+    record = service.confirm(import_id, payload.mappings)
+    public = _public_import(record)
+    return {
+        "import_id": record["import_id"],
+        "status": record["status"],
+        "mappings": public["sheets"],
+        "sheets": public["sheets"],
+        "profiles": public["profiles"],
+        "suggested_mappings": public["suggested_mappings"],
+        "requires_review": record["requires_review"],
+    }
 
 
 @router.post("/{import_id}/process", response_model=ProcessResponse)
 def process_import(import_id: UUID, service=Depends(get_service)):
-    try:
-        record = service.process(import_id)
-    except KeyError:
-        raise HTTPException(404, detail={"code": "import_not_found", "message": "Import not found", "details": {}})
+    record = service.process(import_id)
     return {"import_id": record["import_id"], "status": record["status"], "validation_summary": record["result"]["validation_summary"]}
 
 
 @router.get("/{import_id}/result")
 def get_result(import_id: UUID, service=Depends(get_service)):
-    try:
-        result = service.result(import_id)
-    except KeyError:
-        raise HTTPException(404, detail={"code": "import_not_found", "message": "Import not found", "details": {}})
-    if result is None:
-        raise HTTPException(409, detail={"code": "result_not_ready", "message": "Import has not been processed", "details": {}})
-    return result
+    return service.result(import_id)

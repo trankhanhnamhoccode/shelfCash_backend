@@ -4,7 +4,7 @@ from typing import Any
 
 from json_repair import repair_json
 
-from app.core.rule_mapper import validate_mapping
+from app.core.rule_mapper import finalize_mapping
 from app.llm.base import LLMProvider
 from app.schemas.llm import MappingSuggestion
 
@@ -85,12 +85,12 @@ class LocalQwenProvider(LLMProvider):
         mapping = raw.get("column_mapping", {})
         if set(mapping) != columns:
             raise ValueError("LLM must map every and only source column")
-        warnings, errors = validate_mapping(raw.get("sheet_type", "unknown"), profile.columns, mapping)
-        raw["warnings"] = list(raw.get("warnings", [])) + warnings
-        raw["errors"] = list(raw.get("errors", [])) + errors
         raw["source"] = "llm"
-        raw["requires_review"] = bool(raw["errors"] or any("Missing core fields" in w for w in raw["warnings"]))
-        return MappingSuggestion.model_validate(raw)
+        raw["requires_review"] = False
+        suggestion = MappingSuggestion.model_validate(raw)
+        return finalize_mapping(
+            profile, suggestion, self.settings.rule_confidence_threshold
+        )
 
     async def close(self) -> None:
         self.model = self.tokenizer = None

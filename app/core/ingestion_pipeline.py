@@ -1,6 +1,6 @@
 from app.core.canonical_schemas import CANONICAL_SCHEMAS
 from app.core.normalizer import normalize_rows
-from app.core.rule_mapper import map_sheet_rules, validate_mapping
+from app.core.rule_mapper import finalize_mapping, map_sheet_rules
 from app.core.validator import validate_records
 from app.schemas.llm import MappingSuggestion
 
@@ -11,24 +11,28 @@ class IngestionPipeline:
         self.confidence_threshold = confidence_threshold
 
     async def suggest(self, profile):
-        rule = map_sheet_rules(profile)
+        rule = map_sheet_rules(profile, self.confidence_threshold)
         if rule.confidence >= self.confidence_threshold:
             return rule
         if self.llm_provider.available:
-            return await self.llm_provider.map_sheet(profile, CANONICAL_SCHEMAS, rule)
+            result = await self.llm_provider.map_sheet(profile, CANONICAL_SCHEMAS, rule)
+            return finalize_mapping(profile, result, self.confidence_threshold)
         rule.source = "rule_fallback"
         rule.requires_review = True
         return rule
 
     def confirm(self, profile, sheet_type: str, column_mapping: dict[str, str | None]) -> MappingSuggestion:
         complete_mapping = {column: column_mapping.get(column) for column in profile.columns}
-        warnings, errors = validate_mapping(sheet_type, profile.columns, complete_mapping)
-        if errors:
-            raise ValueError("; ".join(errors))
-        return MappingSuggestion(
+        suggestion = MappingSuggestion(
             sheet_type=sheet_type, confidence=1.0, column_mapping=complete_mapping,
-            warnings=warnings, errors=[], source="rule", requires_review=bool(warnings),
+            warnings=[], errors=[], source="rule", requires_review=False,
         )
+        finalized = finalize_mapping(
+            profile, suggestion, self.confidence_threshold, manual=True
+        )
+        if finalized.errors:
+            raise ValueError("; ".join(finalized.errors))
+        return finalized
 
     def process_sheet(self, sheet):
         mapping = sheet["mapping"]

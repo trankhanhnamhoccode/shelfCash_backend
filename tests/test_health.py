@@ -1,7 +1,13 @@
 def test_health(client):
     response = client.get("/health")
     assert response.status_code == 200
-    assert response.json() == {"status": "ok", "service": "shelfcash-backend"}
+    assert response.json() == {
+        "status": "ok",
+        "service": "shelfcash-backend",
+        "version": "1.0.0",
+        "database": "ready",
+    }
+    assert response.headers["X-Request-ID"]
 
 
 def test_llm_health_disabled(client):

@@ -1,18 +1,53 @@
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from fastapi.exceptions import RequestValidationError
-from pydantic import ValidationError
+from pydantic import ValidationError as PydanticValidationError
 
 from app.api import health, imports, llm
 from app.config import Settings, get_settings
+from app.core.exceptions import ShelfCashError
 from app.core.excel_reader import ExcelIngestionError
 from app.core.ingestion_pipeline import IngestionPipeline
+from app.core.request_id import RequestIdMiddleware
+from app.db.session import create_engine_from_settings, create_session_factory
 from app.llm.factory import create_llm_provider
-from app.repositories.sqlite_imports import SQLiteImportRepository
 from app.services.import_service import ImportService
+
+
+def _request_id(request: Request) -> str | None:
+    return getattr(request.state, "request_id", None)
+
+
+def _error_content(request: Request, code: str, message: str, details: dict) -> dict:
+    return {
+        "code": code,
+        "message": message,
+        "details": details,
+        "request_id": _request_id(request),
+    }
+
+
+def _error_response(
+    request: Request,
+    *,
+    status_code: int,
+    code: str,
+    message: str,
+    details: dict,
+    headers: dict[str, str] | None = None,
+) -> JSONResponse:
+    response_headers = dict(headers or {})
+    request_id = _request_id(request)
+    if request_id:
+        response_headers["X-Request-ID"] = request_id
+    return JSONResponse(
+        status_code=status_code,
+        content=_error_content(request, code, message, details),
+        headers=response_headers,
+    )
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -22,18 +57,27 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def lifespan(app: FastAPI):
         active_settings.upload_dir.mkdir(parents=True, exist_ok=True)
         active_settings.result_dir.mkdir(parents=True, exist_ok=True)
-        repository = SQLiteImportRepository(active_settings.database_url)
+        engine = create_engine_from_settings(active_settings)
+        session_factory = create_session_factory(engine)
         provider = create_llm_provider(active_settings)
-        if active_settings.llm_provider == "local_qwen":
-            await provider.load()
-        pipeline = IngestionPipeline(provider, active_settings.rule_confidence_threshold)
         app.state.settings = active_settings
+        app.state.engine = engine
+        app.state.session_factory = session_factory
         app.state.llm_provider = provider
-        app.state.import_service = ImportService(repository, pipeline, active_settings)
-        yield
-        await provider.close()
+        try:
+            if active_settings.llm_provider == "local_qwen":
+                await provider.load()
+            pipeline = IngestionPipeline(provider, active_settings.rule_confidence_threshold)
+            app.state.import_service = ImportService(
+                session_factory, pipeline, active_settings
+            )
+            yield
+        finally:
+            await provider.close()
+            engine.dispose()
 
     app = FastAPI(title=active_settings.app_name, lifespan=lifespan)
+    app.add_middleware(RequestIdMiddleware)
     app.add_middleware(
         CORSMiddleware, allow_origins=active_settings.cors_origins, allow_credentials=True,
         allow_methods=["*"], allow_headers=["*"],
@@ -43,26 +87,70 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(imports.router, prefix="/api/v1")
 
     @app.exception_handler(ExcelIngestionError)
-    async def excel_error(_: Request, exc: ExcelIngestionError):
-        return JSONResponse(status_code=400, content={"code": exc.code, "message": exc.message, "details": exc.details})
+    async def excel_error(request: Request, exc: ExcelIngestionError):
+        return _error_response(
+            request,
+            status_code=exc.status_code,
+            code=exc.code,
+            message=exc.message,
+            details=exc.details,
+        )
+
+    @app.exception_handler(ShelfCashError)
+    async def domain_error(request: Request, exc: ShelfCashError):
+        return _error_response(
+            request,
+            status_code=exc.http_status,
+            code=exc.code,
+            message=exc.message,
+            details=exc.details,
+        )
 
     @app.exception_handler(HTTPException)
-    async def http_error(_: Request, exc: HTTPException):
+    async def http_error(request: Request, exc: HTTPException):
         if isinstance(exc.detail, dict) and {"code", "message", "details"} <= set(exc.detail):
-            content = exc.detail
+            content = _error_content(
+                request,
+                str(exc.detail["code"]),
+                str(exc.detail["message"]),
+                exc.detail["details"],
+            )
         else:
-            content = {"code": "http_error", "message": str(exc.detail), "details": {}}
-        return JSONResponse(status_code=exc.status_code, content=content, headers=exc.headers)
+            content = _error_content(request, "http_error", str(exc.detail), {})
+        response_headers = dict(exc.headers or {})
+        request_id = _request_id(request)
+        if request_id:
+            response_headers["X-Request-ID"] = request_id
+        return JSONResponse(status_code=exc.status_code, content=content, headers=response_headers)
 
-    @app.exception_handler(ValidationError)
-    async def validation_error(_: Request, exc: ValidationError):
-        return JSONResponse(status_code=422, content={"code": "validation_error", "message": "Request validation failed", "details": {"errors": exc.errors()}})
+    @app.exception_handler(PydanticValidationError)
+    async def validation_error(request: Request, exc: PydanticValidationError):
+        return _error_response(
+            request,
+            status_code=422,
+            code="validation_error",
+            message="Request validation failed",
+            details={"errors": exc.errors()},
+        )
 
     @app.exception_handler(RequestValidationError)
-    async def request_validation_error(_: Request, exc: RequestValidationError):
-        return JSONResponse(
+    async def request_validation_error(request: Request, exc: RequestValidationError):
+        return _error_response(
+            request,
             status_code=422,
-            content={"code": "validation_error", "message": "Request validation failed", "details": {"errors": exc.errors()}},
+            code="validation_error",
+            message="Request validation failed",
+            details={"errors": exc.errors()},
+        )
+
+    @app.exception_handler(Exception)
+    async def unknown_error(request: Request, _: Exception):
+        return _error_response(
+            request,
+            status_code=500,
+            code="INTERNAL_ERROR",
+            message="Internal server error.",
+            details={},
         )
     return app
 

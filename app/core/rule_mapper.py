@@ -69,6 +69,13 @@ def _alias_map() -> dict[str, str]:
 
 
 NORMALIZED_ALIASES = _alias_map()
+STRUCTURAL_WARNING_PREFIXES = (
+    "missing core fields",
+    "multiple columns map to the same field",
+    "fields outside schema",
+    "mapping contains unknown source columns",
+    "unknown source columns",
+)
 
 
 def validate_mapping(sheet_type: str, columns: list[str], mapping: dict[str, str | None]) -> tuple[list[str], list[str]]:
@@ -96,7 +103,43 @@ def validate_mapping(sheet_type: str, columns: list[str], mapping: dict[str, str
     return warnings, errors
 
 
-def map_sheet_rules(profile: SheetProfile) -> MappingSuggestion:
+def _is_structural_warning(message: str) -> bool:
+    normalized = message.strip().lower()
+    return any(normalized.startswith(prefix) for prefix in STRUCTURAL_WARNING_PREFIXES)
+
+
+def finalize_mapping(
+    profile: SheetProfile,
+    suggestion: MappingSuggestion,
+    confidence_threshold: float,
+    *,
+    manual: bool = False,
+) -> MappingSuggestion:
+    complete_mapping = {column: suggestion.column_mapping.get(column) for column in profile.columns}
+    fresh_warnings, fresh_errors = validate_mapping(
+        suggestion.sheet_type, profile.columns, complete_mapping
+    )
+    semantic_warnings = [
+        warning for warning in suggestion.warnings if not _is_structural_warning(warning)
+    ]
+    warnings = list(dict.fromkeys([*semantic_warnings, *fresh_warnings]))
+    errors = list(dict.fromkeys(fresh_errors))
+    missing_core = any(warning.lower().startswith("missing core fields") for warning in warnings)
+    confidence_review = False if manual else suggestion.confidence < confidence_threshold
+    return MappingSuggestion(
+        sheet_type=suggestion.sheet_type,
+        confidence=1.0 if manual else suggestion.confidence,
+        column_mapping=complete_mapping,
+        warnings=warnings,
+        errors=errors,
+        source=suggestion.source,
+        requires_review=bool(errors or missing_core or confidence_review),
+    )
+
+
+def map_sheet_rules(
+    profile: SheetProfile, confidence_threshold: float = 0.82
+) -> MappingSuggestion:
     name = normalize_text(profile.sheet_name)
     scores = {kind: sum(1 for keyword in keywords if normalize_text(keyword) in name) for kind, keywords in SHEET_KEYWORDS.items()}
     sheet_type = max(scores, key=scores.get) if max(scores.values(), default=0) else "unknown"
@@ -112,5 +155,13 @@ def map_sheet_rules(profile: SheetProfile) -> MappingSuggestion:
     column_score = matches / max(1, len(profile.columns))
     confidence = round(0.55 * keyword_score + 0.45 * column_score, 3) if sheet_type != "unknown" else round(0.35 * column_score, 3)
     warnings, errors = validate_mapping(sheet_type, profile.columns, mapping)
-    requires_review = bool(errors or any("Missing core fields" in w for w in warnings) or confidence < 0.82)
-    return MappingSuggestion(sheet_type=sheet_type, confidence=confidence, column_mapping=mapping, warnings=warnings, errors=errors, source="rule", requires_review=requires_review)
+    suggestion = MappingSuggestion(
+        sheet_type=sheet_type,
+        confidence=confidence,
+        column_mapping=mapping,
+        warnings=warnings,
+        errors=errors,
+        source="rule",
+        requires_review=False,
+    )
+    return finalize_mapping(profile, suggestion, confidence_threshold)

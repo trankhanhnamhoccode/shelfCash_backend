@@ -11,3 +11,4 @@ runtime/results/*
 !runtime/results/.gitkeep
 runtime/*.db
 runtime/*.xlsx
+*.db

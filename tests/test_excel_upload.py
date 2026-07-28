@@ -20,12 +20,12 @@ def test_upload_workbook(client):
 
 
 def test_invalid_extension(client):
-    response = client.post("/api/v1/imports", data={"store_id": "S"}, files={"files": ("bad.csv", b"a,b\n1,2", "text/csv")})
+    response = client.post("/api/v1/imports", data={"store_id": "S"}, files={"files": ("bad.txt", b"a,b\n1,2", "text/plain")})
     assert response.status_code == 400
     assert response.json()["code"] == "invalid_file_extension"
 
 
 def test_file_too_large(client):
     response = client.post("/api/v1/imports", data={"store_id": "S"}, files={"files": ("huge.xlsx", b"x" * (1024 * 1024 + 1), "application/octet-stream")})
-    assert response.status_code == 400
+    assert response.status_code == 413
     assert response.json()["code"] == "file_too_large"

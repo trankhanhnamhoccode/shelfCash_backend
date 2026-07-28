@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 
 from app.core.canonical_schemas import CANONICAL_SCHEMAS
 from app.core.rule_mapper import map_sheet_rules
@@ -14,8 +14,13 @@ def llm_health(provider=Depends(get_llm_provider)):
 
 
 @router.post("/map-sheet", response_model=MappingSuggestion, dependencies=[Depends(require_api_key)])
-async def map_sheet(payload: MapSheetRequest, provider=Depends(get_llm_provider)):
-    rule = map_sheet_rules(payload.profile)
+async def map_sheet(
+    payload: MapSheetRequest,
+    request: Request,
+    provider=Depends(get_llm_provider),
+):
+    threshold = request.app.state.settings.rule_confidence_threshold
+    rule = map_sheet_rules(payload.profile, threshold)
     if provider.available:
         return await provider.map_sheet(payload.profile, CANONICAL_SCHEMAS, rule)
     rule.source = "rule_fallback"

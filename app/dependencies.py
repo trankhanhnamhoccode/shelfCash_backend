@@ -2,6 +2,8 @@ import secrets
 
 from fastapi import Header, HTTPException, Request
 
+from app.db.unit_of_work import UnitOfWork
+
 
 def get_service(request: Request):
     return request.app.state.import_service
@@ -9,6 +11,18 @@ def get_service(request: Request):
 
 def get_llm_provider(request: Request):
     return request.app.state.llm_provider
+
+
+def get_db_session(request: Request):
+    session = request.app.state.session_factory()
+    try:
+        yield session
+    finally:
+        session.close()
+
+
+def get_unit_of_work(request: Request) -> UnitOfWork:
+    return UnitOfWork(request.app.state.session_factory)
 
 
 def require_api_key(request: Request, x_shelfcash_key: str | None = Header(default=None)):

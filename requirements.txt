@@ -8,6 +8,7 @@ openpyxl
 xlrd
 json-repair
 sqlalchemy
+alembic
 httpx
 pytest
 pytest-asyncio

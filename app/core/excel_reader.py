@@ -7,13 +7,20 @@ import pandas as pd
 
 from app.schemas.llm import SheetProfile
 
-ALLOWED_EXTENSIONS = {".xlsx", ".xls", ".xlsm"}
+ALLOWED_EXTENSIONS = {".xlsx", ".xls", ".xlsm", ".csv"}
 
 
 class ExcelIngestionError(ValueError):
-    def __init__(self, code: str, message: str, details: dict | None = None):
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        details: dict | None = None,
+        status_code: int = 400,
+    ):
         super().__init__(message)
         self.code, self.message, self.details = code, message, details or {}
+        self.status_code = status_code
 
 
 @dataclass
@@ -63,6 +70,34 @@ def read_workbook(
     extension = Path(safe_name).suffix.lower()
     if extension not in ALLOWED_EXTENSIONS:
         raise ExcelIngestionError("invalid_file_extension", f"Unsupported Excel extension: {extension}")
+    if extension == ".csv":
+        try:
+            frame = pd.read_csv(BytesIO(content), dtype=object, encoding="utf-8-sig")
+        except Exception as exc:
+            raise ExcelIngestionError("invalid_csv_file", "Could not read CSV file") from exc
+        frame = frame.dropna(how="all")
+        if len(frame) > max_rows:
+            raise ExcelIngestionError("too_many_rows", f"CSV exceeds {max_rows} rows")
+        columns = [
+            str(column).strip() if str(column).strip() else f"column_{index + 1}"
+            for index, column in enumerate(frame.columns)
+        ]
+        frame.columns = columns
+        rows = [
+            {key: _json_value(value) for key, value in row.items()}
+            for row in frame.to_dict(orient="records")
+        ]
+        profile = SheetProfile(
+            file_name=safe_name,
+            sheet_name=Path(safe_name).stem,
+            header_row_zero_based=0,
+            row_count=len(frame),
+            column_count=len(columns),
+            columns=columns,
+            dtypes={column: str(frame[column].infer_objects().dtype) for column in columns},
+            sample_rows=rows[:sample_rows],
+        )
+        return [ParsedSheet(f"0:{profile.sheet_name}", profile, rows)]
     try:
         book = pd.ExcelFile(BytesIO(content), engine="xlrd" if extension == ".xls" else "openpyxl")
     except Exception as exc:
