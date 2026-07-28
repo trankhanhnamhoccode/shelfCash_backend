@@ -70,6 +70,11 @@ Import workflow hiện dùng các bảng normalized `import_jobs`, `import_files
 trợ `Idempotency-Key`. Chi tiết transition, status và lazy backfill:
 [`docs/IMPORT_PERSISTENCE.md`](docs/IMPORT_PERSISTENCE.md).
 
+Revision `20260728_0003` adds the canonical, store-scoped business schema and
+repository foundation. Apply it with `alembic upgrade head`; details are in
+[`docs/CANONICAL_BUSINESS_SCHEMA.md`](docs/CANONICAL_BUSINESS_SCHEMA.md).
+Checkpoint 2B1 does not make the import processor write business rows.
+
 Test và fake data:
 
 ```bash
