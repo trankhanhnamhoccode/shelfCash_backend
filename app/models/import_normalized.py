@@ -42,6 +42,9 @@ class ImportJobModel(Base):
     failure_message: Mapped[str | None] = mapped_column(String(500), nullable=True)
     result_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     validation_summary_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    business_persisted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    business_schema_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    business_write_summary_json: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class ImportFileModel(Base):

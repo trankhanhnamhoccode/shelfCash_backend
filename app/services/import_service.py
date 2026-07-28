@@ -44,6 +44,7 @@ from app.schemas.canonical import CanonicalResult
 from app.schemas.llm import MappingSuggestion, SheetProfile
 from app.services.audit_service import AuditService
 from app.services.idempotency_service import IdempotencyService
+from app.services.business_persistence import ImportBusinessPersistenceService, SCHEMA_VERSION
 
 
 @dataclass
@@ -321,12 +322,12 @@ class ImportService:
         with self.session_factory() as session:
             repository = NormalizedImportRepository(session)
             job = self._require_job(repository, import_id)
-            if job.status == "completed" and job.result_json:
+            if job.status == "completed" and job.result_json and job.business_persisted_at:
                 session.commit()
                 return repository.to_record(job)
             if job.status == "processing":
                 raise ImportProcessingError(details={"import_id": import_id})
-            if job.status != "confirmed":
+            if job.status not in {"confirmed", "completed"}:
                 raise InvalidStateTransitionError(
                     "Import phải được xác nhận mapping trước khi xử lý.",
                     {
@@ -350,6 +351,7 @@ class ImportService:
                     kind: [] for kind in CANONICAL_SCHEMAS if kind != "unknown"
                 }
                 summary: dict[str, Any] = {}
+                business_sheets: list[dict[str, Any]] = []
                 profiles_by_id = {
                     profile.profile_id: profile
                     for profile in repository.profiles(import_id)
@@ -358,8 +360,28 @@ class ImportService:
                     profile = profiles_by_id[mapping.profile_id]
                     sheet = self._pipeline_sheet(repository, profile, mapping)
                     kind, rows, validation = self.pipeline.process_sheet(sheet)
+                    if validation["errors"]:
+                        repository.replace_issues(
+                            import_id=import_id,
+                            profile_id=profile.profile_id,
+                            issue_source="business_persistence",
+                            row_errors=validation["errors"],
+                        )
+                        raise ValidationError(
+                            "Import chứa row không hợp lệ; không ghi business data.",
+                            {"profile_id": profile.profile_id, "sheet_id": profile.compatibility_sheet_id},
+                        )
                     if kind != "unknown":
                         canonical_data[kind].extend(rows)
+                    if mapping.confirmed:
+                        business_sheets.append(
+                            {
+                                "sheet_type": kind,
+                                "profile_id": profile.profile_id,
+                                "sheet_id": profile.compatibility_sheet_id,
+                                "rows": rows,
+                            }
+                        )
                     summary[profile.compatibility_sheet_id] = validation
                     repository.replace_issues(
                         import_id=import_id,
@@ -382,8 +404,14 @@ class ImportService:
                         "sheet_count": len(profiles_by_id),
                     },
                 ).model_dump(mode="json")
+                business_summary = ImportBusinessPersistenceService(session).persist(
+                    job=job, sheets=business_sheets
+                )
                 job.result_json = json_dump(canonical)
                 job.validation_summary_json = json_dump(summary)
+                job.business_write_summary_json = json_dump(business_summary)
+                job.business_schema_version = SCHEMA_VERSION
+                job.business_persisted_at = datetime.now(timezone.utc)
                 job.status = "completed"
                 job.legacy_status = "processed"
                 job.completed_at = datetime.now(timezone.utc)
@@ -397,13 +425,16 @@ class ImportService:
                     action="import_completed",
                     record=record,
                     file_count=len(repository.files(import_id)),
+                    business_summary=business_summary,
                 )
-
-                temp_path.write_text(
-                    json.dumps(canonical, ensure_ascii=False), encoding="utf-8"
-                )
-                temp_path.replace(result_path)
                 session.commit()
+                try:
+                    temp_path.write_text(
+                        json.dumps(canonical, ensure_ascii=False), encoding="utf-8"
+                    )
+                    temp_path.replace(result_path)
+                except OSError:
+                    temp_path.unlink(missing_ok=True)
                 return record
             except Exception as exc:
                 session.rollback()
@@ -683,7 +714,10 @@ class ImportService:
             },
         }
 
-    def _audit(self, session, *, action: str, record: dict, file_count: int) -> None:
+    def _audit(
+        self, session, *, action: str, record: dict, file_count: int,
+        business_summary: dict[str, int] | None = None,
+    ) -> None:
         warning_count, error_count = NormalizedImportRepository(session).issue_counts(
             record["import_id"]
         )
@@ -700,6 +734,23 @@ class ImportService:
                 "profile_count": len(record["sheets"]),
                 "warning_count": warning_count,
                 "error_count": error_count,
+                **(
+                    {
+                        "business_schema_version": SCHEMA_VERSION,
+                        "business_summary": business_summary,
+                        "business_rows_created": sum(
+                            value for key, value in business_summary.items()
+                            if key.endswith("_created")
+                        ),
+                        "business_rows_updated": sum(
+                            value for key, value in business_summary.items()
+                            if key.endswith("_updated")
+                        ),
+                        "duplicates_skipped": business_summary["rows_skipped"],
+                    }
+                    if business_summary is not None
+                    else {}
+                ),
             },
             source="import_api",
         )
@@ -720,7 +771,11 @@ class ImportService:
             repository.replace_issues(
                 import_id=import_id,
                 profile_id=None,
-                issue_source="processing",
+                issue_source=(
+                    "business_persistence"
+                    if isinstance(exc, ValidationError)
+                    else "processing"
+                ),
                 errors=[job.failure_message],
             )
             session.flush()

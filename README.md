@@ -75,6 +75,13 @@ repository foundation. Apply it with `alembic upgrade head`; details are in
 [`docs/CANONICAL_BUSINESS_SCHEMA.md`](docs/CANONICAL_BUSINESS_SCHEMA.md).
 Checkpoint 2B1 does not make the import processor write business rows.
 
+Revision `20260728_0004` connects confirmed import processing to those canonical
+business tables with all-or-nothing transactions, deterministic provenance and
+natural-key correction/deduplication. Run `alembic upgrade head` before starting
+the app. See
+[`docs/IMPORT_TO_BUSINESS_PERSISTENCE.md`](docs/IMPORT_TO_BUSINESS_PERSISTENCE.md).
+Public business CRUD APIs and forecast/plan/PO remain unimplemented.
+
 Test và fake data:
 
 ```bash

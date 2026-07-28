@@ -177,6 +177,7 @@ class InventoryLotModel(Base):
         CheckConstraint(UNIT_CHECK, name="ck_inventory_lot_unit"),
         Index("ix_inventory_lots_store_ingredient", "store_id", "ingredient_id"),
         Index("ix_inventory_lots_expiry_date", "expiry_date"),
+        UniqueConstraint("store_id", "reconciliation_key", name="uq_inventory_lot_reconciliation"),
     )
     lot_id: Mapped[str] = mapped_column(String(36), primary_key=True)
     store_id: Mapped[str] = mapped_column(String(128), ForeignKey("stores.store_id"), nullable=False)
@@ -193,6 +194,7 @@ class InventoryLotModel(Base):
     source_profile_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("import_sheet_profiles.profile_id"))
     source_row_hash: Mapped[str | None] = mapped_column(String(64))
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    reconciliation_key: Mapped[str | None] = mapped_column(String(64))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now)
 
@@ -228,6 +230,7 @@ class SalesDailyModel(Base):
         CheckConstraint("quantity >= 0", name="ck_sales_quantity"),
         CheckConstraint("unit_price IS NULL OR unit_price >= 0", name="ck_sales_price"),
         Index("ix_sales_store_date", "store_id", "date"), Index("ix_sales_product_date", "product_id", "date"),
+        UniqueConstraint("store_id", "date", "product_id", "promotion", name="uq_sales_natural_key"),
     )
     sales_record_id: Mapped[str] = mapped_column(String(36), primary_key=True)
     store_id: Mapped[str] = mapped_column(String(128), ForeignKey("stores.store_id"), nullable=False)
@@ -241,6 +244,8 @@ class SalesDailyModel(Base):
     profile_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("import_sheet_profiles.profile_id"))
     source_row_hash: Mapped[str | None] = mapped_column(String(64))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, default=utc_now, onupdate=utc_now)
+    natural_key_hash: Mapped[str | None] = mapped_column(String(64))
 
 
 class UsageDailyModel(Base):
@@ -249,6 +254,7 @@ class UsageDailyModel(Base):
         UniqueConstraint("import_id", "profile_id", "source_row_hash", name="uq_usage_provenance"),
         CheckConstraint("quantity >= 0", name="ck_usage_quantity"), CheckConstraint(UNIT_CHECK, name="ck_usage_unit"),
         Index("ix_usage_store_date", "store_id", "date"), Index("ix_usage_ingredient_date", "ingredient_id", "date"),
+        UniqueConstraint("store_id", "date", "ingredient_id", name="uq_usage_natural_key"),
     )
     usage_record_id: Mapped[str] = mapped_column(String(36), primary_key=True)
     store_id: Mapped[str] = mapped_column(String(128), ForeignKey("stores.store_id"), nullable=False)
@@ -261,6 +267,8 @@ class UsageDailyModel(Base):
     profile_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("import_sheet_profiles.profile_id"))
     source_row_hash: Mapped[str | None] = mapped_column(String(64))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, default=utc_now, onupdate=utc_now)
+    natural_key_hash: Mapped[str | None] = mapped_column(String(64))
 
 
 class PurchaseReceiptModel(Base):
@@ -272,6 +280,7 @@ class PurchaseReceiptModel(Base):
         CheckConstraint("expiry_date IS NULL OR expiry_date >= receipt_date", name="ck_receipt_dates"),
         CheckConstraint(UNIT_CHECK, name="ck_receipt_unit"),
         Index("ix_receipts_store_date", "store_id", "receipt_date"), Index("ix_receipts_ingredient_date", "ingredient_id", "receipt_date"),
+        UniqueConstraint("store_id", "business_key_hash", name="uq_receipt_business_key"),
     )
     receipt_id: Mapped[str] = mapped_column(String(36), primary_key=True)
     store_id: Mapped[str] = mapped_column(String(128), ForeignKey("stores.store_id"), nullable=False)
@@ -287,6 +296,7 @@ class PurchaseReceiptModel(Base):
     import_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("import_jobs.import_id"))
     profile_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("import_sheet_profiles.profile_id"))
     source_row_hash: Mapped[str | None] = mapped_column(String(64))
+    business_key_hash: Mapped[str | None] = mapped_column(String(64))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
 
 

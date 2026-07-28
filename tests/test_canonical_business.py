@@ -59,17 +59,26 @@ def test_migration_empty_0002_populated_and_downgrade(tmp_path):
 
     old = tmp_path / "old.db"
     old_config = config_for(old)
-    command.upgrade(old_config, "20260728_0002")
+    command.upgrade(old_config, "20260728_0003")
     engine = create_engine_from_url(f"sqlite:///{old.as_posix()}")
     factory = create_session_factory(engine)
     seed_database(factory)
-    with factory() as session:
-        session.add(ImportJobModel(
-            import_id="00000000-0000-0000-0000-000000000003",
-            store_id="STORE_001", forecast_horizon=7, status="completed",
-            requires_review=False, result_json="{}",
-        ))
-        session.commit()
+    with engine.begin() as connection:
+        connection.exec_driver_sql(
+            "INSERT INTO import_jobs "
+            "(import_id, store_id, forecast_horizon, status, requires_review, created_at, result_json) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("00000000-0000-0000-0000-000000000003", "STORE_001", 7,
+             "completed", 0, datetime.now(timezone.utc), "{}"),
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO ingredients "
+            "(ingredient_id, store_id, ingredient, normalized_name, base_unit, active, source, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            ("00000000-0000-0000-0000-000000000004", "STORE_001", "Legacy flour",
+             "legacy flour", "kg", 1, "manual", datetime.now(timezone.utc),
+             datetime.now(timezone.utc)),
+        )
     engine.dispose()
     command.upgrade(old_config, "head")
     engine = create_engine(f"sqlite:///{old.as_posix()}")
@@ -78,9 +87,13 @@ def test_migration_empty_0002_populated_and_downgrade(tmp_path):
             "SELECT status FROM import_jobs WHERE import_id = ?",
             ("00000000-0000-0000-0000-000000000003",),
         ).scalar_one() == "completed"
-    command.downgrade(old_config, "20260728_0002")
+        assert connection.exec_driver_sql(
+            "SELECT ingredient FROM ingredients WHERE ingredient_id = ?",
+            ("00000000-0000-0000-0000-000000000004",),
+        ).scalar_one() == "Legacy flour"
+    command.downgrade(old_config, "20260728_0003")
     tables = set(inspect(engine).get_table_names())
-    assert not BUSINESS_TABLES & tables
+    assert BUSINESS_TABLES <= tables
     assert {"imports", "import_jobs", "import_sheet_profiles"} <= tables
     engine.dispose()
 
