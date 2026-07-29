@@ -82,6 +82,15 @@ the app. See
 [`docs/IMPORT_TO_BUSINESS_PERSISTENCE.md`](docs/IMPORT_TO_BUSINESS_PERSISTENCE.md).
 Public business CRUD APIs and forecast/plan/PO remain unimplemented.
 
+Revision `20260728_0005` adds version fields for catalog concurrency and exposes
+contract-aligned store-path ingredient, product, active-recipe and alias-read APIs. Apply it with
+`alembic upgrade head`; API details are in
+[`docs/CATALOG_AND_RECIPE_API.md`](docs/CATALOG_AND_RECIPE_API.md). Seed stores
+remain `STORE_001` and `STORE_TEST_001`. Supplier/settings/calendar APIs belong
+to Checkpoint 3A2; inventory/history/bootstrap/forecast/plan/PO are still absent.
+Alias-list PUT accepts an `aliases` array and performs transactional additive
+bulk upsert scoped by the store path.
+
 Test và fake data:
 
 ```bash

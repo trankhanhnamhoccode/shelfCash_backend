@@ -39,6 +39,8 @@ class IngredientModel(Base):
         UniqueConstraint("store_id", "sku", name="uq_ingredients_store_sku"),
         CheckConstraint("base_unit IN ('kg','g','lít','ml','cái')", name="ck_ingredients_base_unit"),
         Index("ix_ingredients_normalized_name", "normalized_name"),
+        CheckConstraint("version >= 1", name="ck_ingredients_version"),
+        Index("ix_ingredients_store_active", "store_id", "active"),
     )
     ingredient_id: Mapped[str] = mapped_column(String(36), primary_key=True)
     store_id: Mapped[str] = mapped_column(String(128), ForeignKey("stores.store_id"), index=True, nullable=False)
@@ -48,6 +50,7 @@ class IngredientModel(Base):
     base_unit: Mapped[str] = mapped_column(String(16), nullable=False)
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     source: Mapped[str] = mapped_column(String(32), nullable=False, default="manual")
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now)
 
@@ -70,6 +73,8 @@ class ProductModel(Base):
         UniqueConstraint("store_id", "sku", name="uq_products_store_sku"),
         CheckConstraint("price IS NULL OR price >= 0", name="ck_products_price"),
         Index("ix_products_normalized_name", "normalized_name"),
+        CheckConstraint("version >= 1", name="ck_products_version"),
+        Index("ix_products_store_active", "store_id", "active"),
     )
     product_id: Mapped[str] = mapped_column(String(36), primary_key=True)
     store_id: Mapped[str] = mapped_column(String(128), ForeignKey("stores.store_id"), index=True, nullable=False)
@@ -79,6 +84,7 @@ class ProductModel(Base):
     price: Mapped[int | None] = mapped_column(Integer)
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     source: Mapped[str] = mapped_column(String(32), nullable=False, default="manual")
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now)
 
@@ -197,6 +203,7 @@ class InventoryLotModel(Base):
     reconciliation_key: Mapped[str | None] = mapped_column(String(64))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now)
+    last_counted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class InventoryMovementModel(Base):
@@ -246,6 +253,7 @@ class SalesDailyModel(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
     updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, default=utc_now, onupdate=utc_now)
     natural_key_hash: Mapped[str | None] = mapped_column(String(64))
+    external_record_id: Mapped[str | None] = mapped_column(String(255))
 
 
 class UsageDailyModel(Base):
@@ -298,6 +306,10 @@ class PurchaseReceiptModel(Base):
     source_row_hash: Mapped[str | None] = mapped_column(String(64))
     business_key_hash: Mapped[str | None] = mapped_column(String(64))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+    external_record_id: Mapped[str | None] = mapped_column(String(255))
+    inventory_effect: Mapped[str] = mapped_column(String(32), nullable=False, default="record_only")
+    po_id: Mapped[str | None] = mapped_column(String(36))
+    po_line_id: Mapped[str | None] = mapped_column(String(36))
 
 
 class CalendarFeatureModel(Base):

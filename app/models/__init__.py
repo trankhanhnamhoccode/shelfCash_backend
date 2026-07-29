@@ -31,3 +31,4 @@ __all__ = [
     "SupplierIngredientTermModel", "InventoryLotModel", "InventoryMovementModel",
     "SalesDailyModel", "UsageDailyModel", "PurchaseReceiptModel", "CalendarFeatureModel",
 ]
+from app.models.operations import BudgetPeriodModel, ForecastRunModel, PlanRunModel, PurchaseOrderLineModel, PurchaseOrderModel, RecommendationModel

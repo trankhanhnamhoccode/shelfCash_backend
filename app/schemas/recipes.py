@@ -1,0 +1,44 @@
+from datetime import date, datetime
+from decimal import Decimal
+
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class RecipeLineWrite(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    ingredient_id: str
+    quantity: Decimal = Field(gt=0, allow_inf_nan=False)
+    unit: str
+
+
+class RecipeWrite(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    effective_from: date
+    version: int = Field(ge=0)
+    lines: list[RecipeLineWrite] = Field(min_length=1)
+
+
+class RecipeLineResponse(BaseModel):
+    recipe_line_id: str
+    ingredient_id: str
+    ingredient: str
+    quantity: str
+    unit: str
+
+
+class RecipeVersionResponse(BaseModel):
+    recipe_version_id: str
+    version: int
+    effective_from: date
+    effective_to: date | None
+    content_hash: str
+    lines: list[RecipeLineResponse]
+    created_at: datetime
+
+
+class ActiveRecipeResponse(BaseModel):
+    product_id: str
+    store_id: str
+    recipe: RecipeVersionResponse | None

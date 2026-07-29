@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError as PydanticValidationError
 
-from app.api import health, imports, llm
+from app.api import catalog, completion, health, imports, llm, operational, recipes
 from app.config import Settings, get_settings
 from app.core.exceptions import ShelfCashError
 from app.core.excel_reader import ExcelIngestionError
@@ -15,6 +15,9 @@ from app.core.request_id import RequestIdMiddleware
 from app.db.session import create_engine_from_settings, create_session_factory
 from app.llm.factory import create_llm_provider
 from app.services.import_service import ImportService
+from app.services.catalog_service import CatalogApiService, RecipeApiService
+from app.services.operational_service import OperationalService
+from app.services.completion_service import CompletionService
 
 
 def _request_id(request: Request) -> str | None:
@@ -71,6 +74,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             app.state.import_service = ImportService(
                 session_factory, pipeline, active_settings
             )
+            app.state.catalog_service = CatalogApiService(session_factory)
+            app.state.recipe_api_service = RecipeApiService(session_factory)
+            app.state.operational_service = OperationalService(session_factory)
+            app.state.completion_service = CompletionService(session_factory, app.state.operational_service)
             yield
         finally:
             await provider.close()
@@ -85,6 +92,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(health.router)
     app.include_router(llm.router, prefix="/api/v1")
     app.include_router(imports.router, prefix="/api/v1")
+    app.include_router(catalog.router, prefix="/api/v1")
+    app.include_router(recipes.router, prefix="/api/v1")
+    app.include_router(operational.router, prefix="/api/v1")
+    app.include_router(completion.router, prefix="/api/v1")
 
     @app.exception_handler(ExcelIngestionError)
     async def excel_error(request: Request, exc: ExcelIngestionError):

@@ -45,6 +45,12 @@ class DuplicateRequestError(ShelfCashError):
     http_status = 409
 
 
+class DuplicateResourceError(ShelfCashError):
+    code = "DUPLICATE_REQUEST"
+    default_message = "Tài nguyên đã tồn tại."
+    http_status = 409
+
+
 class ImportNotFoundError(ResourceNotFoundError):
     code = "IMPORT_NOT_FOUND"
     default_message = "Không tìm thấy import."
