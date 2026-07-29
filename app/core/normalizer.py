@@ -6,11 +6,12 @@ import pandas as pd
 
 DATE_FIELDS = {"date", "snapshot_date", "expiry_date", "effective_date", "purchase_date"}
 BOOLEAN_FIELDS = {"is_stockout", "is_weekend", "is_holiday", "is_store_closed", "is_promotion"}
-UNIT_FIELDS = {"unit", "ingredient_unit", "yield_unit", "order_unit", "package_base_unit"}
+UNIT_FIELDS = {"unit", "ingredient_unit", "yield_unit", "package_base_unit"}
 NUMERIC_FIELDS = {
     "on_hand", "quantity_sold", "selling_price", "revenue", "quantity_used", "waste_quantity",
     "ingredient_quantity", "yield_quantity", "quantity_received", "unit_price", "total_cost",
     "minimum_order_quantity", "package_size", "lead_time_days", "temperature", "rainfall", "value",
+    "list_price", "discount_rate", "savings_amount",
 }
 UNIT_MAP = {"kg": "kilogram", "g": "gram", "l": "liter", "lit": "liter", "lít": "liter", "ml": "milliliter", "cai": "piece", "cái": "piece", "chiec": "piece", "chiếc": "piece", "ly": "cup", "hop": "box", "hộp": "box", "thung": "case", "thùng": "case", "chai": "bottle", "goi": "package", "gói": "package"}
 TRUE_VALUES = {"true", "1", "yes", "y", "co", "có", "dung", "đúng"}
@@ -54,6 +55,20 @@ def normalize_number(value: Any) -> int | float | None:
 
 
 def normalize_value(field: str, value: Any) -> Any:
+    if field == "order_unit":
+        if value is None or str(value).strip() == "":
+            return None
+        from app.core.packaging_units import normalize_packaging_unit
+        return normalize_packaging_unit(value)
+    if field == "item_type":
+        from app.core.menu import normalize_item_type
+        return normalize_item_type(value)
+    if field == "status":
+        from app.core.menu import normalize_menu_status
+        return normalize_menu_status(value)
+    if field == "selling_unit":
+        from app.core.menu import normalize_product_unit
+        return normalize_product_unit(value)
     if field in DATE_FIELDS:
         return normalize_date(value)
     if field in NUMERIC_FIELDS:

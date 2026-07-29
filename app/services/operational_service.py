@@ -31,6 +31,10 @@ class OperationalService:
     def recipe_versions(self,store,product,page,size):
         with self.factory() as s:
             StoreRepository(s).get_required(store)
+            target=s.scalar(select(ProductModel).where(ProductModel.store_id==store,ProductModel.product_id==product))
+            if target and target.item_type=="combo":
+                from app.core.exceptions import MenuError
+                raise MenuError("RECIPE_NOT_ALLOWED_FOR_COMBO","Combo sử dụng components; không lưu recipe trực tiếp.",{"product_id":product},http_status=409)
             if not s.scalar(select(ProductModel).where(ProductModel.store_id==store,ProductModel.product_id==product)): raise ResourceNotFoundError(details={"resource":"product"})
             q=select(RecipeVersionModel).where(RecipeVersionModel.store_id==store,RecipeVersionModel.product_id==product).order_by(RecipeVersionModel.version.desc())
             rows,total=self._page(s,q,page,size)

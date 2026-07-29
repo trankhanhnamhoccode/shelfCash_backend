@@ -72,6 +72,8 @@ class ProductModel(Base):
         UniqueConstraint("store_id", "normalized_name", name="uq_products_store_name"),
         UniqueConstraint("store_id", "sku", name="uq_products_store_sku"),
         CheckConstraint("price IS NULL OR price >= 0", name="ck_products_price"),
+        CheckConstraint("item_type IN ('single','combo')", name="ck_products_item_type"),
+        CheckConstraint("selling_unit IS NULL OR selling_unit IN ('ly','phần','chai','cái','combo')", name="ck_products_selling_unit"),
         Index("ix_products_normalized_name", "normalized_name"),
         CheckConstraint("version >= 1", name="ck_products_version"),
         Index("ix_products_store_active", "store_id", "active"),
@@ -82,9 +84,33 @@ class ProductModel(Base):
     normalized_name: Mapped[str] = mapped_column(String(255), nullable=False)
     sku: Mapped[str | None] = mapped_column(String(128))
     price: Mapped[int | None] = mapped_column(Integer)
+    item_type: Mapped[str] = mapped_column(String(16), nullable=False, default="single", server_default="single")
+    selling_unit: Mapped[str | None] = mapped_column(String(16))
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     source: Mapped[str] = mapped_column(String(32), nullable=False, default="manual")
+    source_import_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("import_jobs.import_id"), index=True)
+    source_row_hash: Mapped[str | None] = mapped_column(String(64))
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now)
+
+
+class ProductBundleLineModel(Base):
+    __tablename__ = "product_bundle_lines"
+    __table_args__ = (
+        UniqueConstraint("combo_product_id", "component_product_id", name="uq_bundle_combo_component"),
+        CheckConstraint("quantity > 0", name="ck_bundle_line_quantity"),
+        CheckConstraint("position >= 0", name="ck_bundle_line_position"),
+        Index("ix_bundle_lines_store_id", "store_id"),
+        Index("ix_bundle_lines_combo_product_id", "combo_product_id"),
+        Index("ix_bundle_lines_component_product_id", "component_product_id"),
+    )
+    bundle_line_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    store_id: Mapped[str] = mapped_column(String(128), ForeignKey("stores.store_id"), nullable=False)
+    combo_product_id: Mapped[str] = mapped_column(String(36), ForeignKey("products.product_id", ondelete="CASCADE"), nullable=False)
+    component_product_id: Mapped[str] = mapped_column(String(36), ForeignKey("products.product_id"), nullable=False)
+    quantity: Mapped[int] = mapped_column(Integer, nullable=False)
+    position: Mapped[int] = mapped_column(Integer, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now)
 
@@ -158,6 +184,7 @@ class SupplierIngredientTermModel(Base):
     unit_cost: Mapped[int] = mapped_column(Integer, nullable=False)
     moq: Mapped[Decimal] = mapped_column(Numeric(20, 6), nullable=False)
     pack_size: Mapped[Decimal] = mapped_column(Numeric(20, 6), nullable=False)
+    order_unit: Mapped[str | None] = mapped_column(String(64))
     lead_time_days: Mapped[int] = mapped_column(Integer, nullable=False)
     safety_stock: Mapped[Decimal] = mapped_column(Numeric(20, 6), nullable=False)
     capacity: Mapped[Decimal | None] = mapped_column(Numeric(20, 6))

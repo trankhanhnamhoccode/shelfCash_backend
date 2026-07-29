@@ -1,6 +1,7 @@
 # API Operation Behavior Audit
 
-Audited against `ShelfCash_API_Contract_v1(3).md`. Evidence is the route-specific
+Audited against `ShelfCash_API_Contract_v1(3).md` plus
+`ShelfCash_Menu_API_Contract_v1.md`. Evidence is the route-specific
 tests plus `tests/test_api_contract_routes.py` and `tests/test_completion_behavior.py`.
 Forecast and planning persist blocked runs when their production engines/artifacts
 are unavailable; they never emit fabricated points or recommendations.
@@ -11,6 +12,7 @@ are unavailable; they never emit fabricated points or recommendations.
 | GET | /api/v1/llm/health | production_complete | test_api |
 | POST | /api/v1/llm/map-sheet | production_complete | test_api |
 | POST | /api/v1/imports | production_complete | test_import_persistence |
+| GET | /api/v1/import-schemas | production_complete | test_menu_addendum |
 | GET | /api/v1/imports/{import_id} | production_complete | test_import_persistence |
 | POST | /api/v1/imports/{import_id}/confirm | production_complete | test_import_persistence |
 | POST | /api/v1/imports/{import_id}/process | production_complete | test_business_persistence |
@@ -26,8 +28,10 @@ are unavailable; they never emit fabricated points or recommendations.
 | POST | /api/v1/stores/{store_id}/ingredients | production_complete | test_catalog_recipe_api |
 | PATCH | /api/v1/stores/{store_id}/ingredients/{ingredient_id} | production_complete | test_catalog_recipe_api |
 | GET | /api/v1/stores/{store_id}/products | production_complete | test_catalog_recipe_api |
+| GET | /api/v1/stores/{store_id}/menu | production_complete | test_menu_addendum |
 | POST | /api/v1/stores/{store_id}/products | production_complete | test_catalog_recipe_api |
 | PATCH | /api/v1/stores/{store_id}/products/{product_id} | production_complete | test_catalog_recipe_api |
+| PUT | /api/v1/stores/{store_id}/products/{product_id}/components | production_complete | test_menu_addendum |
 | GET | /api/v1/stores/{store_id}/products/{product_id}/recipe | production_complete | test_catalog_recipe_api |
 | PUT | /api/v1/stores/{store_id}/products/{product_id}/recipe | production_complete | test_catalog_recipe_api |
 | GET | /api/v1/stores/{store_id}/products/{product_id}/recipe-versions | production_complete | operational_service |
@@ -58,5 +62,5 @@ are unavailable; they never emit fabricated points or recommendations.
 | POST | /api/v1/stores/{store_id}/purchase-orders/{po_id}/confirm | production_complete | test_completion_behavior |
 | POST | /api/v1/stores/{store_id}/purchase-orders/{po_id}/receive | production_complete | test_completion_behavior |
 
-Summary: `production_complete_count=44`, `model_blocked_count=6`,
+Summary: `production_complete_count=47`, `model_blocked_count=6`,
 `incomplete_count=0`.

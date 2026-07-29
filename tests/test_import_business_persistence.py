@@ -3,9 +3,15 @@ from datetime import date
 from decimal import Decimal
 from types import SimpleNamespace
 
+import pytest
 from sqlalchemy import func, select
 
 from app.core.provenance import purchase_business_key, source_row_hash
+from app.core.packaging_units import normalize_packaging_unit
+from app.core.rule_mapper import map_sheet_rules
+from app.core.units import normalize_unit, validate_compatible
+from app.core.exceptions import ValidationError
+from app.schemas.llm import SheetProfile
 from app.models.business import (
     CalendarFeatureModel, IngredientModel, InventoryLotModel, InventoryMovementModel, ProductModel,
     PurchaseReceiptModel, RecipeVersionModel, SalesDailyModel, UsageDailyModel,
@@ -126,24 +132,26 @@ def test_recipe_persistence_and_all_or_nothing_failure(client):
 
 
 def test_supplier_term_versioning_and_conversion(client):
-    mapping = {"supplier": "supplier_name", "ingredient": "ingredient_name", "moq": "minimum_order_quantity", "unit": "order_unit", "pack": "package_size", "lead": "lead_time_days", "cost": "unit_price"}
-    first = b"supplier,ingredient,moq,unit,pack,lead,cost\nABC,Flour,1000,g,500,2,20000\n"
+    mapping = {"supplier": "supplier_name", "ingredient": "ingredient_name", "moq": "minimum_order_quantity", "unit": "order_unit", "pack": "package_size", "base": "package_base_unit", "lead": "lead_time_days", "cost": "unit_price"}
+    first = b"supplier,ingredient,moq,unit,pack,base,lead,cost\nABC,Flour,1000,pack,500,g,2,20000\n"
     _, response = upload_confirm_process(client, first, mapping, "supplier_constraints")
     assert response.status_code == 200, response.text
     _, response = upload_confirm_process(client, first, mapping, "supplier_constraints", name="same-term.csv")
     assert response.status_code == 200
-    changed = b"supplier,ingredient,moq,unit,pack,lead,cost\nABC,Flour,2,kg,1,3,21000\n"
+    changed = b"supplier,ingredient,moq,unit,pack,base,lead,cost\nABC,Flour,2,bag,1,kg,3,21000\n"
     _, response = upload_confirm_process(client, changed, mapping, "supplier_constraints", name="changed-term.csv")
     assert response.status_code == 200
     with client.app.state.session_factory() as session:
         terms = list(session.scalars(select(SupplierIngredientTermModel).order_by(SupplierIngredientTermModel.version)))
         assert len(terms) == 2
-        assert terms[0].moq == Decimal("1000.000000")
+        assert terms[0].moq == Decimal("500000.000000")
         assert terms[1].moq == Decimal("2000.000000")
+        assert terms[0].order_unit == "pack"
+        assert terms[1].order_unit == "bag"
         assert not terms[0].active and terms[1].active
 
 
-def test_supplier_term_missing_unit_is_warning_not_500(client):
+def test_supplier_term_unknown_packaging_is_preserved_with_warning(client):
     existing = client.post("/api/v1/stores/STORE_001/ingredients", json={
         "ingredient": "Flour", "sku": "FLOUR", "base_unit": "kg", "active": True,
     })
@@ -151,19 +159,21 @@ def test_supplier_term_missing_unit_is_warning_not_500(client):
     mapping = {
         "supplier": "supplier_name", "ingredient": "ingredient_name",
         "moq": "minimum_order_quantity", "unit": "order_unit",
-        "pack": "package_size", "lead": "lead_time_days", "cost": "unit_price",
+        "pack": "package_size", "base": "package_base_unit",
+        "lead": "lead_time_days", "cost": "unit_price",
     }
-    csv = b"supplier,ingredient,moq,unit,pack,lead,cost\nABC,Flour,2,,1,3,21000\n"
+    csv = b"supplier,ingredient,moq,unit,pack,base,lead,cost\nABC,Flour,2,pallet,1,kg,3,21000\n"
     body, response = upload_confirm_process(client, csv, mapping, "supplier_constraints")
     assert response.status_code == 200, response.text
     with client.app.state.session_factory() as session:
-        assert session.scalar(select(func.count()).select_from(SupplierIngredientTermModel)) == 0
+        term = session.scalar(select(SupplierIngredientTermModel))
+        assert term.order_unit == "pallet"
         issue = session.scalar(select(ImportIssueModel).where(
             ImportIssueModel.import_id == body["import_id"],
-            ImportIssueModel.code == "UNIT_MISSING",
+            ImportIssueModel.code == "UNKNOWN_PACKAGING_UNIT",
         ))
         assert issue is not None
-        assert json.loads(issue.details_json)["fallback_unit"] == "None"
+        assert json.loads(issue.details_json)["normalized_value"] == "pallet"
 
 
 def test_supplier_persistence_handles_missing_ingredient_base_unit(session_factory):
@@ -176,14 +186,158 @@ def test_supplier_persistence_handles_missing_ingredient_base_unit(session_facto
         job = SimpleNamespace(store_id="STORE_001", import_id="import-missing-unit")
         sheet = {"profile_id": "profile-missing-unit", "rows": [{
             "supplier_name": "Supplier", "ingredient_name": "Ingredient",
-            "minimum_order_quantity": "2", "order_unit": "kg",
-            "package_size": "1", "_source_excel_row": 2,
+            "minimum_order_quantity": "2", "order_unit": "case",
+            "package_size": "1", "package_base_unit": "kg",
+            "_source_excel_row": 2,
         }]}
-        service._persist_supplier_constraints(job, sheet)
-        assert service.summary.warnings == 1
-        assert service.summary.rows_skipped == 1
-        issue = next(item for item in session.new if isinstance(item, ImportIssueModel))
-        assert json.loads(issue.details_json)["target_unit"] == "None"
+        with pytest.raises(ValidationError) as caught:
+            service._persist_supplier_constraints(job, sheet)
+        assert caught.value.details["field"] == "package_base_unit"
+
+
+@pytest.mark.parametrize("raw,expected", [
+    ("thùng", "case"), ("case", "case"), ("bao", "bag"),
+    ("bag", "bag"), ("gói", "pack"), ("pack", "pack"),
+    ("hộp", "box"),
+])
+def test_packaging_unit_normalization(raw, expected):
+    assert normalize_packaging_unit(raw) == expected
+
+
+def test_packaging_unit_is_not_a_physical_unit_alias():
+    with pytest.raises(ValidationError):
+        normalize_unit("case")
+    with pytest.raises(ValidationError):
+        validate_compatible("case", "liter")
+
+
+def test_supplier_rule_mapping_requires_packaging_and_physical_base_fields():
+    columns = [
+        "Vendor", "Material", "MOQ", "Order UOM", "Pack Size",
+        "Base UOM", "Lead time (days)", "Giá mua", "Lịch giao",
+    ]
+    profile = SheetProfile(
+        file_name="vendor.xlsx", sheet_name="Vendor Rules",
+        header_row_zero_based=0, row_count=1, column_count=len(columns),
+        columns=columns, dtypes={column: "object" for column in columns},
+        sample_rows=[],
+    )
+    result = map_sheet_rules(profile)
+    assert result.column_mapping == {
+        "Vendor": "supplier_name",
+        "Material": "ingredient_name",
+        "MOQ": "minimum_order_quantity",
+        "Order UOM": "order_unit",
+        "Pack Size": "package_size",
+        "Base UOM": "package_base_unit",
+        "Lead time (days)": "lead_time_days",
+        "Giá mua": "unit_price",
+        "Lịch giao": "available_delivery_days",
+    }
+    assert result.confidence == 1.0
+    assert result.requires_review is False
+
+    incomplete = SheetProfile(
+        file_name="vendor.xlsx", sheet_name="Vendor Rules",
+        header_row_zero_based=0, row_count=1, column_count=4,
+        columns=columns[:4], dtypes={column: "object" for column in columns[:4]},
+        sample_rows=[],
+    )
+    suggestion = map_sheet_rules(incomplete)
+    assert suggestion.requires_review is True
+    assert any("package_size" in warning for warning in suggestion.warnings)
+    assert any("package_base_unit" in warning for warning in suggestion.warnings)
+
+
+def test_supplier_packaging_import_converts_only_package_size(client):
+    mapping = {
+        "supplier": "supplier_name", "ingredient": "ingredient_name",
+        "moq": "minimum_order_quantity", "order": "order_unit",
+        "pack": "package_size", "base": "package_base_unit",
+        "lead": "lead_time_days", "cost": "unit_price",
+    }
+    csv = (
+        "supplier,ingredient,moq,order,pack,base,lead,cost\n"
+        "A,Milk,1,thùng,12,liter,2,100\n"
+        "B,Flour,2,bao,5000,g,1,200\n"
+        "C,Cups,1,gói,1000,piece,0,0\n"
+    ).encode("utf-8")
+    body, response = upload_confirm_process(
+        client, csv, mapping, "supplier_constraints",
+        name="supplier-packaging.csv",
+    )
+    assert response.status_code == 200, response.text
+    result = client.get(f"/api/v1/imports/{body['import_id']}/result")
+    assert result.status_code == 200
+    with client.app.state.session_factory() as session:
+        terms = {
+            term.order_unit: term
+            for term in session.scalars(select(SupplierIngredientTermModel))
+        }
+        assert terms["case"].unit == "lít"
+        assert terms["case"].pack_size == Decimal("12.000000")
+        assert terms["case"].moq == Decimal("12.000000")
+        assert terms["bag"].unit == "g"
+        assert terms["bag"].pack_size == Decimal("5000.000000")
+        assert terms["bag"].moq == Decimal("10000.000000")
+        assert terms["pack"].unit == "cái"
+        assert terms["pack"].pack_size == Decimal("1000.000000")
+        assert terms["pack"].moq == Decimal("1000.000000")
+
+
+def test_supplier_package_size_converts_to_existing_ingredient_base(client):
+    created = client.post("/api/v1/stores/STORE_001/ingredients", json={
+        "ingredient": "Flour", "sku": "FLOUR", "base_unit": "kg",
+        "active": True,
+    })
+    assert created.status_code == 201
+    mapping = {
+        "supplier": "supplier_name", "ingredient": "ingredient_name",
+        "moq": "minimum_order_quantity", "order": "order_unit",
+        "pack": "package_size", "base": "package_base_unit",
+    }
+    csv = (
+        b"supplier,ingredient,moq,order,pack,base\n"
+        b"ABC,Flour,2,bag,5000,g\n"
+    )
+    _, response = upload_confirm_process(
+        client, csv, mapping, "supplier_constraints"
+    )
+    assert response.status_code == 200, response.text
+    with client.app.state.session_factory() as session:
+        term = session.scalar(select(SupplierIngredientTermModel))
+        assert term.order_unit == "bag"
+        assert term.pack_size == Decimal("5.000000")
+        assert term.moq == Decimal("10.000000")
+        assert term.unit == "kg"
+
+
+def test_supplier_incompatible_base_unit_rolls_back_and_failed_is_not_retryable(client):
+    created = client.post("/api/v1/stores/STORE_001/ingredients", json={
+        "ingredient": "Flour", "sku": "FLOUR", "base_unit": "kg",
+        "active": True,
+    })
+    assert created.status_code == 201
+    mapping = {
+        "supplier": "supplier_name", "ingredient": "ingredient_name",
+        "moq": "minimum_order_quantity", "order": "order_unit",
+        "pack": "package_size", "base": "package_base_unit",
+    }
+    csv = (
+        b"supplier,ingredient,moq,order,pack,base\n"
+        b"ABC,Flour,1,case,12,liter\n"
+    )
+    body, response = upload_confirm_process(
+        client, csv, mapping, "supplier_constraints"
+    )
+    assert response.status_code == 422
+    assert response.json()["code"] == "VALIDATION_ERROR"
+    retry = client.post(f"/api/v1/imports/{body['import_id']}/process")
+    assert retry.status_code == 409
+    with client.app.state.session_factory() as session:
+        assert session.scalar(
+            select(func.count()).select_from(SupplierIngredientTermModel)
+        ) == 0
 
 
 def test_calendar_and_settings_upsert(client):

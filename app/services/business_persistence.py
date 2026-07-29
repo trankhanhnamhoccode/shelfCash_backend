@@ -6,14 +6,18 @@ import json
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from app.core.exceptions import ValidationError
+from app.core.exceptions import MenuError
+from app.core.menu import components_empty, parse_combo_components
+from app.core.names import display_name, normalize_name
+from app.core.packaging_units import is_known_packaging_unit, normalize_packaging_unit
 from app.core.provenance import canonical_hash, purchase_business_key, source_row_hash
 from app.core.units import convert_quantity, normalize_unit, validate_compatible
 from app.models.business import (
-    CalendarFeatureModel, InventoryLotModel, InventoryMovementModel, PurchaseReceiptModel,
+    CalendarFeatureModel, InventoryLotModel, InventoryMovementModel, ProductBundleLineModel, ProductModel, PurchaseReceiptModel,
     SalesDailyModel, StoreSettingsModel, SupplierIngredientTermModel, UsageDailyModel,
 )
 from app.models.import_normalized import ImportIssueModel
@@ -46,6 +50,9 @@ class BusinessWriteSummary:
     settings_updated: int = 0
     rows_skipped: int = 0
     warnings: int = 0
+    menu_products_created: int = 0
+    menu_products_updated: int = 0
+    menu_bundle_lines_created: int = 0
 
     def to_dict(self) -> dict[str, int]:
         return asdict(self)
@@ -59,6 +66,7 @@ class ImportBusinessPersistenceService:
         self.inventory = InventoryRepository(session)
         self.recipes = RecipeVersionService(RecipeRepository(session))
         self.summary = BusinessWriteSummary()
+        self.menu_result: list[dict[str, Any]] = []
 
     def persist(self, *, job, sheets: list[dict[str, Any]]) -> dict[str, int]:
         StoreRepository(self.session).get_required(job.store_id)
@@ -260,11 +268,134 @@ class ImportBusinessPersistenceService:
 
     def _persist_supplier_constraints(self, job, sheet):
         for index, row in enumerate(sheet["rows"]):
-            ingredient = self._ingredient(job.store_id, row, "order_unit")
+            # order_unit is packaging metadata; it must never enter the
+            # physical-unit compatibility/conversion helpers.
+            ingredient = self._ingredient(
+                job.store_id, row, "package_base_unit"
+            )
+            supplier = self._supplier(
+                job.store_id, row.get("supplier_name")
+            )
+            if supplier is None:
+                raise ValidationError(
+                    "Thiếu supplier_name.",
+                    {"field": "supplier_name"},
+                )
+
+            raw_order_unit = row.get("order_unit")
+            order_unit = normalize_packaging_unit(raw_order_unit)
+            minimum_packages = self._decimal(
+                row.get("minimum_order_quantity"),
+                "minimum_order_quantity",
+                positive=True,
+            )
+            package_size = self._decimal(
+                row.get("package_size"),
+                "package_size",
+                positive=True,
+            )
+            source_base_unit = normalize_unit(row.get("package_base_unit"))
+            target_base_unit = normalize_unit(ingredient.base_unit)
+            if "None" in {source_base_unit, target_base_unit}:
+                raise ValidationError(
+                    "Thiếu đơn vị vật lý của supplier constraint.",
+                    {
+                        "field": "package_base_unit",
+                        "source_base_unit": source_base_unit,
+                        "ingredient_base_unit": target_base_unit,
+                    },
+                )
+            validate_compatible(source_base_unit, target_base_unit)
+            package_size_in_base_unit = convert_quantity(
+                package_size, source_base_unit, target_base_unit
+            )
+            minimum_base_quantity = (
+                minimum_packages * package_size_in_base_unit
+            )
+
+            if not is_known_packaging_unit(raw_order_unit):
+                self.summary.warnings += 1
+                self.session.add(ImportIssueModel(
+                    issue_id=str(uuid4()),
+                    import_id=job.import_id,
+                    profile_id=sheet["profile_id"],
+                    source_row=int(
+                        row.get("_source_excel_row") or index + 1
+                    ),
+                    severity="warning",
+                    code="UNKNOWN_PACKAGING_UNIT",
+                    message=(
+                        "Đơn vị đóng gói chưa có alias; "
+                        "giữ nguyên literal đã chuẩn hóa."
+                    ),
+                    details_json=json.dumps({
+                        "sheet": row.get("_source_sheet"),
+                        "row_number": int(
+                            row.get("_source_excel_row") or index + 1
+                        ),
+                        "field": "order_unit",
+                        "value": raw_order_unit,
+                        "normalized_value": order_unit,
+                    }, ensure_ascii=False),
+                    issue_source="business_persistence",
+                ))
+
+            cost = int(self._decimal(
+                row.get("unit_price") or 0, "unit_price"
+            ))
+            lead = int(self._decimal(
+                row.get("lead_time_days") or 0, "lead_time_days"
+            ))
+            content = canonical_hash({
+                "unit_cost": cost,
+                "moq": minimum_base_quantity,
+                "pack_size": package_size_in_base_unit,
+                "lead_time_days": lead,
+                "unit": target_base_unit,
+                "order_unit": order_unit,
+            })
+            latest = self.session.scalar(
+                select(SupplierIngredientTermModel).where(
+                    SupplierIngredientTermModel.store_id == job.store_id,
+                    SupplierIngredientTermModel.supplier_id
+                    == supplier.supplier_id,
+                    SupplierIngredientTermModel.ingredient_id
+                    == ingredient.ingredient_id,
+                ).order_by(SupplierIngredientTermModel.version.desc())
+            )
+            if latest and latest.source_row_hash == content:
+                self.summary.rows_skipped += 1
+                continue
+            if latest:
+                latest.active = False
+            self.session.add(SupplierIngredientTermModel(
+                constraint_id=str(uuid4()),
+                store_id=job.store_id,
+                supplier_id=supplier.supplier_id,
+                ingredient_id=ingredient.ingredient_id,
+                unit_cost=cost,
+                moq=minimum_base_quantity,
+                pack_size=package_size_in_base_unit,
+                order_unit=order_unit,
+                lead_time_days=lead,
+                safety_stock=Decimal(0),
+                unit=target_base_unit,
+                version=(latest.version + 1 if latest else 1),
+                active=True,
+                source="import",
+                source_import_id=job.import_id,
+                source_profile_id=sheet["profile_id"],
+                source_row_hash=content,
+            ))
+            self.summary.supplier_terms_created += 1
+
+    def _persist_supplier_constraints_legacy(self, job, sheet):
+        for index, row in enumerate(sheet["rows"]):
+            ingredient = self._ingredient(job.store_id, row, "package_base_unit")
             supplier = self._supplier(job.store_id, row.get("supplier_name"))
             if supplier is None:
                 raise ValidationError("Thiếu supplier_name.")
-            unit = row.get("order_unit") or row.get("package_base_unit")
+            unit = row.get("package_base_unit")
             source_unit = "None" if unit is None else str(unit)
             target_unit = "None" if ingredient.base_unit is None else str(ingredient.base_unit)
             moq = convert_quantity(self._decimal(row.get("minimum_order_quantity") or 0, "minimum_order_quantity"), source_unit, target_unit)
@@ -338,3 +469,146 @@ class ImportBusinessPersistenceService:
             for key, value in values.items(): setattr(model, key, value)
             model.version += 1
             self.summary.settings_updated += 1
+
+    def _persist_menu(self, job, sheet):
+        rows = sheet["rows"]
+        seen_skus: set[str] = set()
+        seen_names: dict[str, str] = {}
+        prepared = []
+        for index, row in enumerate(rows):
+            sku = str(row.get("product_sku") or "").strip().upper()
+            name = display_name(row.get("product_name"))
+            normalized_name = normalize_name(name)
+            item_type = row.get("item_type")
+            status = row.get("status") or "active"
+            unit = row.get("selling_unit")
+            price = self._decimal(row.get("selling_price"), "selling_price", positive=True)
+            if not sku:
+                raise MenuError("CORE_FIELDS_MISSING", "Thiếu product_sku.", {"row": index + 1})
+            if sku in seen_skus:
+                raise MenuError("DUPLICATE_PRODUCT_SKU", "SKU bị trùng trong Menu import.", {"sku": sku}, http_status=409)
+            if normalized_name in seen_names and seen_names[normalized_name] != sku:
+                raise MenuError("DUPLICATE_PRODUCT_NAME", "Tên product dùng cho nhiều SKU.", {"product": name}, http_status=409)
+            if item_type == "single" and not components_empty(row.get("combo_components")):
+                raise MenuError("COMBO_COMPONENT_PARSE_ERROR", "Single product không có components.", {"sku": sku})
+            parsed = parse_combo_components(row.get("combo_components")) if item_type == "combo" else []
+            if item_type == "combo" and unit != "combo":
+                raise MenuError("INVALID_PRODUCT_UNIT", "Combo phải dùng selling_unit=combo.", {"sku": sku})
+            seen_skus.add(sku); seen_names[normalized_name] = sku
+            prepared.append({
+                "row": row, "sku": sku, "name": name, "normalized_name": normalized_name,
+                "item_type": item_type, "status": status, "unit": unit,
+                "price": int(price), "components": parsed, "index": index,
+            })
+
+        products_by_sku = {
+            product.sku: product for product in self.session.scalars(
+                select(ProductModel).where(ProductModel.store_id == job.store_id)
+            ) if product.sku
+        }
+        products_by_name = {
+            product.normalized_name: product for product in self.session.scalars(
+                select(ProductModel).where(ProductModel.store_id == job.store_id)
+            )
+        }
+
+        def upsert(item):
+            product = products_by_sku.get(item["sku"])
+            by_name = products_by_name.get(item["normalized_name"])
+            if by_name is not None and (product is None or by_name.product_id != product.product_id):
+                raise MenuError("DUPLICATE_PRODUCT_NAME", "Tên product đã thuộc SKU khác.", {"product": item["name"]}, http_status=409)
+            row_hash = self._row_hash(job, sheet, item["row"], item["index"])
+            if product:
+                if product.item_type != item["item_type"]:
+                    raise MenuError("PRODUCT_TYPE_IMMUTABLE", "Không thể đổi item_type của SKU hiện có.", {"sku": item["sku"]}, http_status=409)
+                changed = any([
+                    product.product != item["name"], product.price != item["price"],
+                    product.active != (item["status"] == "active"),
+                    product.selling_unit != item["unit"], product.source_row_hash != row_hash,
+                ])
+                product.product = item["name"]; product.normalized_name = item["normalized_name"]
+                product.price = item["price"]; product.active = item["status"] == "active"
+                product.selling_unit = item["unit"]; product.source = "import"
+                product.source_import_id = job.import_id; product.source_row_hash = row_hash
+                if changed:
+                    product.version += 1; self.summary.menu_products_updated += 1
+            else:
+                product = ProductModel(
+                    product_id=str(uuid4()), store_id=job.store_id, sku=item["sku"],
+                    product=item["name"], normalized_name=item["normalized_name"],
+                    item_type=item["item_type"], selling_unit=item["unit"], price=item["price"],
+                    active=item["status"] == "active", source="import", version=1,
+                    source_import_id=job.import_id, source_row_hash=row_hash,
+                )
+                self.session.add(product); products_by_sku[item["sku"]] = product
+                products_by_name[item["normalized_name"]] = product
+                self.summary.menu_products_created += 1
+            return product
+
+        for item in prepared:
+            if item["item_type"] == "single":
+                upsert(item)
+        self.session.flush()
+        for item in prepared:
+            if item["item_type"] != "combo":
+                continue
+            combo = upsert(item)
+            self.session.flush()
+            resolved = []
+            names = set()
+            for parsed in item["components"]:
+                if parsed.normalized_name == item["normalized_name"]:
+                    raise MenuError("COMBO_SELF_REFERENCE", "Combo không thể chứa chính nó.", {"sku": item["sku"]})
+                component = products_by_name.get(parsed.normalized_name)
+                if not component:
+                    raise MenuError("COMBO_COMPONENT_NOT_FOUND", "Không tìm thấy component.", {"component": parsed.product_name})
+                if component.item_type != "single":
+                    raise MenuError("COMBO_NESTING_NOT_SUPPORTED", "Không hỗ trợ nested combo.", {"component": parsed.product_name})
+                if combo.active and not component.active:
+                    raise MenuError("INACTIVE_COMBO_COMPONENT", "Active combo chứa inactive component.", {"component": parsed.product_name})
+                if component.product_id in names:
+                    raise MenuError("COMBO_COMPONENT_DUPLICATE", "Component combo bị trùng.")
+                names.add(component.product_id); resolved.append((parsed, component))
+            self.session.execute(delete(ProductBundleLineModel).where(
+                ProductBundleLineModel.store_id == job.store_id,
+                ProductBundleLineModel.combo_product_id == combo.product_id,
+            ))
+            for position, (parsed, component) in enumerate(resolved):
+                self.session.add(ProductBundleLineModel(
+                    bundle_line_id=str(uuid4()), store_id=job.store_id,
+                    combo_product_id=combo.product_id,
+                    component_product_id=component.product_id,
+                    quantity=parsed.quantity, position=position,
+                ))
+                self.summary.menu_bundle_lines_created += 1
+            calculated = sum(parsed.quantity * (component.price or 0) for parsed, component in resolved)
+            if calculated <= 0:
+                raise MenuError("INVALID_PRICE", "Component combo phải có giá hợp lệ.", {"sku": item["sku"]})
+            supplied_list = item["row"].get("list_price")
+            supplied_savings = item["row"].get("savings_amount")
+            supplied_discount = item["row"].get("discount_rate")
+            savings = max(calculated - combo.price, 0)
+            discount = Decimal(savings) / Decimal(calculated)
+            mismatch = (
+                (supplied_list is not None and Decimal(str(supplied_list)) != Decimal(calculated))
+                or (supplied_savings is not None and Decimal(str(supplied_savings)) != Decimal(savings))
+                or (supplied_discount is not None and abs(Decimal(str(supplied_discount)) - discount) > Decimal("0.005"))
+            )
+            if mismatch:
+                self.summary.warnings += 1
+                self.session.add(ImportIssueModel(
+                    issue_id=str(uuid4()), import_id=job.import_id, profile_id=sheet["profile_id"],
+                    source_row=int(item["row"].get("_source_excel_row") or item["index"] + 1),
+                    severity="warning", code="MENU_DERIVED_PRICE_MISMATCH",
+                    message="Derived Menu price fields were recalculated.",
+                    issue_source="business_persistence",
+                ))
+        self.session.flush()
+        imported = list(self.session.scalars(select(ProductModel).where(
+            ProductModel.store_id == job.store_id,
+            ProductModel.source_import_id == job.import_id,
+        ).order_by(ProductModel.normalized_name)))
+        from app.services.menu_service import MenuService
+        serializer = MenuService(None)
+        graph = serializer._load_graph(self.session, job.store_id, imported)
+        self.menu_result = [serializer.serialize(product, graph) for product in imported]

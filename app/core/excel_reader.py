@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
+from openpyxl import load_workbook
 
 from app.schemas.llm import SheetProfile
 
@@ -98,6 +99,38 @@ def read_workbook(
             sample_rows=rows[:sample_rows],
         )
         return [ParsedSheet(f"0:{profile.sheet_name}", profile, rows)]
+    if extension in {".xlsx", ".xlsm"}:
+        try:
+            formulas = load_workbook(
+                BytesIO(content), read_only=True, data_only=False,
+                keep_vba=False, keep_links=False,
+            )
+            cached = load_workbook(
+                BytesIO(content), read_only=True, data_only=True,
+                keep_vba=False, keep_links=False,
+            )
+            for formula_sheet in formulas.worksheets:
+                cached_sheet = cached[formula_sheet.title]
+                for row in formula_sheet.iter_rows():
+                    for cell in row:
+                        if cell.data_type == "f" and cached_sheet[cell.coordinate].value is None:
+                            raise ExcelIngestionError(
+                                "FORMULA_VALUE_UNAVAILABLE",
+                                "Workbook formula has no cached numeric value.",
+                                {
+                                    "file_name": safe_name,
+                                    "sheet_name": formula_sheet.title,
+                                    "row_number": cell.row,
+                                    "column": cell.column_letter,
+                                },
+                                status_code=422,
+                            )
+        except ExcelIngestionError:
+            raise
+        except Exception as exc:
+            raise ExcelIngestionError(
+                "invalid_excel_file", "Could not inspect Excel workbook formulas"
+            ) from exc
     try:
         book = pd.ExcelFile(BytesIO(content), engine="xlrd" if extension == ".xls" else "openpyxl")
     except Exception as exc:

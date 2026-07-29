@@ -5,13 +5,13 @@ from uuid import uuid4
 from sqlalchemy import func, select
 from app.core.exceptions import (
  BudgetExceededError, DuplicateRequestError, InvalidStateTransitionError,
- ResourceNotFoundError, ValidationError, VersionConflictError,
+ ModelNotReadyError, ResourceNotFoundError, ValidationError, VersionConflictError,
 )
 from app.core.provenance import canonical_hash
 from app.core.units import convert_quantity
 from app.models.business import (
  CalendarFeatureModel, IngredientAliasModel, IngredientModel, InventoryLotModel, InventoryMovementModel,
- ProductModel, PurchaseReceiptModel, SalesDailyModel, StoreSettingsModel, SupplierModel,
+ ProductBundleLineModel, ProductModel, PurchaseReceiptModel, SalesDailyModel, StoreSettingsModel, SupplierModel,
  SupplierIngredientTermModel, RecipeVersionModel, RecipeLineModel, UsageDailyModel,
 )
 from app.repositories.audit_logs import AuditLogRepository
@@ -25,12 +25,16 @@ from app.models.operations import (
 from app.repositories.stores import StoreRepository
 
 class CompletionService:
- MOCK_NUMBER=10000000000000000
  def __init__(self,factory,operational):self.factory=factory;self.operational=operational
  def bootstrap(self,store):
   with self.factory() as s:
    x=StoreRepository(s).get_required(store)
    products=[{"product_id":p.product_id,"product":p.product,"sku":p.sku,"price":p.price,"active":p.active,"version":p.version} for p in s.scalars(select(ProductModel).where(ProductModel.store_id==store).order_by(ProductModel.normalized_name))]
+   menu_products=list(s.scalars(select(ProductModel).where(ProductModel.store_id==store).order_by(ProductModel.normalized_name)))
+   from app.services.menu_service import MenuService
+   menu_serializer=MenuService(None);menu_graph=menu_serializer._load_graph(s,store,menu_products)
+   menu=[menu_serializer.serialize(p,menu_graph) for p in menu_products]
+   menu_updated_at=max((p.updated_at for p in menu_products),default=None)
    ingredients=[{"ingredient_id":i.ingredient_id,"ingredient":i.ingredient,"sku":i.sku,"base_unit":i.base_unit,"active":i.active,"version":i.version} for i in s.scalars(select(IngredientModel).where(IngredientModel.store_id==store).order_by(IngredientModel.normalized_name))]
    aliases=[{"alias_id":a.alias_id,"ingredient_id":a.ingredient_id,"alias":a.alias} for a in s.scalars(select(IngredientAliasModel).where(IngredientAliasModel.store_id==store).order_by(IngredientAliasModel.normalized_alias))]
    recipes=[]
@@ -41,11 +45,11 @@ class CompletionService:
    pr=s.scalar(select(PlanRunModel).where(PlanRunModel.store_id==store).order_by(PlanRunModel.created_at.desc()))
    pos=[self._po_public(s,p) for p in s.scalars(select(PurchaseOrderModel).where(PurchaseOrderModel.store_id==store,PurchaseOrderModel.status.in_(["draft","ordered","partially_received"])))]
   return {"today":date.today(),"store":{"store_id":x.store_id,"store_name":x.store_name,"timezone":x.timezone,"currency":x.currency},
-   "ingredients":ingredients,"inventory":self.operational.inventory(store,1,200).get("items"),"products":products,"recipes":recipes,
+   "ingredients":ingredients,"inventory":self.operational.inventory(store,1,200).get("items"),"products":products,"menu":menu,"recipes":recipes,
    "supplier_constraints":self.supplier_list(store)["items"],"aliases":aliases,
    "future_calendar":self.operational.calendar(store,1,200,date.today(),None).get("items"),"settings":self.operational.settings(store),
    "latest_runs":{"forecast_run_id":fr.forecast_run_id if fr else None,"plan_run_id":pr.plan_run_id if pr else None},
-   "open_purchase_orders":pos,"data_freshness":{}}
+   "open_purchase_orders":pos,"data_freshness":{"menu_updated_at":menu_updated_at}}
  def dashboard(self,store):
   inv=self.operational.inventory(store,1,200)["items"];settings=self.operational.settings(store)
   with self.factory() as s:
@@ -65,7 +69,7 @@ class CompletionService:
   with self.factory() as s:
    StoreRepository(s).get_required(store)
    rows=s.execute(select(SupplierIngredientTermModel,SupplierModel).join(SupplierModel,SupplierModel.supplier_id==SupplierIngredientTermModel.supplier_id).where(SupplierIngredientTermModel.store_id==store,SupplierIngredientTermModel.active.is_(True)).order_by(SupplierModel.normalized_name,SupplierIngredientTermModel.ingredient_id))
-   items=[{"constraint_id":x.constraint_id,"ingredient_id":x.ingredient_id,"supplier_id":x.supplier_id,"supplier":sup.supplier,"unit_cost":x.unit_cost,"moq":str(x.moq),"pack_size":str(x.pack_size),"lead_time_days":x.lead_time_days,"safety_stock":str(x.safety_stock),"capacity":str(x.capacity) if x.capacity is not None else None,"unit":x.unit,"version":x.version} for x,sup in rows]
+   items=[{"constraint_id":x.constraint_id,"ingredient_id":x.ingredient_id,"supplier_id":x.supplier_id,"supplier":sup.supplier,"unit_cost":x.unit_cost,"moq":str(x.moq),"pack_size":str(x.pack_size),"order_unit":x.order_unit,"lead_time_days":x.lead_time_days,"safety_stock":str(x.safety_stock),"capacity":str(x.capacity) if x.capacity is not None else None,"unit":x.unit,"version":x.version} for x,sup in rows]
    return {"items":items,"page":1,"page_size":50,"total":len(items)}
  def write(self,kind,store,body,key,target=None):
   if kind in {"inventory_count","inventory_adjustment"}:
@@ -164,8 +168,8 @@ class CompletionService:
    if same:model=current
    else:
     if current:current.active=False
-    model=SupplierIngredientTermModel(constraint_id=str(uuid4()),store_id=store,supplier_id=b.supplier_id,ingredient_id=b.ingredient_id,unit_cost=b.unit_cost,moq=values["moq"],pack_size=values["pack_size"],lead_time_days=b.lead_time_days,safety_stock=values["safety_stock"],capacity=values["capacity"],unit=ingredient.base_unit,version=max([x.version for x in versions] or [0])+1,active=True,source="api");s.add(model)
-   s.flush();result={"constraint_id":model.constraint_id,"ingredient_id":model.ingredient_id,"supplier_id":model.supplier_id,"supplier":supplier.supplier,"unit_cost":model.unit_cost,"moq":str(model.moq),"pack_size":str(model.pack_size),"lead_time_days":model.lead_time_days,"safety_stock":str(model.safety_stock),"capacity":str(model.capacity) if model.capacity is not None else None,"unit":model.unit,"version":model.version}
+    model=SupplierIngredientTermModel(constraint_id=str(uuid4()),store_id=store,supplier_id=b.supplier_id,ingredient_id=b.ingredient_id,unit_cost=b.unit_cost,moq=values["moq"],pack_size=values["pack_size"],order_unit=None,lead_time_days=b.lead_time_days,safety_stock=values["safety_stock"],capacity=values["capacity"],unit=ingredient.base_unit,version=max([x.version for x in versions] or [0])+1,active=True,source="api");s.add(model)
+   s.flush();result={"constraint_id":model.constraint_id,"ingredient_id":model.ingredient_id,"supplier_id":model.supplier_id,"supplier":supplier.supplier,"unit_cost":model.unit_cost,"moq":str(model.moq),"pack_size":str(model.pack_size),"order_unit":model.order_unit,"lead_time_days":model.lead_time_days,"safety_stock":str(model.safety_stock),"capacity":str(model.capacity) if model.capacity is not None else None,"unit":model.unit,"version":model.version}
    AuditService(AuditLogRepository(s)).record(store_id=store,action=kind,resource_type="supplier_constraint",resource_id=model.constraint_id,after={"version":model.version},source="api")
    if key:
     rec=IdempotencyRepository(s).get(store_id=store,endpoint=path,http_method="POST" if kind=="supplier_create" else "PUT",idempotency_key=key);rec.resource_type="supplier_constraint";rec.resource_id=model.constraint_id;rec.response_status=201 if kind=="supplier_create" else 200;rec.response_body_json=json.dumps(result,default=str,ensure_ascii=False)
@@ -192,20 +196,26 @@ class CompletionService:
      if current:unchanged+=1;rid=current.sales_record_id;status="unchanged"
      else:
       rid=str(uuid4());s.add(SalesDailyModel(sales_record_id=rid,store_id=store,date=r.date,product_id=r.product_id,quantity=r.quantity,unit_price=r.unit_price,promotion=r.promotion,source=body.source,external_record_id=r.external_record_id));created+=1;status="created"
-      recipe=s.scalar(select(RecipeVersionModel).where(
-       RecipeVersionModel.store_id==store,RecipeVersionModel.product_id==r.product_id,
-       RecipeVersionModel.effective_from<=r.date,
-       (RecipeVersionModel.effective_to.is_(None)) | (RecipeVersionModel.effective_to>=r.date),
-      ).order_by(RecipeVersionModel.version.desc()))
-      if recipe:
-       for line in s.scalars(select(RecipeLineModel).where(RecipeLineModel.recipe_version_id==recipe.recipe_version_id)):
-        usage=s.scalar(select(UsageDailyModel).where(UsageDailyModel.store_id==store,UsageDailyModel.date==r.date,UsageDailyModel.ingredient_id==line.ingredient_id))
-        rebuilt=Decimal(r.quantity)*Decimal(line.quantity)
-        if usage is None:
-         s.add(UsageDailyModel(usage_record_id=str(uuid4()),store_id=store,date=r.date,ingredient_id=line.ingredient_id,quantity=rebuilt,unit=line.unit,source="reconstructed_from_sales"))
-        elif usage.source=="reconstructed_from_sales":
-         usage.quantity=Decimal(usage.quantity)+rebuilt
-      else:warnings.append({"external_record_id":r.external_record_id,"code":"RECIPE_NOT_FOUND"})
+      sold_product=s.scalar(select(ProductModel).where(ProductModel.store_id==store,ProductModel.product_id==r.product_id))
+      demand_products=[(sold_product,Decimal(1))]
+      if sold_product.item_type=="combo":
+       bundle=list(s.execute(select(ProductBundleLineModel,ProductModel).join(ProductModel,ProductModel.product_id==ProductBundleLineModel.component_product_id).where(ProductBundleLineModel.store_id==store,ProductBundleLineModel.combo_product_id==sold_product.product_id).order_by(ProductBundleLineModel.position)))
+       demand_products=[(component,Decimal(line.quantity)) for line,component in bundle]
+      for demand_product,multiplier in demand_products:
+       recipe=s.scalar(select(RecipeVersionModel).where(
+        RecipeVersionModel.store_id==store,RecipeVersionModel.product_id==demand_product.product_id,
+        RecipeVersionModel.effective_from<=r.date,
+        (RecipeVersionModel.effective_to.is_(None)) | (RecipeVersionModel.effective_to>=r.date),
+       ).order_by(RecipeVersionModel.version.desc()))
+       if recipe:
+        for line in s.scalars(select(RecipeLineModel).where(RecipeLineModel.recipe_version_id==recipe.recipe_version_id)):
+         usage=s.scalar(select(UsageDailyModel).where(UsageDailyModel.store_id==store,UsageDailyModel.date==r.date,UsageDailyModel.ingredient_id==line.ingredient_id))
+         rebuilt=Decimal(r.quantity)*multiplier*Decimal(line.quantity)
+         if usage is None:
+          s.add(UsageDailyModel(usage_record_id=str(uuid4()),store_id=store,date=r.date,ingredient_id=line.ingredient_id,quantity=rebuilt,unit=line.unit,source="reconstructed_from_sales"))
+         elif usage.source=="reconstructed_from_sales":
+          usage.quantity=Decimal(usage.quantity)+rebuilt
+       else:warnings.append({"external_record_id":r.external_record_id,"code":"RECIPE_NOT_FOUND","combo_product_id":sold_product.product_id if sold_product.item_type=="combo" else None,"component_product_id":demand_product.product_id,"sale_date":r.date.isoformat()})
      records.append({"external_record_id":r.external_record_id,"sales_record_id":rid,"status":status})
     else:
      ingredient=s.scalar(select(IngredientModel).where(IngredientModel.store_id==store,IngredientModel.ingredient_id==r.ingredient_id));supplier=s.scalar(select(SupplierModel).where(SupplierModel.store_id==store,SupplierModel.supplier_id==r.supplier_id))
@@ -227,70 +237,44 @@ class CompletionService:
    s.commit();return result
  def _forecast_status(self,x):
   return {"forecast_run_id":x.forecast_run_id,"status":x.status,"engine_status":x.engine_status,"cutoff_date":x.cutoff_date,"horizon_days":x.horizon_days}
- def _forecast_result(self,x):
-  snapshot=json.loads(x.input_snapshot_json or "{}")
-  return snapshot.get("result") or {**self._forecast_status(x),"model_version":x.model_version,"calibrator_version":x.calibrator_version,"forecasts":[],"warnings":[]}
  def forecast_create(self,store,b,key):
   with self.factory() as s:
-   StoreRepository(s).get_required(store);payload=b.model_dump(mode="json");request_hash=canonical_hash(payload);rid=str(uuid4());endpoint=f"/api/v1/stores/{store}/forecast-runs";idem_record=None
+   StoreRepository(s).get_required(store);payload=b.model_dump(mode="json");request_hash=canonical_hash(payload);rid=str(uuid4())
    if key:
-    replay=IdempotencyService(IdempotencyRepository(s)).register(store_id=store,endpoint=endpoint,http_method="POST",idempotency_key=key,request_hash=request_hash)
+    replay=IdempotencyService(IdempotencyRepository(s)).register(store_id=store,endpoint=f"/api/v1/stores/{store}/forecast-runs",http_method="POST",idempotency_key=key,request_hash=request_hash)
     if replay.is_replay:
-     existing=s.scalar(select(ForecastRunModel).where(ForecastRunModel.store_id==store,ForecastRunModel.forecast_run_id==replay.record.resource_id))
-     if not existing:raise ResourceNotFoundError(details={"resource":"forecast_run"})
-     s.rollback();return self._forecast_status(existing)
-    idem_record=replay.record
-   requested_ids=list(dict.fromkeys(b.scope.get("ingredient_ids") or []));query=select(IngredientModel).where(IngredientModel.store_id==store,IngredientModel.active.is_(True))
-   if requested_ids:
-    ingredients=list(s.scalars(query.where(IngredientModel.ingredient_id.in_(requested_ids))));found={x.ingredient_id for x in ingredients};missing=[x for x in requested_ids if x not in found]
-    if missing:raise ResourceNotFoundError(details={"resource":"ingredient","ingredient_ids":missing})
-   else:ingredients=list(s.scalars(query.order_by(IngredientModel.ingredient_id)))
-   forecasts=[]
-   for ingredient in ingredients:
-    points=[{"date":(b.cutoff_date+timedelta(days=offset)).isoformat(),"p25":self.MOCK_NUMBER,"p50":self.MOCK_NUMBER,"p75":self.MOCK_NUMBER,"explanation":"model_not_ready","source":"mock_fallback"} for offset in range(1,b.horizon_days+1)]
-    forecasts.append({"ingredient_id":ingredient.ingredient_id,"ingredient":ingredient.ingredient,"unit":ingredient.base_unit,"history":[],"forecast":points,"totals":{"p25":self.MOCK_NUMBER,"p50":self.MOCK_NUMBER,"p75":self.MOCK_NUMBER},"drivers":["model_not_ready"],"confidence":"model_not_ready","data_notes":["model_not_ready"]})
-   result={"forecast_run_id":rid,"status":"completed","engine_status":"model_not_ready","model_version":"model_not_ready","calibrator_version":"model_not_ready","mocked":True,"forecasts":forecasts,"warnings":[{"code":"MODEL_NOT_READY","message":"model_not_ready","source":"mock_fallback"}]}
-   run=ForecastRunModel(forecast_run_id=rid,store_id=store,cutoff_date=b.cutoff_date,horizon_days=b.horizon_days,quantiles_json=json.dumps(b.quantiles),scope_json=json.dumps(b.scope),use_latest_calendar=b.use_latest_calendar,status="completed",engine_status="model_not_ready",request_hash=request_hash,model_version="model_not_ready",calibrator_version="model_not_ready",input_snapshot_json=json.dumps({"mocked":True,"source":"mock_fallback","result":result}),failure_code=None,failure_message=None)
-   s.add(run);response=self._forecast_status(run)
-   if idem_record:
-    idem_record.resource_type="forecast_run";idem_record.resource_id=rid;idem_record.response_status=202;idem_record.response_body_json=json.dumps(response,default=str)
-   s.commit();return response
+     rid=replay.record.resource_id;s.rollback()
+     raise ModelNotReadyError(details={"forecast_run_id":rid,"engine_status":"model_unavailable"})
+    replay.record.resource_type="forecast_run";replay.record.resource_id=rid;replay.record.response_status=503
+   s.add(ForecastRunModel(forecast_run_id=rid,store_id=store,cutoff_date=b.cutoff_date,horizon_days=b.horizon_days,quantiles_json=json.dumps(b.quantiles),scope_json=json.dumps(b.scope),use_latest_calendar=b.use_latest_calendar,status="blocked",engine_status="model_unavailable",request_hash=request_hash,failure_code="MODEL_NOT_READY",failure_message="Forecast model unavailable"));s.commit()
+  raise ModelNotReadyError(details={"forecast_run_id":rid,"engine_status":"model_unavailable"})
  def forecast_get(self,store,rid,result):
   with self.factory() as s:x=s.scalar(select(ForecastRunModel).where(ForecastRunModel.store_id==store,ForecastRunModel.forecast_run_id==rid))
   if not x:raise ResourceNotFoundError(details={"resource":"forecast_run"})
-  return self._forecast_result(x) if result else self._forecast_status(x)
+  if result:raise ModelNotReadyError(details={"forecast_run_id":rid,"engine_status":x.engine_status})
+  return self._forecast_status(x)
  def _plan_status(self,x):
   return {"plan_run_id":x.plan_run_id,"status":x.status,"engine_status":x.engine_status,"forecast_run_id":x.forecast_run_id,"strategy":x.strategy,"budget_limit":x.budget_limit,"as_of_date":x.as_of_date}
- def _plan_result(self,s,x):
-  rows=list(s.scalars(select(RecommendationModel).where(RecommendationModel.store_id==x.store_id,RecommendationModel.plan_run_id==x.plan_run_id).order_by(RecommendationModel.recommendation_id)))
-  recommendations=[{"recommendation_id":r.recommendation_id,"ingredient_id":r.ingredient_id,"supplier_id":r.supplier_id,"unit":r.unit,"order_quantity":r.order_quantity,"recommended_quantity":r.order_quantity,"unit_cost":r.unit_cost,"estimated_cost":r.cost,"projected_waste":self.MOCK_NUMBER,"projected_shortage":self.MOCK_NUMBER,"safety_stock":self.MOCK_NUMBER,"rationale":"model_not_ready","engine_status":"model_not_ready","source":"mock_fallback","mocked":True} for r in rows]
-  return {"plan_run_id":x.plan_run_id,"status":x.status,"engine_status":x.engine_status,"strategy":x.strategy,"mocked":True,"budget":{"limit":x.budget_limit,"planned_cost":self.MOCK_NUMBER,"remaining_after_plan":self.MOCK_NUMBER},"recommendations":recommendations,"warnings":[{"code":"MODEL_NOT_READY","message":"model_not_ready","source":"mock_fallback"}]}
  def plan_create(self,store,b,key):
   with self.factory() as s:
    StoreRepository(s).get_required(store);forecast=s.scalar(select(ForecastRunModel).where(ForecastRunModel.store_id==store,ForecastRunModel.forecast_run_id==b.forecast_run_id))
    if not forecast:raise ResourceNotFoundError(details={"resource":"forecast_run"})
    if b.strategy not in {"economy","balanced","safe"}:raise ValidationError("strategy không hợp lệ.")
-   rid=str(uuid4());payload=b.model_dump(mode="json");request_hash=canonical_hash(payload);endpoint=f"/api/v1/stores/{store}/plan-runs";idem_record=None
+   rid=str(uuid4());payload=b.model_dump(mode="json");request_hash=canonical_hash(payload)
    if key:
-    replay=IdempotencyService(IdempotencyRepository(s)).register(store_id=store,endpoint=endpoint,http_method="POST",idempotency_key=key,request_hash=request_hash)
+    replay=IdempotencyService(IdempotencyRepository(s)).register(store_id=store,endpoint=f"/api/v1/stores/{store}/plan-runs",http_method="POST",idempotency_key=key,request_hash=request_hash)
     if replay.is_replay:
-     existing=s.scalar(select(PlanRunModel).where(PlanRunModel.store_id==store,PlanRunModel.plan_run_id==replay.record.resource_id))
-     if not existing:raise ResourceNotFoundError(details={"resource":"plan_run"})
-     s.rollback();return self._plan_status(existing)
-    idem_record=replay.record
-   plan=PlanRunModel(plan_run_id=rid,store_id=store,forecast_run_id=b.forecast_run_id,strategy=b.strategy,budget_limit=b.budget_limit,as_of_date=b.as_of_date,include_open_purchase_orders=b.include_open_purchase_orders,status="completed",engine_status="model_not_ready",request_hash=request_hash,input_snapshot_json=json.dumps({"forecast_status":forecast.status,"mocked":True,"source":"mock_fallback"}),warnings_json=json.dumps([{"code":"MODEL_NOT_READY","message":"model_not_ready"}]),failure_code=None,failure_message=None)
-   s.add(plan);s.flush()
-   terms=list(s.scalars(select(SupplierIngredientTermModel).join(IngredientModel,IngredientModel.ingredient_id==SupplierIngredientTermModel.ingredient_id).join(SupplierModel,SupplierModel.supplier_id==SupplierIngredientTermModel.supplier_id).where(SupplierIngredientTermModel.store_id==store,SupplierIngredientTermModel.active.is_(True),IngredientModel.active.is_(True),SupplierModel.active.is_(True)).order_by(SupplierIngredientTermModel.constraint_id)))
-   for term in terms:s.add(RecommendationModel(recommendation_id=str(uuid4()),plan_run_id=rid,store_id=store,ingredient_id=term.ingredient_id,unit=term.unit,order_quantity=Decimal(self.MOCK_NUMBER),unit_cost=self.MOCK_NUMBER,cost=self.MOCK_NUMBER,supplier_id=term.supplier_id,moq=term.moq,pack_size=term.pack_size,lead_time_days=term.lead_time_days))
-   response=self._plan_status(plan)
-   if idem_record:
-    idem_record.resource_type="plan_run";idem_record.resource_id=rid;idem_record.response_status=202;idem_record.response_body_json=json.dumps(response,default=str)
-   s.commit();return response
+     rid=replay.record.resource_id;s.rollback()
+     raise ModelNotReadyError(details={"plan_run_id":rid,"engine_status":"planner_unavailable"})
+    replay.record.resource_type="plan_run";replay.record.resource_id=rid;replay.record.response_status=503
+   s.add(PlanRunModel(plan_run_id=rid,store_id=store,forecast_run_id=b.forecast_run_id,strategy=b.strategy,budget_limit=b.budget_limit,as_of_date=b.as_of_date,include_open_purchase_orders=b.include_open_purchase_orders,status="blocked",engine_status="planner_unavailable",request_hash=request_hash,input_snapshot_json=json.dumps({"forecast_status":forecast.status}),warnings_json="[]",failure_code="MODEL_NOT_READY",failure_message="Planner unavailable"));s.commit()
+  raise ModelNotReadyError(details={"plan_run_id":rid,"engine_status":"planner_unavailable"})
  def plan_get(self,store,rid,result):
   with self.factory() as s:
    x=s.scalar(select(PlanRunModel).where(PlanRunModel.store_id==store,PlanRunModel.plan_run_id==rid))
    if not x:raise ResourceNotFoundError(details={"resource":"plan_run"})
-   return self._plan_result(s,x) if result else self._plan_status(x)
+   if result:raise ModelNotReadyError(details={"plan_run_id":rid,"engine_status":x.engine_status})
+   return self._plan_status(x)
  def _po_public(self,s,po):
   supplier=s.scalar(select(SupplierModel).where(SupplierModel.supplier_id==po.supplier_id))
   lines=list(s.scalars(select(PurchaseOrderLineModel).where(PurchaseOrderLineModel.po_id==po.po_id).order_by(PurchaseOrderLineModel.po_line_id)))

@@ -11,7 +11,7 @@ from app.models.import_normalized import (
 from app.models.store import StoreModel
 from app.models.business import (
     CalendarFeatureModel, IngredientAliasModel, IngredientModel, InventoryLotModel,
-    InventoryMovementModel, ProductModel, PurchaseReceiptModel, RecipeLineModel,
+    InventoryMovementModel, ProductBundleLineModel, ProductModel, PurchaseReceiptModel, RecipeLineModel,
     RecipeVersionModel, SalesDailyModel, StoreSettingsModel, SupplierIngredientTermModel,
     SupplierModel, UsageDailyModel,
 )
@@ -26,7 +26,7 @@ __all__ = [
     "ImportMappingModel",
     "ImportSheetProfileModel",
     "StoreModel",
-    "StoreSettingsModel", "IngredientModel", "IngredientAliasModel", "ProductModel",
+    "StoreSettingsModel", "IngredientModel", "IngredientAliasModel", "ProductModel", "ProductBundleLineModel",
     "RecipeVersionModel", "RecipeLineModel", "SupplierModel",
     "SupplierIngredientTermModel", "InventoryLotModel", "InventoryMovementModel",
     "SalesDailyModel", "UsageDailyModel", "PurchaseReceiptModel", "CalendarFeatureModel",

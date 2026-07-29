@@ -196,7 +196,7 @@ def test_inventory_count_adjustment_atomic_version_and_replay(client, session_fa
         assert s.scalar(select(func.count()).select_from(InventoryMovementModel)) == 3
 
 
-def test_model_unavailable_uses_deterministic_forecast_and_plan_fallback(client, session_factory):
+def test_model_unavailable_remains_explicitly_blocked(client, session_factory):
     _ingredient(session_factory)
     _supplier(session_factory)
     term = client.post("/api/v1/stores/STORE_001/supplier-constraints", json={
@@ -212,22 +212,18 @@ def test_model_unavailable_uses_deterministic_forecast_and_plan_fallback(client,
                           json=forecast_body, headers={"Idempotency-Key": "forecast-fallback"})
     replay = client.post("/api/v1/stores/STORE_001/forecast-runs",
                          json=forecast_body, headers={"Idempotency-Key": "forecast-fallback"})
-    assert created.status_code == replay.status_code == 202
-    assert created.json()["forecast_run_id"] == replay.json()["forecast_run_id"]
-    assert created.json()["status"] == "completed"
-    assert created.json()["engine_status"] == "model_not_ready"
-    forecast_id = created.json()["forecast_run_id"]
+    assert created.status_code == replay.status_code == 503
+    assert created.json()["code"] == replay.json()["code"] == "MODEL_NOT_READY"
+    forecast_id = created.json()["details"]["forecast_run_id"]
+    assert forecast_id == replay.json()["details"]["forecast_run_id"]
+    status = client.get(f"/api/v1/stores/STORE_001/forecast-runs/{forecast_id}")
+    assert status.status_code == 200
+    assert status.json()["status"] == "blocked"
+    assert status.json()["engine_status"] == "model_unavailable"
     forecast_result = client.get(
         f"/api/v1/stores/STORE_001/forecast-runs/{forecast_id}/result")
-    assert forecast_result.status_code == 200
-    payload = forecast_result.json()
-    assert payload["mocked"] is True
-    assert payload["engine_status"] == "model_not_ready"
-    assert len(payload["forecasts"]) == 1
-    assert len(payload["forecasts"][0]["forecast"]) == 7
-    assert payload["forecasts"][0]["forecast"][0]["p25"] == 10000000000000000
-    assert payload["forecasts"][0]["forecast"][0]["p50"] == 10000000000000000
-    assert payload["forecasts"][0]["forecast"][0]["p75"] == 10000000000000000
+    assert forecast_result.status_code == 503
+    assert forecast_result.json()["code"] == "MODEL_NOT_READY"
     plan = client.post("/api/v1/stores/STORE_001/plan-runs", json={
         "forecast_run_id": forecast_id, "strategy": "balanced",
         "budget_limit": 1000, "as_of_date": "2026-07-28",
@@ -238,28 +234,21 @@ def test_model_unavailable_uses_deterministic_forecast_and_plan_fallback(client,
         "budget_limit": 1000, "as_of_date": "2026-07-28",
         "include_open_purchase_orders": True,
     }, headers={"Idempotency-Key": "plan-fallback"})
-    assert plan.status_code == plan_replay.status_code == 202
-    assert plan.json()["plan_run_id"] == plan_replay.json()["plan_run_id"]
-    plan_id = plan.json()["plan_run_id"]
+    assert plan.status_code == plan_replay.status_code == 503
+    assert plan.json()["code"] == plan_replay.json()["code"] == "MODEL_NOT_READY"
+    plan_id = plan.json()["details"]["plan_run_id"]
+    assert plan_id == plan_replay.json()["details"]["plan_run_id"]
+    plan_status = client.get(f"/api/v1/stores/STORE_001/plan-runs/{plan_id}")
+    assert plan_status.status_code == 200
+    assert plan_status.json()["status"] == "blocked"
+    assert plan_status.json()["engine_status"] == "planner_unavailable"
     result = client.get(f"/api/v1/stores/STORE_001/plan-runs/{plan_id}/result")
-    assert result.status_code == 200
-    plan_payload = result.json()
-    assert plan_payload["status"] == "completed"
-    assert plan_payload["engine_status"] == "model_not_ready"
-    assert plan_payload["mocked"] is True
-    assert plan_payload["budget"]["planned_cost"] == 10000000000000000
-    assert len(plan_payload["recommendations"]) == 1
-    assert int(plan_payload["recommendations"][0]["recommended_quantity"]) == 10000000000000000
-    po = client.post("/api/v1/stores/STORE_001/purchase-orders", json={
-        "plan_run_id": plan_id,
-        "lines": [{"recommendation_id": plan_payload["recommendations"][0]["recommendation_id"]}],
-    })
-    assert po.status_code == 422
-    assert po.json()["details"]["reason"] == "model_not_ready"
+    assert result.status_code == 503
+    assert result.json()["code"] == "MODEL_NOT_READY"
     with session_factory() as s:
         assert s.scalar(select(func.count()).select_from(ForecastRunModel)) == 1
         assert s.scalar(select(func.count()).select_from(PlanRunModel)) == 1
-        assert s.scalar(select(func.count()).select_from(RecommendationModel)) == 1
+        assert s.scalar(select(func.count()).select_from(RecommendationModel)) == 0
         assert s.scalar(select(func.count()).select_from(PurchaseOrderModel)) == 0
 
 

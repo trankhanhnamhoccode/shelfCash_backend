@@ -6,7 +6,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 
 from app.core.exceptions import (
-    DuplicateResourceError, ResourceNotFoundError, ValidationError, VersionConflictError,
+    DuplicateResourceError, MenuError, ResourceNotFoundError, ValidationError, VersionConflictError,
 )
 from app.core.names import display_name, normalize_name
 from app.core.provenance import canonical_hash
@@ -362,7 +362,10 @@ class RecipeApiService:
         with self.session_factory() as session:
             StoreRepository(session).get_required(store_id)
             catalog, repo = CatalogRepository(session), RecipeRepository(session)
-            if catalog.get_product(store_id, product_id) is None: raise ResourceNotFoundError(details={"resource": "product"})
+            product = catalog.get_product(store_id, product_id)
+            if product is None: raise ResourceNotFoundError(details={"resource": "product"})
+            if product.item_type == "combo":
+                raise MenuError("RECIPE_NOT_ALLOWED_FOR_COMBO", "Combo sử dụng components; không lưu recipe trực tiếp.", {"product_id": product_id}, http_status=409)
             if on_date:
                 version = repo.get_active(store_id, product_id, on_date)
             else:
@@ -385,7 +388,10 @@ class RecipeApiService:
         with self.session_factory() as session:
             StoreRepository(session).get_required(store_id)
             catalog, repo = CatalogRepository(session), RecipeRepository(session)
-            if catalog.get_product(store_id, product_id) is None: raise ResourceNotFoundError(details={"resource": "product"})
+            product = catalog.get_product(store_id, product_id)
+            if product is None: raise ResourceNotFoundError(details={"resource": "product"})
+            if product.item_type == "combo":
+                raise MenuError("RECIPE_NOT_ALLOWED_FOR_COMBO", "Combo sử dụng components; không lưu recipe trực tiếp.", {"product_id": product_id}, http_status=409)
             versions = repo.get_versions(store_id, product_id)
             current = versions[-1].version if versions else 0
             idem = IdempotencyService(IdempotencyRepository(session))

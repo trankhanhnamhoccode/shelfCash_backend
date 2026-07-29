@@ -1,10 +1,11 @@
 from fastapi import APIRouter, Depends, Header
 
-from app.dependencies import get_catalog_service, require_api_key
+from app.dependencies import get_catalog_service, get_menu_service, require_api_key
 from app.schemas.catalog import (
     AliasBulkUpsert, AliasResponse, IngredientCreate, IngredientPatch, IngredientResponse,
-    ProductCreate, ProductPatch, ProductResponse,
+    ProductResponse,
 )
+from app.schemas.menu import MenuProductCreate, MenuProductPatch
 
 router = APIRouter(tags=["catalog"], dependencies=[Depends(require_api_key)])
 
@@ -39,16 +40,16 @@ def put_aliases(
     return service.put_aliases(store_id, body.aliases, idempotency_key)
 
 
-@router.get("/stores/{store_id}/products", response_model=list[ProductResponse], summary="List products")
-def list_products(store_id: str, active: bool | None = None, q: str | None = None, sku: str | None = None, service=Depends(get_catalog_service)):
+@router.get("/stores/{store_id}/products", summary="List products")
+def list_products(store_id: str, active: bool | None = None, q: str | None = None, sku: str | None = None, service=Depends(get_menu_service)):
     return service.list_products(store_id, active, q, sku)
 
 
-@router.post("/stores/{store_id}/products", response_model=ProductResponse, status_code=201, summary="Create product")
-def create_product(store_id: str, body: ProductCreate, idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"), service=Depends(get_catalog_service)):
+@router.post("/stores/{store_id}/products", status_code=201, summary="Create product")
+def create_product(store_id: str, body: MenuProductCreate, idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"), service=Depends(get_menu_service)):
     return service.create_product(store_id, body, idempotency_key)
 
 
-@router.patch("/stores/{store_id}/products/{product_id}", response_model=ProductResponse, summary="Update product")
-def patch_product(store_id: str, product_id: str, body: ProductPatch, service=Depends(get_catalog_service)):
+@router.patch("/stores/{store_id}/products/{product_id}", summary="Update product")
+def patch_product(store_id: str, product_id: str, body: MenuProductPatch, service=Depends(get_menu_service)):
     return service.patch_product(store_id, product_id, body)

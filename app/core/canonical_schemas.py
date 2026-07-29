@@ -21,7 +21,7 @@ CANONICAL_SCHEMAS = {
     },
     "supplier_constraints": {
         "fields": ["supplier_name", "ingredient_name", "minimum_order_quantity", "order_unit", "package_size", "package_base_unit", "lead_time_days", "unit_price", "available_delivery_days"],
-        "core_fields": ["supplier_name", "ingredient_name"],
+        "core_fields": ["supplier_name", "ingredient_name", "minimum_order_quantity", "order_unit", "package_size", "package_base_unit"],
     },
     "calendar_features": {
         "fields": ["date", "is_weekend", "is_holiday", "is_store_closed", "is_promotion", "promotion_name", "temperature", "rainfall"],
@@ -30,6 +30,16 @@ CANONICAL_SCHEMAS = {
     "business_constraints": {
         "fields": ["constraint_type", "ingredient_name", "value", "unit", "currency", "effective_date", "note"],
         "core_fields": ["constraint_type", "value"],
+    },
+    "menu": {
+        "fields": [
+            "product_sku", "item_type", "product_name", "combo_components",
+            "selling_unit", "list_price", "discount_rate", "selling_price",
+            "savings_amount", "status",
+        ],
+        "core_fields": [
+            "product_sku", "item_type", "product_name", "selling_price",
+        ],
     },
     "unknown": {"fields": [], "core_fields": []},
 }

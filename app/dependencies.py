@@ -17,6 +17,10 @@ def get_catalog_service(request: Request):
     return request.app.state.catalog_service
 
 
+def get_menu_service(request: Request):
+    return request.app.state.menu_service
+
+
 def get_recipe_api_service(request: Request):
     return request.app.state.recipe_api_service
 

@@ -1,6 +1,7 @@
 from app.core.canonical_schemas import CANONICAL_SCHEMAS
 from app.core.normalizer import normalize_rows
-from app.core.rule_mapper import finalize_mapping, map_sheet_rules
+from app.core.rule_mapper import finalize_mapping, map_sheet_rules, menu_mapping_details
+from app.core.exceptions import MappingIncompleteError
 from app.core.validator import validate_records
 from app.schemas.llm import MappingSuggestion
 
@@ -23,6 +24,15 @@ class IngestionPipeline:
 
     def confirm(self, profile, sheet_type: str, column_mapping: dict[str, str | None]) -> MappingSuggestion:
         complete_mapping = {column: column_mapping.get(column) for column in profile.columns}
+        if sheet_type == "menu":
+            details = menu_mapping_details(profile, complete_mapping)
+            if any(details[key] for key in (
+                "unresolved_columns", "missing_core_fields",
+                "duplicate_target_fields", "invalid_target_fields",
+            )):
+                raise MappingIncompleteError(
+                    "Mapping Menu chưa hoàn chỉnh.", details
+                )
         suggestion = MappingSuggestion(
             sheet_type=sheet_type, confidence=1.0, column_mapping=complete_mapping,
             warnings=[], errors=[], source="rule", requires_review=False,

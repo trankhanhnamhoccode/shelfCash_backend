@@ -345,6 +345,8 @@ class ImportService:
                                 request.sheet_type,
                                 request.column_mapping,
                             )
+                        except MappingIncompleteError:
+                            raise
                         except ValueError as exc:
                             raise ValidationError(
                                 "Mapping không hợp lệ.",
@@ -481,9 +483,9 @@ class ImportService:
                         "sheet_count": len(profiles_by_id),
                     },
                 ).model_dump(mode="json")
-                business_summary = ImportBusinessPersistenceService(session).persist(
-                    job=job, sheets=business_sheets
-                )
+                persistence = ImportBusinessPersistenceService(session)
+                business_summary = persistence.persist(job=job, sheets=business_sheets)
+                canonical["menu"] = persistence.menu_result
                 job.result_json = json_dump(canonical)
                 job.validation_summary_json = json_dump(summary)
                 job.business_write_summary_json = json_dump(business_summary)
@@ -506,9 +508,7 @@ class ImportService:
                 )
                 session.commit()
                 try:
-                    temp_path.write_text(
-                        json.dumps(canonical, ensure_ascii=False), encoding="utf-8"
-                    )
+                    temp_path.write_text(json_dump(canonical), encoding="utf-8")
                     temp_path.replace(result_path)
                 except OSError:
                     temp_path.unlink(missing_ok=True)

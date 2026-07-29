@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError as PydanticValidationError
 
-from app.api import catalog, completion, health, imports, llm, operational, recipes
+from app.api import catalog, completion, health, imports, llm, menu, operational, recipes
 from app.config import Settings, get_settings
 from app.core.exceptions import ShelfCashError
 from app.core.excel_reader import ExcelIngestionError
@@ -19,6 +19,7 @@ from app.services.import_service import ImportService
 from app.services.catalog_service import CatalogApiService, RecipeApiService
 from app.services.operational_service import OperationalService
 from app.services.completion_service import CompletionService
+from app.services.menu_service import MenuService
 
 
 logger = logging.getLogger("shelfcash.api")
@@ -84,6 +85,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 session_factory, pipeline, active_settings
             )
             app.state.catalog_service = CatalogApiService(session_factory)
+            app.state.menu_service = MenuService(session_factory)
             app.state.recipe_api_service = RecipeApiService(session_factory)
             app.state.operational_service = OperationalService(session_factory)
             app.state.completion_service = CompletionService(session_factory, app.state.operational_service)
@@ -102,6 +104,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(llm.router, prefix="/api/v1")
     app.include_router(imports.router, prefix="/api/v1")
     app.include_router(catalog.router, prefix="/api/v1")
+    app.include_router(menu.router, prefix="/api/v1")
     app.include_router(recipes.router, prefix="/api/v1")
     app.include_router(operational.router, prefix="/api/v1")
     app.include_router(completion.router, prefix="/api/v1")

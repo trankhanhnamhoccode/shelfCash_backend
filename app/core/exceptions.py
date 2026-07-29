@@ -92,6 +92,16 @@ class InvalidStateTransitionError(ShelfCashError):
     http_status = 409
 
 
+class MenuError(ShelfCashError):
+    def __init__(
+        self, code: str, message: str, details: dict[str, Any] | None = None,
+        *, http_status: int = 422,
+    ):
+        self.code = code
+        self.http_status = http_status
+        super().__init__(message, details)
+
+
 class DatabaseNotReadyError(ShelfCashError):
     code = "DATABASE_NOT_READY"
     default_message = "Database chưa sẵn sàng."

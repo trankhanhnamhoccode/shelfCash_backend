@@ -1,5 +1,16 @@
 # ShelfCash Backend
 
+## Menu Addendum v1.0
+
+Revision `20260729_0008` adds product type/unit provenance and relational combo
+components. Menu is a read model over products and `product_bundle_lines`, not a
+duplicate CRUD table. The application exposes exactly 53 contract operations,
+including Menu discovery, Menu listing and atomic component replacement.
+
+See [`docs/MENU_IMPORT_AND_API.md`](docs/MENU_IMPORT_AND_API.md),
+[`docs/API_IMPLEMENTATION_STATUS.md`](docs/API_IMPLEMENTATION_STATUS.md), and
+[`docs/API_OPERATION_BEHAVIOR_AUDIT.md`](docs/API_OPERATION_BEHAVIOR_AUDIT.md).
+
 FastAPI backend nhận Excel từ React, profile workbook, đề xuất mapping bằng rules/Qwen, cho người dùng xác nhận, rồi chuẩn hóa thành canonical JSON ShelfCash.
 
 ## Kiến trúc

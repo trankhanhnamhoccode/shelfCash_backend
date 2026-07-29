@@ -15,5 +15,6 @@ class CanonicalResult(BaseModel):
     supplier_constraints: list[dict[str, Any]] = Field(default_factory=list)
     calendar_features: list[dict[str, Any]] = Field(default_factory=list)
     business_constraints: list[dict[str, Any]] = Field(default_factory=list)
+    menu: list[dict[str, Any]] = Field(default_factory=list)
     validation_summary: dict[str, Any] = Field(default_factory=dict)
     ingestion_metadata: dict[str, Any] = Field(default_factory=dict)

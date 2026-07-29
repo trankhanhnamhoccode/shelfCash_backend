@@ -8,6 +8,14 @@ def validate_records(sheet_type: str, records: list[dict[str, Any]]) -> dict[str
     errors = []
     for index, record in enumerate(records):
         missing = [field for field in core if record.get(field) is None or record.get(field) == ""]
+        if sheet_type == "menu":
+            from app.core.menu import components_empty
+            item_type = record.get("item_type")
+            components = record.get("combo_components")
+            if item_type == "single" and not components_empty(components):
+                missing.append("combo_components_must_be_empty")
+            if item_type == "combo" and components_empty(components):
+                missing.append("combo_components")
         if missing:
             errors.append({"row": index + 1, "missing_core_fields": missing})
     return {"row_count": len(records), "valid_rows": len(records) - len(errors), "invalid_rows": len(errors), "errors": errors[:100]}

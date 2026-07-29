@@ -6,7 +6,7 @@ from app.core.canonical_schemas import CANONICAL_SCHEMAS
 
 SheetType = Literal[
     "inventory", "sales_history", "usage_history", "recipes", "purchase_history",
-    "supplier_constraints", "calendar_features", "business_constraints", "unknown",
+    "supplier_constraints", "calendar_features", "business_constraints", "menu", "unknown",
 ]
 
 

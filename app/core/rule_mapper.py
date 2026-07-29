@@ -14,6 +14,14 @@ def normalize_text(value: str) -> str:
 
 
 ALIASES = {
+    "product_sku": ["ma mon"],
+    "item_type": ["loai"],
+    "combo_components": ["thanh phan combo"],
+    "selling_unit": ["dvt"],
+    "list_price": ["tong gia le"],
+    "discount_rate": ["muc giam"],
+    "savings_amount": ["tiet kiem"],
+    "status": ["trang thai"],
     "constraint_type": ["loai rang buoc", "loai dieu kien", "constraint type", "business rule"],
     "ingredient_name": ["nguyen lieu", "ten hang", "ten nl", "ap dung cho nl", "material", "ingredient", "ingredient name"],
     "effective_date": ["ngay hieu luc", "bat dau", "ap dung tu", "effective date"],
@@ -23,7 +31,7 @@ ALIASES = {
     "date": ["ngay", "date"],
     "snapshot_date": ["ngay kiem ke", "snapshot date"],
     "on_hand": ["ton kho", "so luong ton", "on hand", "quantity on hand"],
-    "product_name": ["san pham", "ten mon", "product", "product name"],
+    "product_name": ["san pham", "ten mon", "ten mon combo", "product", "product name"],
     "quantity_sold": ["so luong ban", "sl ban", "quantity sold"],
     "selling_price": ["gia ban", "selling price"],
     "revenue": ["doanh thu", "revenue"],
@@ -34,11 +42,15 @@ ALIASES = {
     "yield_quantity": ["san luong", "yield quantity"],
     "purchase_date": ["ngay nhap", "purchase date"],
     "quantity_received": ["so luong nhap", "sl nhap", "quantity received"],
-    "unit_price": ["don gia", "unit price"],
+    "unit_price": ["don gia", "gia mua", "unit price"],
     "total_cost": ["thanh tien", "total cost"],
     "supplier_name": ["nha cung cap", "vendor", "supplier"],
     "minimum_order_quantity": ["so luong dat toi thieu", "moq", "minimum order quantity"],
-    "lead_time_days": ["thoi gian giao", "lead time", "lead time days"],
+    "order_unit": ["order uom", "order unit", "don vi dat hang"],
+    "package_size": ["pack size", "package size", "quy cach dong goi"],
+    "package_base_unit": ["base uom", "base unit", "don vi co so"],
+    "lead_time_days": ["thoi gian giao", "lead time", "lead time days", "lead time (days)"],
+    "available_delivery_days": ["lich giao", "delivery schedule", "available delivery days"],
     "is_weekend": ["cuoi tuan", "is weekend"],
     "is_holiday": ["ngay le", "is holiday"],
     "temperature": ["nhiet do", "temperature"],
@@ -46,6 +58,7 @@ ALIASES = {
 }
 
 SHEET_KEYWORDS = {
+    "menu": ["menu", "product catalog", "catalog", "menu items", "products menu"],
     "inventory": ["kiem ke", "ton kho", "inventory", "stock"],
     "sales_history": ["pos", "ban hang", "sales"],
     "usage_history": ["su dung", "tieu hao", "usage"],
@@ -58,6 +71,50 @@ SHEET_KEYWORDS = {
         "dieu kien van hanh", "business rule", "operating rule", "maximum stock", "service level",
     ],
 }
+
+MENU_UNMAPPED = {None, "", "ignore", "__unmapped__"}
+MENU_HEADER_MAP = {
+    "ma mon": "product_sku",
+    "loai": "item_type",
+    "ten mon combo": "product_name",
+    "thanh phan combo": "combo_components",
+    "dvt": "selling_unit",
+    "tong gia le": "list_price",
+    "muc giam": "discount_rate",
+    "gia ban": "selling_price",
+    "tiet kiem": "savings_amount",
+    "trang thai": "status",
+}
+
+
+def menu_mapping_details(profile: SheetProfile, mapping: dict[str, str | None]) -> dict:
+    columns = list(profile.columns)
+    unresolved = [
+        column for column in columns
+        if mapping.get(column) is None
+        or str(mapping.get(column)).strip().casefold() in MENU_UNMAPPED
+    ]
+    targets = [
+        str(mapping[column]).strip() for column in columns
+        if column not in unresolved
+    ]
+    duplicate_targets = sorted({
+        target for target in targets if targets.count(target) > 1
+    })
+    missing_core = sorted(
+        set(CANONICAL_SCHEMAS["menu"]["core_fields"]) - set(targets)
+    )
+    invalid_targets = sorted(
+        set(targets) - set(CANONICAL_SCHEMAS["menu"]["fields"])
+    )
+    return {
+        "profile_id": None,
+        "sheet_name": profile.sheet_name,
+        "unresolved_columns": unresolved,
+        "missing_core_fields": missing_core,
+        "duplicate_target_fields": duplicate_targets,
+        "invalid_target_fields": invalid_targets,
+    }
 
 
 def _alias_map() -> dict[str, str]:
@@ -147,7 +204,11 @@ def map_sheet_rules(
     mapping = {}
     matches = 0
     for column in profile.columns:
-        target = NORMALIZED_ALIASES.get(normalize_text(column))
+        target = (
+            MENU_HEADER_MAP.get(normalize_text(column))
+            if sheet_type == "menu"
+            else NORMALIZED_ALIASES.get(normalize_text(column))
+        )
         target = target if target in allowed else None
         mapping[column] = target
         matches += target is not None
