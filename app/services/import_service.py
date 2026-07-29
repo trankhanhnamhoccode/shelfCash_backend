@@ -1,5 +1,6 @@
 import hashlib
 import json
+import logging
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -45,6 +46,10 @@ from app.schemas.llm import MappingSuggestion, SheetProfile
 from app.services.audit_service import AuditService
 from app.services.idempotency_service import IdempotencyService
 from app.services.business_persistence import ImportBusinessPersistenceService, SCHEMA_VERSION
+from app.core.logging_context import get_request_id
+
+
+logger = logging.getLogger("shelfcash.import")
 
 
 @dataclass
@@ -69,7 +74,18 @@ class ImportService:
         forecast_horizon: int,
         idempotency_key: str | None = None,
     ):
-        prepared = await self._read_uploads(uploads)
+        logger.info(
+            "import_stage_started request_id=%s stage=read_uploads store_id=%s file_count=%s",
+            get_request_id(), store_id, len(uploads),
+        )
+        try:
+            prepared = await self._read_uploads(uploads)
+        except Exception:
+            logger.exception(
+                "import_stage_failed request_id=%s stage=read_uploads store_id=%s",
+                get_request_id(), store_id,
+            )
+            raise
         request_hash = self._request_hash(
             store_id, forecast_date, forecast_horizon, prepared
         )
@@ -78,7 +94,15 @@ class ImportService:
         final_paths: list[Path] = []
         import_dir: Path | None = None
         try:
+            logger.info(
+                "import_stage_started request_id=%s stage=validate_store store_id=%s",
+                get_request_id(), store_id,
+            )
             StoreRepository(session).get_required(store_id)
+            logger.info(
+                "import_stage_completed request_id=%s stage=validate_store store_id=%s",
+                get_request_id(), store_id,
+            )
             if idempotency_key:
                 replay = self._existing_replay(
                     session, store_id, idempotency_key, request_hash
@@ -88,6 +112,10 @@ class ImportService:
                     return replay
 
             import_id = str(uuid4())
+            logger.info(
+                "import_stage_started request_id=%s stage=parse_workbooks store_id=%s import_id=%s file_count=%s",
+                get_request_id(), store_id, import_id, len(prepared),
+            )
             import_dir = self.settings.upload_dir / import_id
             import_dir.mkdir(parents=True, exist_ok=True)
             parsed_files: list[tuple[PreparedUpload, str, Path, list]] = []
@@ -106,6 +134,11 @@ class ImportService:
                 )
                 parsed_files.append((upload, stored_name, final_path, parsed))
 
+            logger.info(
+                "import_stage_completed request_id=%s stage=parse_workbooks store_id=%s import_id=%s sheet_count=%s",
+                get_request_id(), store_id, import_id,
+                sum(len(item[3]) for item in parsed_files),
+            )
             repository = NormalizedImportRepository(session)
             job = ImportJobModel(
                 import_id=import_id,
@@ -138,6 +171,10 @@ class ImportService:
                 for parsed in parsed_sheets:
                     profile_id = str(uuid4())
                     compatibility_sheet_id = f"{stored_name}:{parsed.sheet_id}"
+                    logger.info(
+                        "import_stage_started request_id=%s stage=suggest_mapping store_id=%s import_id=%s sheet=%r",
+                        get_request_id(), store_id, import_id, parsed.profile.sheet_name,
+                    )
                     suggestion = await self.pipeline.suggest(parsed.profile)
                     repository.add_profile(
                         ImportSheetProfileModel(
@@ -186,6 +223,10 @@ class ImportService:
                 )
 
             session.flush()
+            logger.info(
+                "import_stage_started request_id=%s stage=commit store_id=%s import_id=%s",
+                get_request_id(), store_id, import_id,
+            )
             record = repository.to_record(job)
             repository.sync_legacy(record)
             self._audit(
@@ -200,8 +241,16 @@ class ImportService:
                 temp_path.replace(final_path)
                 final_paths.append(final_path)
             session.commit()
+            logger.info(
+                "import_completed request_id=%s store_id=%s import_id=%s file_count=%s",
+                get_request_id(), store_id, import_id, len(prepared),
+            )
             return record
         except IntegrityError:
+            logger.exception(
+                "import_stage_failed request_id=%s stage=database_integrity store_id=%s import_id=%s",
+                get_request_id(), store_id, locals().get("import_id", "-"),
+            )
             session.rollback()
             self._cleanup_files([*temp_paths, *final_paths], import_dir)
             if idempotency_key:
@@ -214,6 +263,10 @@ class ImportService:
                 raise DuplicateRequestError()
             raise
         except Exception:
+            logger.exception(
+                "import_stage_failed request_id=%s stage=create_import store_id=%s import_id=%s",
+                get_request_id(), store_id, locals().get("import_id", "-"),
+            )
             session.rollback()
             self._cleanup_files([*temp_paths, *final_paths], import_dir)
             raise
@@ -221,14 +274,26 @@ class ImportService:
             session.close()
 
     def get(self, import_id):
+        logger.info(
+            "import_stage_started request_id=%s stage=get_import import_id=%s",
+            get_request_id(), import_id,
+        )
         with self.session_factory() as session:
             repository = NormalizedImportRepository(session)
             job = self._require_job(repository, str(import_id))
             session.commit()
+            logger.info(
+                "import_stage_completed request_id=%s stage=get_import import_id=%s store_id=%s",
+                get_request_id(), import_id, job.store_id,
+            )
             return repository.to_record(job)
 
     def confirm(self, import_id, confirmed):
         import_id = str(import_id)
+        logger.info(
+            "import_stage_started request_id=%s stage=confirm_mapping import_id=%s mapping_count=%s",
+            get_request_id(), import_id, len(confirmed),
+        )
         with self.session_factory() as session:
             try:
                 repository = NormalizedImportRepository(session)
@@ -310,13 +375,25 @@ class ImportService:
                     file_count=len(repository.files(import_id)),
                 )
                 session.commit()
+                logger.info(
+                    "import_stage_completed request_id=%s stage=confirm_mapping import_id=%s store_id=%s",
+                    get_request_id(), import_id, job.store_id,
+                )
                 return record
             except Exception:
+                logger.exception(
+                    "import_stage_failed request_id=%s stage=confirm_mapping import_id=%s",
+                    get_request_id(), import_id,
+                )
                 session.rollback()
                 raise
 
     def process(self, import_id):
         import_id = str(import_id)
+        logger.info(
+            "import_stage_started request_id=%s stage=process_import import_id=%s",
+            get_request_id(), import_id,
+        )
         result_path = self.settings.result_dir / f"{import_id}.json"
         temp_path = self.settings.result_dir / f".{import_id}.{uuid4().hex}.tmp"
         with self.session_factory() as session:
@@ -435,8 +512,16 @@ class ImportService:
                     temp_path.replace(result_path)
                 except OSError:
                     temp_path.unlink(missing_ok=True)
+                logger.info(
+                    "import_stage_completed request_id=%s stage=process_import import_id=%s store_id=%s business_summary=%r",
+                    get_request_id(), import_id, job.store_id, business_summary,
+                )
                 return record
             except Exception as exc:
+                logger.exception(
+                    "import_stage_failed request_id=%s stage=process_import import_id=%s",
+                    get_request_id(), import_id,
+                )
                 session.rollback()
                 temp_path.unlink(missing_ok=True)
                 result_path.unlink(missing_ok=True)

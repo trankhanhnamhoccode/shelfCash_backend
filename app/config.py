@@ -11,6 +11,7 @@ class Settings(BaseSettings):
     app_name: str = "shelfcash-backend"
     app_version: str = "1.0.0"
     environment: str = "development"
+    log_level: str = "INFO"
     host: str = "0.0.0.0"
     port: int = 8000
     llm_provider: str = "disabled"
@@ -30,6 +31,14 @@ class Settings(BaseSettings):
     database_url: str = "sqlite:///runtime/shelfcash.db"
     shelfcash_api_key: str = ""
     cors_origins: list[str] = ["http://localhost:5173", "http://localhost:3000"]
+
+    @field_validator("log_level")
+    @classmethod
+    def validate_log_level(cls, value: str) -> str:
+        normalized = value.upper()
+        if normalized not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
+            raise ValueError("LOG_LEVEL must be DEBUG, INFO, WARNING, ERROR, or CRITICAL")
+        return normalized
 
     @field_validator("cors_origins", mode="before")
     @classmethod

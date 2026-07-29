@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager
+import logging
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
@@ -18,6 +19,9 @@ from app.services.import_service import ImportService
 from app.services.catalog_service import CatalogApiService, RecipeApiService
 from app.services.operational_service import OperationalService
 from app.services.completion_service import CompletionService
+
+
+logger = logging.getLogger("shelfcash.api")
 
 
 def _request_id(request: Request) -> str | None:
@@ -55,6 +59,11 @@ def _error_response(
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     active_settings = settings or get_settings()
+    logging.basicConfig(
+        level=getattr(logging, active_settings.log_level),
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
+    logging.getLogger("shelfcash").setLevel(active_settings.log_level)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -99,6 +108,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.exception_handler(ExcelIngestionError)
     async def excel_error(request: Request, exc: ExcelIngestionError):
+        logger.warning(
+            "request_failed request_id=%s stage=excel_ingestion code=%s status=%s details=%r",
+            _request_id(request), exc.code, exc.status_code, exc.details,
+        )
         return _error_response(
             request,
             status_code=exc.status_code,
@@ -109,6 +122,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.exception_handler(ShelfCashError)
     async def domain_error(request: Request, exc: ShelfCashError):
+        logger.warning(
+            "request_failed request_id=%s stage=domain_validation code=%s status=%s details=%r",
+            _request_id(request), exc.code, exc.http_status, exc.details,
+        )
         return _error_response(
             request,
             status_code=exc.http_status,
@@ -119,6 +136,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.exception_handler(HTTPException)
     async def http_error(request: Request, exc: HTTPException):
+        logger.warning(
+            "request_failed request_id=%s stage=http_validation status=%s detail=%r",
+            _request_id(request), exc.status_code, exc.detail,
+        )
         if isinstance(exc.detail, dict) and {"code", "message", "details"} <= set(exc.detail):
             content = _error_content(
                 request,
@@ -136,6 +157,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.exception_handler(PydanticValidationError)
     async def validation_error(request: Request, exc: PydanticValidationError):
+        logger.warning(
+            "request_failed request_id=%s stage=response_validation status=422 errors=%r",
+            _request_id(request), exc.errors(),
+        )
         return _error_response(
             request,
             status_code=422,
@@ -146,6 +171,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.exception_handler(RequestValidationError)
     async def request_validation_error(request: Request, exc: RequestValidationError):
+        logger.warning(
+            "request_failed request_id=%s stage=request_validation status=422 errors=%r",
+            _request_id(request), exc.errors(),
+        )
         return _error_response(
             request,
             status_code=422,
@@ -155,7 +184,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
 
     @app.exception_handler(Exception)
-    async def unknown_error(request: Request, _: Exception):
+    async def unknown_error(request: Request, exc: Exception):
+        logger.exception(
+            "request_failed request_id=%s stage=unhandled status=500 exception_type=%s",
+            _request_id(request), type(exc).__name__,
+            exc_info=exc,
+        )
         return _error_response(
             request,
             status_code=500,
