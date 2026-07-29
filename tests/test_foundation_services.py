@@ -1,6 +1,7 @@
 import json
 
 import pytest
+from decimal import Decimal
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -12,6 +13,7 @@ from app.models.store import StoreModel
 from app.repositories.stores import StoreRepository
 from app.services.audit_service import AuditService
 from app.services.idempotency_service import IdempotencyService
+from app.core.units import convert_quantity, normalize_unit
 from scripts.seed_database import seed_database
 
 
@@ -39,6 +41,13 @@ def test_store_repository_and_missing_error(session_factory):
         with pytest.raises(StoreNotFoundError) as exc_info:
             repository.get_required("MISSING")
         assert exc_info.value.code == "STORE_NOT_FOUND"
+
+
+def test_missing_units_use_literal_fallback_without_conversion():
+    assert normalize_unit(None) == "None"
+    assert convert_quantity(Decimal("12.5"), None, "kg") == Decimal("12.5")
+    assert convert_quantity(Decimal("12.5"), "kg", None) == Decimal("12.5")
+    assert convert_quantity(Decimal("12.5"), None, None) == Decimal("12.5")
 
 
 def test_unit_of_work_commit_and_rollback(session_factory):

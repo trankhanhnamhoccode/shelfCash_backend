@@ -2,6 +2,7 @@ from collections import defaultdict
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
+import json
 from typing import Any
 from uuid import uuid4
 
@@ -15,6 +16,7 @@ from app.models.business import (
     CalendarFeatureModel, InventoryLotModel, InventoryMovementModel, PurchaseReceiptModel,
     SalesDailyModel, StoreSettingsModel, SupplierIngredientTermModel, UsageDailyModel,
 )
+from app.models.import_normalized import ImportIssueModel
 from app.repositories.business import CatalogRepository, InventoryRepository
 from app.repositories.recipes import RecipeRepository
 from app.repositories.stores import StoreRepository
@@ -257,14 +259,34 @@ class ImportBusinessPersistenceService:
             self.summary.purchase_receipts_created += 1
 
     def _persist_supplier_constraints(self, job, sheet):
-        for row in sheet["rows"]:
+        for index, row in enumerate(sheet["rows"]):
             ingredient = self._ingredient(job.store_id, row, "order_unit")
             supplier = self._supplier(job.store_id, row.get("supplier_name"))
             if supplier is None:
                 raise ValidationError("Thiếu supplier_name.")
             unit = row.get("order_unit") or row.get("package_base_unit")
-            moq = convert_quantity(self._decimal(row.get("minimum_order_quantity") or 0, "minimum_order_quantity"), unit, ingredient.base_unit)
-            pack = convert_quantity(self._decimal(row.get("package_size"), "package_size", positive=True), unit, ingredient.base_unit)
+            source_unit = "None" if unit is None else str(unit)
+            target_unit = "None" if ingredient.base_unit is None else str(ingredient.base_unit)
+            moq = convert_quantity(self._decimal(row.get("minimum_order_quantity") or 0, "minimum_order_quantity"), source_unit, target_unit)
+            pack = convert_quantity(self._decimal(row.get("package_size"), "package_size", positive=True), source_unit, target_unit)
+            if "None" in {source_unit, target_unit}:
+                self.summary.warnings += 1
+                self.summary.rows_skipped += 1
+                self.session.add(ImportIssueModel(
+                    issue_id=str(uuid4()), import_id=job.import_id,
+                    profile_id=sheet["profile_id"],
+                    source_row=int(row.get("_source_excel_row") or index + 1),
+                    severity="warning", code="UNIT_MISSING",
+                    message="Supplier constraint was skipped because its unit is missing.",
+                    details_json=json.dumps({
+                        "source_unit": source_unit,
+                        "target_unit": target_unit,
+                        "fallback_unit": "None",
+                        "quantity_conversion": "unchanged",
+                    }, ensure_ascii=False),
+                    issue_source="business_persistence",
+                ))
+                continue
             cost = int(self._decimal(row.get("unit_price") or 0, "unit_price"))
             lead = int(self._decimal(row.get("lead_time_days") or 0, "lead_time_days"))
             content = canonical_hash({"unit_cost": cost, "moq": moq, "pack_size": pack, "lead_time_days": lead, "unit": ingredient.base_unit})

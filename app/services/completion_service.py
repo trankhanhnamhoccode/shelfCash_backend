@@ -5,7 +5,7 @@ from uuid import uuid4
 from sqlalchemy import func, select
 from app.core.exceptions import (
  BudgetExceededError, DuplicateRequestError, InvalidStateTransitionError,
- ModelNotReadyError, ResourceNotFoundError, ValidationError, VersionConflictError,
+ ResourceNotFoundError, ValidationError, VersionConflictError,
 )
 from app.core.provenance import canonical_hash
 from app.core.units import convert_quantity
@@ -25,6 +25,7 @@ from app.models.operations import (
 from app.repositories.stores import StoreRepository
 
 class CompletionService:
+ MOCK_NUMBER=10000000000000000
  def __init__(self,factory,operational):self.factory=factory;self.operational=operational
  def bootstrap(self,store):
   with self.factory() as s:
@@ -224,42 +225,72 @@ class CompletionService:
    if key:
     rec=IdempotencyRepository(s).get(store_id=store,endpoint=path,http_method="POST",idempotency_key=key);rec.response_status=201;rec.response_body_json=json.dumps(result,default=str)
    s.commit();return result
+ def _forecast_status(self,x):
+  return {"forecast_run_id":x.forecast_run_id,"status":x.status,"engine_status":x.engine_status,"cutoff_date":x.cutoff_date,"horizon_days":x.horizon_days}
+ def _forecast_result(self,x):
+  snapshot=json.loads(x.input_snapshot_json or "{}")
+  return snapshot.get("result") or {**self._forecast_status(x),"model_version":x.model_version,"calibrator_version":x.calibrator_version,"forecasts":[],"warnings":[]}
  def forecast_create(self,store,b,key):
   with self.factory() as s:
-   StoreRepository(s).get_required(store);payload=b.model_dump(mode="json");request_hash=canonical_hash(payload);rid=str(uuid4())
+   StoreRepository(s).get_required(store);payload=b.model_dump(mode="json");request_hash=canonical_hash(payload);rid=str(uuid4());endpoint=f"/api/v1/stores/{store}/forecast-runs";idem_record=None
    if key:
-    idem=IdempotencyService(IdempotencyRepository(s));replay=idem.register(store_id=store,endpoint=f"/api/v1/stores/{store}/forecast-runs",http_method="POST",idempotency_key=key,request_hash=request_hash)
+    replay=IdempotencyService(IdempotencyRepository(s)).register(store_id=store,endpoint=endpoint,http_method="POST",idempotency_key=key,request_hash=request_hash)
     if replay.is_replay:
-     rid=replay.record.resource_id;s.rollback()
-     raise ModelNotReadyError(details={"forecast_run_id":rid,"engine_status":"model_unavailable"})
-    replay.record.resource_type="forecast_run";replay.record.resource_id=rid;replay.record.response_status=503
-   s.add(ForecastRunModel(forecast_run_id=rid,store_id=store,cutoff_date=b.cutoff_date,horizon_days=b.horizon_days,quantiles_json=json.dumps(b.quantiles),scope_json=json.dumps(b.scope),use_latest_calendar=b.use_latest_calendar,status="blocked",engine_status="model_unavailable",request_hash=request_hash,failure_code="MODEL_NOT_READY",failure_message="Forecast model unavailable"));s.commit()
-  raise ModelNotReadyError(details={"forecast_run_id":rid,"engine_status":"model_unavailable"})
+     existing=s.scalar(select(ForecastRunModel).where(ForecastRunModel.store_id==store,ForecastRunModel.forecast_run_id==replay.record.resource_id))
+     if not existing:raise ResourceNotFoundError(details={"resource":"forecast_run"})
+     s.rollback();return self._forecast_status(existing)
+    idem_record=replay.record
+   requested_ids=list(dict.fromkeys(b.scope.get("ingredient_ids") or []));query=select(IngredientModel).where(IngredientModel.store_id==store,IngredientModel.active.is_(True))
+   if requested_ids:
+    ingredients=list(s.scalars(query.where(IngredientModel.ingredient_id.in_(requested_ids))));found={x.ingredient_id for x in ingredients};missing=[x for x in requested_ids if x not in found]
+    if missing:raise ResourceNotFoundError(details={"resource":"ingredient","ingredient_ids":missing})
+   else:ingredients=list(s.scalars(query.order_by(IngredientModel.ingredient_id)))
+   forecasts=[]
+   for ingredient in ingredients:
+    points=[{"date":(b.cutoff_date+timedelta(days=offset)).isoformat(),"p25":self.MOCK_NUMBER,"p50":self.MOCK_NUMBER,"p75":self.MOCK_NUMBER,"explanation":"model_not_ready","source":"mock_fallback"} for offset in range(1,b.horizon_days+1)]
+    forecasts.append({"ingredient_id":ingredient.ingredient_id,"ingredient":ingredient.ingredient,"unit":ingredient.base_unit,"history":[],"forecast":points,"totals":{"p25":self.MOCK_NUMBER,"p50":self.MOCK_NUMBER,"p75":self.MOCK_NUMBER},"drivers":["model_not_ready"],"confidence":"model_not_ready","data_notes":["model_not_ready"]})
+   result={"forecast_run_id":rid,"status":"completed","engine_status":"model_not_ready","model_version":"model_not_ready","calibrator_version":"model_not_ready","mocked":True,"forecasts":forecasts,"warnings":[{"code":"MODEL_NOT_READY","message":"model_not_ready","source":"mock_fallback"}]}
+   run=ForecastRunModel(forecast_run_id=rid,store_id=store,cutoff_date=b.cutoff_date,horizon_days=b.horizon_days,quantiles_json=json.dumps(b.quantiles),scope_json=json.dumps(b.scope),use_latest_calendar=b.use_latest_calendar,status="completed",engine_status="model_not_ready",request_hash=request_hash,model_version="model_not_ready",calibrator_version="model_not_ready",input_snapshot_json=json.dumps({"mocked":True,"source":"mock_fallback","result":result}),failure_code=None,failure_message=None)
+   s.add(run);response=self._forecast_status(run)
+   if idem_record:
+    idem_record.resource_type="forecast_run";idem_record.resource_id=rid;idem_record.response_status=202;idem_record.response_body_json=json.dumps(response,default=str)
+   s.commit();return response
  def forecast_get(self,store,rid,result):
   with self.factory() as s:x=s.scalar(select(ForecastRunModel).where(ForecastRunModel.store_id==store,ForecastRunModel.forecast_run_id==rid))
   if not x:raise ResourceNotFoundError(details={"resource":"forecast_run"})
-  if result:raise ModelNotReadyError(details={"forecast_run_id":rid,"engine_status":x.engine_status})
-  return {"forecast_run_id":rid,"status":x.status,"engine_status":x.engine_status,"cutoff_date":x.cutoff_date,"horizon_days":x.horizon_days}
+  return self._forecast_result(x) if result else self._forecast_status(x)
+ def _plan_status(self,x):
+  return {"plan_run_id":x.plan_run_id,"status":x.status,"engine_status":x.engine_status,"forecast_run_id":x.forecast_run_id,"strategy":x.strategy,"budget_limit":x.budget_limit,"as_of_date":x.as_of_date}
+ def _plan_result(self,s,x):
+  rows=list(s.scalars(select(RecommendationModel).where(RecommendationModel.store_id==x.store_id,RecommendationModel.plan_run_id==x.plan_run_id).order_by(RecommendationModel.recommendation_id)))
+  recommendations=[{"recommendation_id":r.recommendation_id,"ingredient_id":r.ingredient_id,"supplier_id":r.supplier_id,"unit":r.unit,"order_quantity":r.order_quantity,"recommended_quantity":r.order_quantity,"unit_cost":r.unit_cost,"estimated_cost":r.cost,"projected_waste":self.MOCK_NUMBER,"projected_shortage":self.MOCK_NUMBER,"safety_stock":self.MOCK_NUMBER,"rationale":"model_not_ready","engine_status":"model_not_ready","source":"mock_fallback","mocked":True} for r in rows]
+  return {"plan_run_id":x.plan_run_id,"status":x.status,"engine_status":x.engine_status,"strategy":x.strategy,"mocked":True,"budget":{"limit":x.budget_limit,"planned_cost":self.MOCK_NUMBER,"remaining_after_plan":self.MOCK_NUMBER},"recommendations":recommendations,"warnings":[{"code":"MODEL_NOT_READY","message":"model_not_ready","source":"mock_fallback"}]}
  def plan_create(self,store,b,key):
   with self.factory() as s:
-   StoreRepository(s).get_required(store)
-   forecast=s.scalar(select(ForecastRunModel).where(ForecastRunModel.store_id==store,ForecastRunModel.forecast_run_id==b.forecast_run_id))
+   StoreRepository(s).get_required(store);forecast=s.scalar(select(ForecastRunModel).where(ForecastRunModel.store_id==store,ForecastRunModel.forecast_run_id==b.forecast_run_id))
    if not forecast:raise ResourceNotFoundError(details={"resource":"forecast_run"})
    if b.strategy not in {"economy","balanced","safe"}:raise ValidationError("strategy không hợp lệ.")
-   rid=str(uuid4());payload=b.model_dump(mode="json");request_hash=canonical_hash(payload)
+   rid=str(uuid4());payload=b.model_dump(mode="json");request_hash=canonical_hash(payload);endpoint=f"/api/v1/stores/{store}/plan-runs";idem_record=None
    if key:
-    idem=IdempotencyService(IdempotencyRepository(s));replay=idem.register(store_id=store,endpoint=f"/api/v1/stores/{store}/plan-runs",http_method="POST",idempotency_key=key,request_hash=request_hash)
+    replay=IdempotencyService(IdempotencyRepository(s)).register(store_id=store,endpoint=endpoint,http_method="POST",idempotency_key=key,request_hash=request_hash)
     if replay.is_replay:
-     rid=replay.record.resource_id;s.rollback()
-     raise ModelNotReadyError(details={"plan_run_id":rid,"engine_status":"planner_unavailable"})
-    replay.record.resource_type="plan_run";replay.record.resource_id=rid;replay.record.response_status=503
-   s.add(PlanRunModel(plan_run_id=rid,store_id=store,forecast_run_id=b.forecast_run_id,strategy=b.strategy,budget_limit=b.budget_limit,as_of_date=b.as_of_date,include_open_purchase_orders=b.include_open_purchase_orders,status="blocked",engine_status="planner_unavailable",request_hash=request_hash,input_snapshot_json=json.dumps({"forecast_status":forecast.status}),warnings_json="[]",failure_code="MODEL_NOT_READY",failure_message="Planner unavailable"));s.commit()
-  raise ModelNotReadyError(details={"plan_run_id":rid,"engine_status":"planner_unavailable"})
+     existing=s.scalar(select(PlanRunModel).where(PlanRunModel.store_id==store,PlanRunModel.plan_run_id==replay.record.resource_id))
+     if not existing:raise ResourceNotFoundError(details={"resource":"plan_run"})
+     s.rollback();return self._plan_status(existing)
+    idem_record=replay.record
+   plan=PlanRunModel(plan_run_id=rid,store_id=store,forecast_run_id=b.forecast_run_id,strategy=b.strategy,budget_limit=b.budget_limit,as_of_date=b.as_of_date,include_open_purchase_orders=b.include_open_purchase_orders,status="completed",engine_status="model_not_ready",request_hash=request_hash,input_snapshot_json=json.dumps({"forecast_status":forecast.status,"mocked":True,"source":"mock_fallback"}),warnings_json=json.dumps([{"code":"MODEL_NOT_READY","message":"model_not_ready"}]),failure_code=None,failure_message=None)
+   s.add(plan);s.flush()
+   terms=list(s.scalars(select(SupplierIngredientTermModel).join(IngredientModel,IngredientModel.ingredient_id==SupplierIngredientTermModel.ingredient_id).join(SupplierModel,SupplierModel.supplier_id==SupplierIngredientTermModel.supplier_id).where(SupplierIngredientTermModel.store_id==store,SupplierIngredientTermModel.active.is_(True),IngredientModel.active.is_(True),SupplierModel.active.is_(True)).order_by(SupplierIngredientTermModel.constraint_id)))
+   for term in terms:s.add(RecommendationModel(recommendation_id=str(uuid4()),plan_run_id=rid,store_id=store,ingredient_id=term.ingredient_id,unit=term.unit,order_quantity=Decimal(self.MOCK_NUMBER),unit_cost=self.MOCK_NUMBER,cost=self.MOCK_NUMBER,supplier_id=term.supplier_id,moq=term.moq,pack_size=term.pack_size,lead_time_days=term.lead_time_days))
+   response=self._plan_status(plan)
+   if idem_record:
+    idem_record.resource_type="plan_run";idem_record.resource_id=rid;idem_record.response_status=202;idem_record.response_body_json=json.dumps(response,default=str)
+   s.commit();return response
  def plan_get(self,store,rid,result):
-  with self.factory() as s:x=s.scalar(select(PlanRunModel).where(PlanRunModel.store_id==store,PlanRunModel.plan_run_id==rid))
-  if not x:raise ResourceNotFoundError(details={"resource":"plan_run"})
-  if result:raise ModelNotReadyError(details={"plan_run_id":rid,"engine_status":x.engine_status})
-  return {"plan_run_id":rid,"status":x.status,"engine_status":x.engine_status,"forecast_run_id":x.forecast_run_id,"strategy":x.strategy,"budget_limit":x.budget_limit,"as_of_date":x.as_of_date}
+  with self.factory() as s:
+   x=s.scalar(select(PlanRunModel).where(PlanRunModel.store_id==store,PlanRunModel.plan_run_id==rid))
+   if not x:raise ResourceNotFoundError(details={"resource":"plan_run"})
+   return self._plan_result(s,x) if result else self._plan_status(x)
  def _po_public(self,s,po):
   supplier=s.scalar(select(SupplierModel).where(SupplierModel.supplier_id==po.supplier_id))
   lines=list(s.scalars(select(PurchaseOrderLineModel).where(PurchaseOrderLineModel.po_id==po.po_id).order_by(PurchaseOrderLineModel.po_line_id)))
@@ -292,6 +323,7 @@ class CompletionService:
    if action=="create":
     plan=s.scalar(select(PlanRunModel).where(PlanRunModel.store_id==store,PlanRunModel.plan_run_id==body.plan_run_id,PlanRunModel.status=="completed"))
     if not plan:raise ResourceNotFoundError("Completed plan not found.",{"resource":"plan_run"})
+    if plan.engine_status=="model_not_ready":raise ValidationError("Không thể tạo purchase order từ mock fallback.",{"reason":"model_not_ready"})
     if len({x.recommendation_id for x in body.lines})!=len(body.lines):raise ValidationError("recommendation_id bị lặp.")
     grouped={}
     for request_line in body.lines:

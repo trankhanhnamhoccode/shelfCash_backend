@@ -196,24 +196,81 @@ def test_inventory_count_adjustment_atomic_version_and_replay(client, session_fa
         assert s.scalar(select(func.count()).select_from(InventoryMovementModel)) == 3
 
 
-def test_blocked_forecast_and_plan_runs_persist(client):
+def test_model_unavailable_uses_deterministic_forecast_and_plan_fallback(client, session_factory):
+    _ingredient(session_factory)
+    _supplier(session_factory)
+    term = client.post("/api/v1/stores/STORE_001/supplier-constraints", json={
+        "ingredient_id": "ing-1", "supplier_id": "sup-1", "unit_cost": 100,
+        "moq": "1", "pack_size": "1", "lead_time_days": 2,
+        "safety_stock": "0", "capacity": "10", "unit": "kg",
+    })
+    assert term.status_code == 201
     forecast_body = {"cutoff_date": "2026-07-28", "horizon_days": 7,
                      "quantiles": [0.25, 0.5, 0.75],
                      "scope": {"ingredient_ids": []}, "use_latest_calendar": True}
-    blocked = client.post("/api/v1/stores/STORE_001/forecast-runs",
-                          json=forecast_body, headers={"Idempotency-Key": "forecast-blocked"})
-    assert blocked.status_code == 503
-    forecast_id = blocked.json()["details"]["forecast_run_id"]
-    assert client.get(f"/api/v1/stores/STORE_001/forecast-runs/{forecast_id}").json()["status"] == "blocked"
+    created = client.post("/api/v1/stores/STORE_001/forecast-runs",
+                          json=forecast_body, headers={"Idempotency-Key": "forecast-fallback"})
+    replay = client.post("/api/v1/stores/STORE_001/forecast-runs",
+                         json=forecast_body, headers={"Idempotency-Key": "forecast-fallback"})
+    assert created.status_code == replay.status_code == 202
+    assert created.json()["forecast_run_id"] == replay.json()["forecast_run_id"]
+    assert created.json()["status"] == "completed"
+    assert created.json()["engine_status"] == "model_not_ready"
+    forecast_id = created.json()["forecast_run_id"]
+    forecast_result = client.get(
+        f"/api/v1/stores/STORE_001/forecast-runs/{forecast_id}/result")
+    assert forecast_result.status_code == 200
+    payload = forecast_result.json()
+    assert payload["mocked"] is True
+    assert payload["engine_status"] == "model_not_ready"
+    assert len(payload["forecasts"]) == 1
+    assert len(payload["forecasts"][0]["forecast"]) == 7
+    assert payload["forecasts"][0]["forecast"][0]["p25"] == 10000000000000000
+    assert payload["forecasts"][0]["forecast"][0]["p50"] == 10000000000000000
+    assert payload["forecasts"][0]["forecast"][0]["p75"] == 10000000000000000
     plan = client.post("/api/v1/stores/STORE_001/plan-runs", json={
         "forecast_run_id": forecast_id, "strategy": "balanced",
         "budget_limit": 1000, "as_of_date": "2026-07-28",
         "include_open_purchase_orders": True,
-    }, headers={"Idempotency-Key": "plan-blocked"})
-    assert plan.status_code == 503
-    plan_id = plan.json()["details"]["plan_run_id"]
-    assert client.get(f"/api/v1/stores/STORE_001/plan-runs/{plan_id}").json()["status"] == "blocked"
-    assert client.get(f"/api/v1/stores/STORE_001/plan-runs/{plan_id}/result").status_code == 503
+    }, headers={"Idempotency-Key": "plan-fallback"})
+    plan_replay = client.post("/api/v1/stores/STORE_001/plan-runs", json={
+        "forecast_run_id": forecast_id, "strategy": "balanced",
+        "budget_limit": 1000, "as_of_date": "2026-07-28",
+        "include_open_purchase_orders": True,
+    }, headers={"Idempotency-Key": "plan-fallback"})
+    assert plan.status_code == plan_replay.status_code == 202
+    assert plan.json()["plan_run_id"] == plan_replay.json()["plan_run_id"]
+    plan_id = plan.json()["plan_run_id"]
+    result = client.get(f"/api/v1/stores/STORE_001/plan-runs/{plan_id}/result")
+    assert result.status_code == 200
+    plan_payload = result.json()
+    assert plan_payload["status"] == "completed"
+    assert plan_payload["engine_status"] == "model_not_ready"
+    assert plan_payload["mocked"] is True
+    assert plan_payload["budget"]["planned_cost"] == 10000000000000000
+    assert len(plan_payload["recommendations"]) == 1
+    assert int(plan_payload["recommendations"][0]["recommended_quantity"]) == 10000000000000000
+    po = client.post("/api/v1/stores/STORE_001/purchase-orders", json={
+        "plan_run_id": plan_id,
+        "lines": [{"recommendation_id": plan_payload["recommendations"][0]["recommendation_id"]}],
+    })
+    assert po.status_code == 422
+    assert po.json()["details"]["reason"] == "model_not_ready"
+    with session_factory() as s:
+        assert s.scalar(select(func.count()).select_from(ForecastRunModel)) == 1
+        assert s.scalar(select(func.count()).select_from(PlanRunModel)) == 1
+        assert s.scalar(select(func.count()).select_from(RecommendationModel)) == 1
+        assert s.scalar(select(func.count()).select_from(PurchaseOrderModel)) == 0
+
+
+def test_forecast_fallback_preserves_real_validation_errors(client):
+    body = {"cutoff_date": "2026-07-28", "horizon_days": 7,
+            "quantiles": [0.25, 0.5, 0.75],
+            "scope": {"ingredient_ids": []}, "use_latest_calendar": True}
+    assert client.post("/api/v1/stores/STORE_MISSING/forecast-runs", json=body).status_code == 404
+    invalid = client.post("/api/v1/stores/STORE_001/forecast-runs",
+                          json={**body, "horizon_days": 0})
+    assert invalid.status_code == 422
 
 
 def test_bootstrap_and_dashboard_use_persisted_database(client):

@@ -1,6 +1,7 @@
 import json
 from datetime import date
 from decimal import Decimal
+from types import SimpleNamespace
 
 from sqlalchemy import func, select
 
@@ -11,6 +12,7 @@ from app.models.business import (
     StoreSettingsModel, SupplierIngredientTermModel,
 )
 from app.models.import_normalized import ImportIssueModel, ImportJobModel
+from app.services.business_persistence import ImportBusinessPersistenceService
 
 
 def upload_confirm_process(client, csv: bytes, mapping: dict[str, str], sheet_type: str, *, name="data.csv"):
@@ -139,6 +141,49 @@ def test_supplier_term_versioning_and_conversion(client):
         assert terms[0].moq == Decimal("1000.000000")
         assert terms[1].moq == Decimal("2000.000000")
         assert not terms[0].active and terms[1].active
+
+
+def test_supplier_term_missing_unit_is_warning_not_500(client):
+    existing = client.post("/api/v1/stores/STORE_001/ingredients", json={
+        "ingredient": "Flour", "sku": "FLOUR", "base_unit": "kg", "active": True,
+    })
+    assert existing.status_code == 201
+    mapping = {
+        "supplier": "supplier_name", "ingredient": "ingredient_name",
+        "moq": "minimum_order_quantity", "unit": "order_unit",
+        "pack": "package_size", "lead": "lead_time_days", "cost": "unit_price",
+    }
+    csv = b"supplier,ingredient,moq,unit,pack,lead,cost\nABC,Flour,2,,1,3,21000\n"
+    body, response = upload_confirm_process(client, csv, mapping, "supplier_constraints")
+    assert response.status_code == 200, response.text
+    with client.app.state.session_factory() as session:
+        assert session.scalar(select(func.count()).select_from(SupplierIngredientTermModel)) == 0
+        issue = session.scalar(select(ImportIssueModel).where(
+            ImportIssueModel.import_id == body["import_id"],
+            ImportIssueModel.code == "UNIT_MISSING",
+        ))
+        assert issue is not None
+        assert json.loads(issue.details_json)["fallback_unit"] == "None"
+
+
+def test_supplier_persistence_handles_missing_ingredient_base_unit(session_factory):
+    with session_factory() as session:
+        service = ImportBusinessPersistenceService(session)
+        service._ingredient = lambda *_args, **_kwargs: SimpleNamespace(
+            ingredient_id="ing-missing-unit", base_unit=None)
+        service._supplier = lambda *_args, **_kwargs: SimpleNamespace(
+            supplier_id="sup-missing-unit")
+        job = SimpleNamespace(store_id="STORE_001", import_id="import-missing-unit")
+        sheet = {"profile_id": "profile-missing-unit", "rows": [{
+            "supplier_name": "Supplier", "ingredient_name": "Ingredient",
+            "minimum_order_quantity": "2", "order_unit": "kg",
+            "package_size": "1", "_source_excel_row": 2,
+        }]}
+        service._persist_supplier_constraints(job, sheet)
+        assert service.summary.warnings == 1
+        assert service.summary.rows_skipped == 1
+        issue = next(item for item in session.new if isinstance(item, ImportIssueModel))
+        assert json.loads(issue.details_json)["target_unit"] == "None"
 
 
 def test_calendar_and_settings_upsert(client):
