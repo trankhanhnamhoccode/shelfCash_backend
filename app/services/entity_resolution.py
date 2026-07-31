@@ -22,7 +22,14 @@ class EntityResolutionService:
     def product(self, store_id: str, *, product_id=None, sku=None, name=None, create_if_missing=False):
         found = self.repository.get_product(store_id, product_id) if product_id else None
         found = found or (self.repository.get_product_by_sku(store_id, sku) if sku else None)
-        found = found or (self.repository.get_product_by_name(store_id, name) if name else None)
+        if not found and name and not sku:
+            matches = self.repository.get_products_by_name(store_id, name)
+            if len(matches) > 1:
+                raise ValidationError(
+                    "Tên product khớp nhiều biến thể; cần bổ sung SKU.",
+                    {"code": "AMBIGUOUS_PRODUCT_VARIANT", "product": name},
+                )
+            found = matches[0] if matches else None
         if found: return found
         if create_if_missing and name: return self.repository.add_product(store_id, name, sku=sku, source="import")
         raise ResourceNotFoundError(details={"resource": "product", "store_id": store_id})

@@ -37,10 +37,29 @@ class CompletionService:
    menu_updated_at=max((p.updated_at for p in menu_products),default=None)
    ingredients=[{"ingredient_id":i.ingredient_id,"ingredient":i.ingredient,"sku":i.sku,"base_unit":i.base_unit,"active":i.active,"version":i.version} for i in s.scalars(select(IngredientModel).where(IngredientModel.store_id==store).order_by(IngredientModel.normalized_name))]
    aliases=[{"alias_id":a.alias_id,"ingredient_id":a.ingredient_id,"alias":a.alias} for a in s.scalars(select(IngredientAliasModel).where(IngredientAliasModel.store_id==store).order_by(IngredientAliasModel.normalized_alias))]
-   recipes=[]
-   for p in products:
-    rv=s.scalar(select(RecipeVersionModel).where(RecipeVersionModel.store_id==store,RecipeVersionModel.product_id==p["product_id"],RecipeVersionModel.effective_from<=date.today(),(RecipeVersionModel.effective_to.is_(None))|(RecipeVersionModel.effective_to>=date.today())).order_by(RecipeVersionModel.version.desc()))
-    if rv:recipes.append({"product_id":p["product_id"],"recipe_version_id":rv.recipe_version_id,"version":rv.version,"effective_from":rv.effective_from})
+   active_versions=list(s.scalars(select(RecipeVersionModel).where(
+    RecipeVersionModel.store_id==store,RecipeVersionModel.effective_from<=date.today(),
+    (RecipeVersionModel.effective_to.is_(None))|(RecipeVersionModel.effective_to>=date.today()),
+   ).order_by(RecipeVersionModel.product_id,RecipeVersionModel.version.desc())))
+   active_by_product={}
+   for rv in active_versions:active_by_product.setdefault(rv.product_id,rv)
+   version_ids=[rv.recipe_version_id for rv in active_by_product.values()]
+   component_rows=[] if not version_ids else list(s.execute(select(RecipeLineModel,IngredientModel).join(
+    IngredientModel,IngredientModel.ingredient_id==RecipeLineModel.ingredient_id
+   ).where(RecipeLineModel.recipe_version_id.in_(version_ids)).order_by(RecipeLineModel.recipe_version_id,IngredientModel.normalized_name)))
+   components_by_version={version_id:[] for version_id in version_ids}
+   for line,ingredient in component_rows:
+    components_by_version[line.recipe_version_id].append({
+     "ingredient_id":ingredient.ingredient_id,"ingredient":ingredient.ingredient,
+     "quantity":format(line.quantity.normalize(),"f"),"unit":line.unit,
+    })
+   product_by_id={p["product_id"]:p for p in products}
+   recipes=[{
+    "product_id":rv.product_id,"sku":product_by_id[rv.product_id]["sku"],
+    "recipe_version_id":rv.recipe_version_id,"version":rv.version,
+    "effective_from":rv.effective_from,"effective_to":rv.effective_to,
+    "components":components_by_version[rv.recipe_version_id],
+   } for rv in active_by_product.values() if rv.product_id in product_by_id]
    fr=s.scalar(select(ForecastRunModel).where(ForecastRunModel.store_id==store).order_by(ForecastRunModel.created_at.desc()))
    pr=s.scalar(select(PlanRunModel).where(PlanRunModel.store_id==store).order_by(PlanRunModel.created_at.desc()))
    pos=[self._po_public(s,p) for p in s.scalars(select(PurchaseOrderModel).where(PurchaseOrderModel.store_id==store,PurchaseOrderModel.status.in_(["draft","ordered","partially_received"])))]

@@ -127,10 +127,29 @@ class ImportBusinessPersistenceService:
         name = row.get("product_name") or row.get("product")
         if not name:
             raise ValidationError("Thiếu product.", {"field": "product_name"})
-        existing = self.catalog.get_product_by_name(store_id, name)
-        if existing:
-            return existing
-        item = self.resolve.product(store_id, name=name, create_if_missing=True)
+        sku = str(row.get("product_sku") or "").strip().upper() or None
+        if sku:
+            existing = self.catalog.get_product_by_sku(store_id, sku)
+            if existing:
+                if existing.normalized_name != normalize_name(name):
+                    raise MenuError(
+                        "SKU_CONFLICT", "SKU đã thuộc product khác.",
+                        {"sku": sku, "existing_product": existing.product, "product": name},
+                        http_status=409,
+                    )
+                return existing
+            item = self.resolve.product(store_id, sku=sku, name=name, create_if_missing=True)
+        else:
+            matches = self.catalog.get_products_by_name(store_id, name)
+            if len(matches) > 1:
+                raise MenuError(
+                    "MISSING_SKU_FOR_DUPLICATE_NAME",
+                    "Tên product có nhiều biến thể; cần bổ sung SKU.",
+                    {"product": name}, http_status=422,
+                )
+            if matches:
+                return matches[0]
+            item = self.resolve.product(store_id, name=name, create_if_missing=True)
         self.summary.products_created += 1
         self.session.flush()
         return item
@@ -472,8 +491,7 @@ class ImportBusinessPersistenceService:
 
     def _persist_menu(self, job, sheet):
         rows = sheet["rows"]
-        seen_skus: set[str] = set()
-        seen_names: dict[str, str] = {}
+        seen_skus: dict[str, dict] = {}
         prepared = []
         for index, row in enumerate(rows):
             sku = str(row.get("product_sku") or "").strip().upper()
@@ -485,40 +503,41 @@ class ImportBusinessPersistenceService:
             price = self._decimal(row.get("selling_price"), "selling_price", positive=True)
             if not sku:
                 raise MenuError("CORE_FIELDS_MISSING", "Thiếu product_sku.", {"row": index + 1})
-            if sku in seen_skus:
-                raise MenuError("DUPLICATE_PRODUCT_SKU", "SKU bị trùng trong Menu import.", {"sku": sku}, http_status=409)
-            if normalized_name in seen_names and seen_names[normalized_name] != sku:
-                raise MenuError("DUPLICATE_PRODUCT_NAME", "Tên product dùng cho nhiều SKU.", {"product": name}, http_status=409)
             if item_type == "single" and not components_empty(row.get("combo_components")):
                 raise MenuError("COMBO_COMPONENT_PARSE_ERROR", "Single product không có components.", {"sku": sku})
             parsed = parse_combo_components(row.get("combo_components")) if item_type == "combo" else []
             if item_type == "combo" and unit != "combo":
                 raise MenuError("INVALID_PRODUCT_UNIT", "Combo phải dùng selling_unit=combo.", {"sku": sku})
-            seen_skus.add(sku); seen_names[normalized_name] = sku
-            prepared.append({
+            item = {
                 "row": row, "sku": sku, "name": name, "normalized_name": normalized_name,
                 "item_type": item_type, "status": status, "unit": unit,
                 "price": int(price), "components": parsed, "index": index,
-            })
+            }
+            previous = seen_skus.get(sku)
+            if previous:
+                comparable = ("name", "item_type", "status", "unit", "price")
+                if any(previous[key] != item[key] for key in comparable) or previous["components"] != item["components"]:
+                    raise MenuError("SKU_CONFLICT", "SKU bị trùng với thông tin product xung đột.", {"sku": sku}, http_status=409)
+                self.summary.rows_skipped += 1
+                continue
+            seen_skus[sku] = item
+            prepared.append(item)
 
         products_by_sku = {
             product.sku: product for product in self.session.scalars(
                 select(ProductModel).where(ProductModel.store_id == job.store_id)
             ) if product.sku
         }
-        products_by_name = {
-            product.normalized_name: product for product in self.session.scalars(
-                select(ProductModel).where(ProductModel.store_id == job.store_id)
-            )
-        }
+        products_by_name = defaultdict(list)
+        for existing_product in self.session.scalars(select(ProductModel).where(ProductModel.store_id == job.store_id)):
+            products_by_name[existing_product.normalized_name].append(existing_product)
 
         def upsert(item):
             product = products_by_sku.get(item["sku"])
-            by_name = products_by_name.get(item["normalized_name"])
-            if by_name is not None and (product is None or by_name.product_id != product.product_id):
-                raise MenuError("DUPLICATE_PRODUCT_NAME", "Tên product đã thuộc SKU khác.", {"product": item["name"]}, http_status=409)
             row_hash = self._row_hash(job, sheet, item["row"], item["index"])
             if product:
+                if product.normalized_name != item["normalized_name"]:
+                    raise MenuError("SKU_CONFLICT", "SKU đã thuộc product khác.", {"sku": item["sku"], "existing_product": product.product, "product": item["name"]}, http_status=409)
                 if product.item_type != item["item_type"]:
                     raise MenuError("PRODUCT_TYPE_IMMUTABLE", "Không thể đổi item_type của SKU hiện có.", {"sku": item["sku"]}, http_status=409)
                 changed = any([
@@ -541,7 +560,7 @@ class ImportBusinessPersistenceService:
                     source_import_id=job.import_id, source_row_hash=row_hash,
                 )
                 self.session.add(product); products_by_sku[item["sku"]] = product
-                products_by_name[item["normalized_name"]] = product
+                products_by_name[item["normalized_name"]].append(product)
                 self.summary.menu_products_created += 1
             return product
 
@@ -559,9 +578,12 @@ class ImportBusinessPersistenceService:
             for parsed in item["components"]:
                 if parsed.normalized_name == item["normalized_name"]:
                     raise MenuError("COMBO_SELF_REFERENCE", "Combo không thể chứa chính nó.", {"sku": item["sku"]})
-                component = products_by_name.get(parsed.normalized_name)
-                if not component:
+                candidates = products_by_name.get(parsed.normalized_name, [])
+                if not candidates:
                     raise MenuError("COMBO_COMPONENT_NOT_FOUND", "Không tìm thấy component.", {"component": parsed.product_name})
+                if len(candidates) > 1:
+                    raise MenuError("AMBIGUOUS_PRODUCT_VARIANT", "Component khớp nhiều SKU; cần chỉ rõ biến thể.", {"component": parsed.product_name}, http_status=422)
+                component = candidates[0]
                 if component.item_type != "single":
                     raise MenuError("COMBO_NESTING_NOT_SUPPORTED", "Không hỗ trợ nested combo.", {"component": parsed.product_name})
                 if combo.active and not component.active:

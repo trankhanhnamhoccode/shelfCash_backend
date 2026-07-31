@@ -112,13 +112,15 @@ def test_products_validation_uniqueness_and_store_scope(client):
     first = client.post(endpoint, json=product_payload(), headers={"Idempotency-Key": "product-1"})
     assert first.status_code == 201
     assert client.post(endpoint, json=product_payload(), headers={"Idempotency-Key": "product-1"}).json()["product_id"] == first.json()["product_id"]
-    assert client.post(endpoint, json=product_payload(sku="OTHER")).status_code == 409
+    variant = client.post(endpoint, json=product_payload(sku="OTHER"))
+    assert variant.status_code == 201
+    assert variant.json()["product_id"] != first.json()["product_id"]
     other = client.post("/api/v1/stores/STORE_TEST_001/products", json=product_payload())
     assert other.status_code == 201
     assert client.post(endpoint, json=product_payload(product="No price", sku=None, price=None)).status_code == 201
     assert client.post(endpoint, json=product_payload(product="Bad", sku="BAD", price=-1)).status_code == 422
     listed = client.get(endpoint).json()
-    assert len(listed) == 2 and all(x["store_id"] == "STORE_001" for x in listed)
+    assert len(listed) == 3 and all(x["store_id"] == "STORE_001" for x in listed)
 
 
 def test_product_patch_version_audit_and_store_scope(client):

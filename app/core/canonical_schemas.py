@@ -12,7 +12,7 @@ CANONICAL_SCHEMAS = {
         "core_fields": ["date", "ingredient_name", "quantity_used"],
     },
     "recipes": {
-        "fields": ["product_name", "ingredient_name", "ingredient_quantity", "ingredient_unit", "yield_quantity", "yield_unit", "recipe_version", "effective_date"],
+        "fields": ["product_sku", "product_name", "ingredient_name", "ingredient_quantity", "ingredient_unit", "yield_quantity", "yield_unit", "recipe_version", "effective_date"],
         "core_fields": ["product_name", "ingredient_name", "ingredient_quantity"],
     },
     "purchase_history": {

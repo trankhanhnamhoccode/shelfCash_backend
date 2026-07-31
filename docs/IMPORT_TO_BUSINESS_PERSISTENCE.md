@@ -93,3 +93,16 @@ Usage is not reconstructed from sales and receipt history does not affect stock.
 SQLite relies on transactions and unique constraints; production PostgreSQL
 should add row-level locking/retry policy around recipe version allocation and
 inventory reconciliation.
+# SKU variant and recipe identity
+
+Products are variants: `product_id` is the internal identifier and a non-null
+`sku` is resolved within its store. Product names are display data and are not
+unique. Imports that omit SKU may use a product name only when it resolves to
+exactly one product; ambiguous names fail with
+`MISSING_SKU_FOR_DUPLICATE_NAME`. A reused SKU with conflicting product data
+fails with `SKU_CONFLICT`.
+
+The canonical `recipes` sheet accepts the additive `product_sku` field. Recipe
+rows are grouped by the resolved product variant and effective date. Bootstrap
+recipe summaries include `sku`, `effective_to`, and `components`; each
+component contains `ingredient_id`, `ingredient`, `quantity`, and `unit`.

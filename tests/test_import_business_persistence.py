@@ -14,7 +14,7 @@ from app.core.exceptions import ValidationError
 from app.schemas.llm import SheetProfile
 from app.models.business import (
     CalendarFeatureModel, IngredientModel, InventoryLotModel, InventoryMovementModel, ProductModel,
-    PurchaseReceiptModel, RecipeVersionModel, SalesDailyModel, UsageDailyModel,
+    PurchaseReceiptModel, RecipeLineModel, RecipeVersionModel, SalesDailyModel, UsageDailyModel,
     StoreSettingsModel, SupplierIngredientTermModel,
 )
 from app.models.import_normalized import ImportIssueModel, ImportJobModel
@@ -129,6 +129,87 @@ def test_recipe_persistence_and_all_or_nothing_failure(client):
         job = session.get(ImportJobModel, body["import_id"])
         assert job.status == "failed"
         assert session.scalar(select(func.count()).select_from(ImportIssueModel).where(ImportIssueModel.import_id == body["import_id"], ImportIssueModel.issue_source == "business_persistence")) == 1
+
+
+def test_same_name_sku_variants_keep_distinct_recipes_end_to_end(client):
+    menu_mapping = {
+        "sku": "product_sku", "type": "item_type", "name": "product_name",
+        "unit": "selling_unit", "price": "selling_price", "status": "status",
+    }
+    menu = (
+        "sku,type,name,unit,price,status\n"
+        "STC-350,Món lẻ,Sinh tố chuối,ly,35000,Đang bán\n"
+        "STC-500,Món lẻ,Sinh tố chuối,ly,45000,Đang bán\n"
+    ).encode("utf-8")
+    menu_import, response = upload_confirm_process(client, menu, menu_mapping, "menu", name="menu.csv")
+    assert response.status_code == 200, response.text
+
+    recipe_mapping = {
+        "sku": "product_sku", "product": "product_name", "ingredient": "ingredient_name",
+        "qty": "ingredient_quantity", "unit": "ingredient_unit", "effective": "effective_date",
+    }
+    recipes = (
+        "sku,product,ingredient,qty,unit,effective\n"
+        "STC-350,Sinh tố chuối,Chuối,0.10,kg,2026-06-01\n"
+        "STC-350,Sinh tố chuối,Sữa tươi,0.12,l,2026-06-01\n"
+        "STC-500,Sinh tố chuối,Chuối,0.14,kg,2026-06-01\n"
+        "STC-500,Sinh tố chuối,Sữa tươi,0.17,l,2026-06-01\n"
+    ).encode("utf-8")
+    recipe_import, response = upload_confirm_process(client, recipes, recipe_mapping, "recipes", name="recipes.csv")
+    assert response.status_code == 200, response.text
+
+    bootstrap = client.get("/api/v1/stores/STORE_001/bootstrap")
+    assert bootstrap.status_code == 200
+    body = bootstrap.json()
+    variants = {item["sku"]: item for item in body["products"]}
+    assert {"STC-350", "STC-500"} <= variants.keys()
+    assert variants["STC-350"]["product"] == variants["STC-500"]["product"] == "Sinh tố chuối"
+    recipe_by_sku = {item["sku"]: item for item in body["recipes"]}
+    quantities = {
+        sku: {line["ingredient"]: line["quantity"] for line in recipe_by_sku[sku]["components"]}
+        for sku in ("STC-350", "STC-500")
+    }
+    assert quantities["STC-350"] == {"Chuối": "0.1", "Sữa tươi": "0.12"}
+    assert quantities["STC-500"] == {"Chuối": "0.14", "Sữa tươi": "0.17"}
+    assert all(item["components"] == [] for item in body["menu"])
+
+    assert client.post(f"/api/v1/imports/{menu_import['import_id']}/process").status_code == 200
+    assert client.post(f"/api/v1/imports/{recipe_import['import_id']}/process").status_code == 200
+    with client.app.state.session_factory() as session:
+        assert session.scalar(select(func.count()).select_from(ProductModel).where(ProductModel.sku.in_(["STC-350", "STC-500"]))) == 2
+        assert session.scalar(select(func.count()).select_from(RecipeVersionModel)) == 2
+        assert session.scalar(select(func.count()).select_from(RecipeLineModel)) == 4
+
+
+def test_menu_same_sku_conflicting_product_is_rejected(client):
+    mapping = {
+        "sku": "product_sku", "type": "item_type", "name": "product_name",
+        "unit": "selling_unit", "price": "selling_price", "status": "status",
+    }
+    csv = (
+        "sku,type,name,unit,price,status\n"
+        "STC-350,Món lẻ,Sinh tố chuối,ly,35000,Đang bán\n"
+        "STC-350,Món lẻ,Sinh tố xoài,ly,35000,Đang bán\n"
+    ).encode("utf-8")
+    _, response = upload_confirm_process(client, csv, mapping, "menu", name="sku-conflict.csv")
+    assert response.status_code == 409
+    assert response.json()["code"] == "SKU_CONFLICT"
+
+
+def test_recipe_without_sku_rejects_ambiguous_product_name(client):
+    for sku in ("STC-350", "STC-500"):
+        created = client.post("/api/v1/stores/STORE_001/products", json={
+            "product": "Sinh tố chuối", "sku": sku, "price": 35000, "active": True,
+        })
+        assert created.status_code == 201
+    mapping = {
+        "product": "product_name", "ingredient": "ingredient_name",
+        "qty": "ingredient_quantity", "unit": "ingredient_unit", "effective": "effective_date",
+    }
+    csv = "product,ingredient,qty,unit,effective\nSinh tố chuối,Chuối,0.1,kg,2026-06-01\n".encode("utf-8")
+    _, response = upload_confirm_process(client, csv, mapping, "recipes", name="ambiguous-recipe.csv")
+    assert response.status_code == 422
+    assert response.json()["code"] == "MISSING_SKU_FOR_DUPLICATE_NAME"
 
 
 def test_supplier_term_versioning_and_conversion(client):

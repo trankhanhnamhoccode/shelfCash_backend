@@ -64,7 +64,14 @@ class CatalogRepository:
         return self.session.scalar(select(ProductModel).where(ProductModel.store_id == store_id, ProductModel.sku == sku))
 
     def get_product_by_name(self, store_id: str, name: str) -> ProductModel | None:
-        return self.session.scalar(select(ProductModel).where(ProductModel.store_id == store_id, ProductModel.normalized_name == normalize_name(name)))
+        matches = self.get_products_by_name(store_id, name)
+        return matches[0] if len(matches) == 1 else None
+
+    def get_products_by_name(self, store_id: str, name: str) -> list[ProductModel]:
+        return list(self.session.scalars(select(ProductModel).where(
+            ProductModel.store_id == store_id,
+            ProductModel.normalized_name == normalize_name(name),
+        ).order_by(ProductModel.product_id)))
 
     def add_product(self, store_id: str, name: str, sku: str | None = None, source: str = "manual") -> ProductModel:
         self._require_store(store_id)

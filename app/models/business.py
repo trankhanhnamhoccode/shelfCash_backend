@@ -69,12 +69,12 @@ class IngredientAliasModel(Base):
 class ProductModel(Base):
     __tablename__ = "products"
     __table_args__ = (
-        UniqueConstraint("store_id", "normalized_name", name="uq_products_store_name"),
         UniqueConstraint("store_id", "sku", name="uq_products_store_sku"),
         CheckConstraint("price IS NULL OR price >= 0", name="ck_products_price"),
         CheckConstraint("item_type IN ('single','combo')", name="ck_products_item_type"),
         CheckConstraint("selling_unit IS NULL OR selling_unit IN ('ly','phần','chai','cái','combo')", name="ck_products_selling_unit"),
         Index("ix_products_normalized_name", "normalized_name"),
+        Index("ix_products_store_normalized_name", "store_id", "normalized_name"),
         CheckConstraint("version >= 1", name="ck_products_version"),
         Index("ix_products_store_active", "store_id", "active"),
     )
