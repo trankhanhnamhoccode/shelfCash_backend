@@ -63,10 +63,17 @@ class CompletionService:
    fr=s.scalar(select(ForecastRunModel).where(ForecastRunModel.store_id==store).order_by(ForecastRunModel.created_at.desc()))
    pr=s.scalar(select(PlanRunModel).where(PlanRunModel.store_id==store).order_by(PlanRunModel.created_at.desc()))
    pos=[self._po_public(s,p) for p in s.scalars(select(PurchaseOrderModel).where(PurchaseOrderModel.store_id==store,PurchaseOrderModel.status.in_(["draft","ordered","partially_received"])))]
+   settings=self.operational.settings(store)
+   calendar=self.operational.calendar(store,1,200,date.today(),date.today()+timedelta(days=settings["forecast_horizon"]-1)).get("items")
+   calendar_by_date={item["date"]:item for item in calendar}
+   future_calendar=[]
+   for offset in range(settings["forecast_horizon"]):
+    day=date.today()+timedelta(days=offset)
+    future_calendar.append(calendar_by_date.get(day,{"date":day,"weekday":day.strftime("%A"),"weekend":day.weekday()>=5,"holiday":False,"promotion":False,"promotion_note":None}))
   return {"today":date.today(),"store":{"store_id":x.store_id,"store_name":x.store_name,"timezone":x.timezone,"currency":x.currency},
    "ingredients":ingredients,"inventory":self.operational.inventory(store,1,200).get("items"),"products":products,"menu":menu,"recipes":recipes,
    "supplier_constraints":self.supplier_list(store)["items"],"aliases":aliases,
-   "future_calendar":self.operational.calendar(store,1,200,date.today(),None).get("items"),"settings":self.operational.settings(store),
+   "future_calendar":future_calendar,"settings":settings,
    "latest_runs":{"forecast_run_id":fr.forecast_run_id if fr else None,"plan_run_id":pr.plan_run_id if pr else None},
    "open_purchase_orders":pos,"data_freshness":{"menu_updated_at":menu_updated_at}}
  def dashboard(self,store):

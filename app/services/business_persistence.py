@@ -11,8 +11,8 @@ from sqlalchemy.orm import Session
 
 from app.core.exceptions import ValidationError
 from app.core.exceptions import MenuError
-from app.core.menu import components_empty, parse_combo_components
-from app.core.names import display_name, normalize_name
+from app.core.menu import components_empty, parse_combo_components, parse_explicit_component
+from app.core.names import display_name, normalize_lookup_name, normalize_name
 from app.core.packaging_units import is_known_packaging_unit, normalize_packaging_unit
 from app.core.provenance import canonical_hash, purchase_business_key, source_row_hash
 from app.core.units import convert_quantity, normalize_unit, validate_compatible
@@ -22,10 +22,12 @@ from app.models.business import (
 )
 from app.models.import_normalized import ImportIssueModel
 from app.repositories.business import CatalogRepository, InventoryRepository
+from app.repositories.audit_logs import AuditLogRepository
 from app.repositories.recipes import RecipeRepository
 from app.repositories.stores import StoreRepository
 from app.services.entity_resolution import EntityResolutionService
 from app.services.recipe_service import RecipeVersionService
+from app.services.audit_service import AuditService
 
 SCHEMA_VERSION = "20260728_0004"
 
@@ -503,9 +505,10 @@ class ImportBusinessPersistenceService:
             price = self._decimal(row.get("selling_price"), "selling_price", positive=True)
             if not sku:
                 raise MenuError("CORE_FIELDS_MISSING", "Thiếu product_sku.", {"row": index + 1})
-            if item_type == "single" and not components_empty(row.get("combo_components")):
+            explicit = parse_explicit_component(row)
+            if item_type == "single" and (not components_empty(row.get("combo_components")) or explicit):
                 raise MenuError("COMBO_COMPONENT_PARSE_ERROR", "Single product không có components.", {"sku": sku})
-            parsed = parse_combo_components(row.get("combo_components")) if item_type == "combo" else []
+            parsed = ([explicit] if explicit else parse_combo_components(row.get("combo_components"))) if item_type == "combo" else []
             if item_type == "combo" and unit != "combo":
                 raise MenuError("INVALID_PRODUCT_UNIT", "Combo phải dùng selling_unit=combo.", {"sku": sku})
             item = {
@@ -516,9 +519,14 @@ class ImportBusinessPersistenceService:
             previous = seen_skus.get(sku)
             if previous:
                 comparable = ("name", "item_type", "status", "unit", "price")
-                if any(previous[key] != item[key] for key in comparable) or previous["components"] != item["components"]:
+                if any(previous[key] != item[key] for key in comparable):
                     raise MenuError("SKU_CONFLICT", "SKU bị trùng với thông tin product xung đột.", {"sku": sku}, http_status=409)
-                self.summary.rows_skipped += 1
+                if item["components"] == previous["components"]:
+                    self.summary.rows_skipped += 1
+                elif explicit:
+                    previous["components"].extend(item["components"])
+                else:
+                    raise MenuError("SKU_CONFLICT", "Duplicate SKU has conflicting components.", {"sku": sku}, http_status=409)
                 continue
             seen_skus[sku] = item
             prepared.append(item)
@@ -528,13 +536,27 @@ class ImportBusinessPersistenceService:
                 select(ProductModel).where(ProductModel.store_id == job.store_id)
             ) if product.sku
         }
-        products_by_name = defaultdict(list)
-        for existing_product in self.session.scalars(select(ProductModel).where(ProductModel.store_id == job.store_id)):
-            products_by_name[existing_product.normalized_name].append(existing_product)
+        existing_products = list(self.session.scalars(select(ProductModel).where(ProductModel.store_id == job.store_id)))
+        incoming_identity_counts = defaultdict(set)
+        for item in prepared:
+            incoming_identity_counts[(item["normalized_name"], item["item_type"])].add(item["sku"])
 
         def upsert(item):
             product = products_by_sku.get(item["sku"])
             row_hash = self._row_hash(job, sheet, item["row"], item["index"])
+            if product is None:
+                legacy = [p for p in existing_products if p.sku is None and p.normalized_name == item["normalized_name"] and p.item_type == item["item_type"]]
+                named_skus = [p for p in existing_products if p.sku and p.normalized_name == item["normalized_name"]]
+                safe_single_identity = len(incoming_identity_counts[(item["normalized_name"], item["item_type"])]) == 1
+                if len(legacy) == 1 and not named_skus and safe_single_identity:
+                    product = legacy[0]
+                    product.sku = item["sku"]
+                    products_by_sku[item["sku"]] = product
+                    AuditService(AuditLogRepository(self.session)).record(
+                        store_id=job.store_id, action="legacy_product_sku_upgraded", resource_type="product",
+                        resource_id=product.product_id, before={"sku": None, "product": product.product},
+                        after={"sku": item["sku"], "product": item["name"], "import_id": job.import_id}, source="import",
+                    )
             if product:
                 if product.normalized_name != item["normalized_name"]:
                     raise MenuError("SKU_CONFLICT", "SKU đã thuộc product khác.", {"sku": item["sku"], "existing_product": product.product, "product": item["name"]}, http_status=409)
@@ -560,34 +582,63 @@ class ImportBusinessPersistenceService:
                     source_import_id=job.import_id, source_row_hash=row_hash,
                 )
                 self.session.add(product); products_by_sku[item["sku"]] = product
-                products_by_name[item["normalized_name"]].append(product)
+                existing_products.append(product)
                 self.summary.menu_products_created += 1
             return product
 
-        for item in prepared:
-            if item["item_type"] == "single":
-                upsert(item)
+        # Phase 1: materialize all singles, variants, and combo headers.
+        products_for_items = {item["sku"]: upsert(item) for item in prepared}
         self.session.flush()
+        all_products = list(self.session.scalars(select(ProductModel).where(ProductModel.store_id == job.store_id)))
+        products_by_id = {p.product_id: p for p in all_products}
+        products_by_sku = {p.sku.upper(): p for p in all_products if p.sku}
+        exact_names, base_names = defaultdict(list), defaultdict(list)
+        for product in all_products:
+            if product.active and product.item_type == "single":
+                exact_names[normalize_lookup_name(product.product)].append(product)
+                base_names[normalize_lookup_name(product.product, strip_variant=True)].append(product)
+
+        def resolve_component(parsed):
+            label = parsed.product_name or parsed.sku or parsed.product_id
+            if parsed.product_id:
+                candidate = products_by_id.get(parsed.product_id)
+                candidates = [candidate] if candidate and candidate.active and candidate.item_type == "single" else []
+            elif parsed.sku:
+                candidate = products_by_sku.get(parsed.sku.upper())
+                candidates = [candidate] if candidate and candidate.active and candidate.item_type == "single" else []
+            else:
+                exact_key = normalize_lookup_name(parsed.product_name)
+                base_key = normalize_lookup_name(parsed.product_name, strip_variant=True)
+                # A base-name-only reference must see every variant, including a
+                # legacy exact-name row. A name carrying size/variant metadata
+                # gets the more specific exact-name lookup first.
+                candidates = base_names.get(base_key, []) if exact_key == base_key else exact_names.get(exact_key, [])
+                if not candidates:
+                    candidates = base_names.get(base_key, [])
+            if not candidates:
+                code = "COMPONENT_NOT_FOUND" if parsed.product_id or parsed.sku else "COMBO_COMPONENT_NOT_FOUND"
+                raise MenuError(code, "Không tìm thấy component.", {"component": label})
+            if len(candidates) > 1:
+                raise MenuError(
+                    "AMBIGUOUS_PRODUCT_VARIANT", "Component khớp nhiều SKU; cần chỉ rõ biến thể.",
+                    {"component": label, "candidate_count": len(candidates), "candidates": [
+                        {"product_id": p.product_id, "sku": p.sku, "product": p.product} for p in candidates
+                    ]}, http_status=422,
+                )
+            return candidates[0]
+
+        # Phase 2: resolve relationships against DB and the complete import batch.
         for item in prepared:
             if item["item_type"] != "combo":
                 continue
-            combo = upsert(item)
-            self.session.flush()
+            combo = products_for_items[item["sku"]]
             resolved = []
             names = set()
             for parsed in item["components"]:
-                if parsed.normalized_name == item["normalized_name"]:
+                if (parsed.product_id == combo.product_id or parsed.sku == combo.sku or
+                        (parsed.normalized_name and parsed.normalized_name == item["normalized_name"])):
                     raise MenuError("COMBO_SELF_REFERENCE", "Combo không thể chứa chính nó.", {"sku": item["sku"]})
-                candidates = products_by_name.get(parsed.normalized_name, [])
-                if not candidates:
-                    raise MenuError("COMBO_COMPONENT_NOT_FOUND", "Không tìm thấy component.", {"component": parsed.product_name})
-                if len(candidates) > 1:
-                    raise MenuError("AMBIGUOUS_PRODUCT_VARIANT", "Component khớp nhiều SKU; cần chỉ rõ biến thể.", {"component": parsed.product_name}, http_status=422)
-                component = candidates[0]
-                if component.item_type != "single":
-                    raise MenuError("COMBO_NESTING_NOT_SUPPORTED", "Không hỗ trợ nested combo.", {"component": parsed.product_name})
-                if combo.active and not component.active:
-                    raise MenuError("INACTIVE_COMBO_COMPONENT", "Active combo chứa inactive component.", {"component": parsed.product_name})
+                component = resolve_component(parsed)
                 if component.product_id in names:
                     raise MenuError("COMBO_COMPONENT_DUPLICATE", "Component combo bị trùng.")
                 names.add(component.product_id); resolved.append((parsed, component))

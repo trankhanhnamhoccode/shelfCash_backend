@@ -67,11 +67,13 @@ class OperationalService:
                 bal=s.scalar(select(func.coalesce(func.sum(InventoryMovementModel.quantity_delta),0)).where(InventoryMovementModel.lot_id==x.lot_id))
                 ing=s.scalar(select(IngredientModel).where(IngredientModel.store_id==store,IngredientModel.ingredient_id==x.ingredient_id))
                 sup=s.scalar(select(SupplierModel).where(SupplierModel.store_id==store,SupplierModel.supplier_id==x.supplier_id)) if x.supplier_id else None
-                expiring=bal if x.expiry_date and x.expiry_date <= date.today() else Decimal("0")
-                status="stockout" if bal<=0 else ("expiring" if x.expiry_date and x.expiry_date<=date.today()+timedelta(days=7) else "healthy")
+                today = date.today()
+                expired = bal if bal > 0 and x.expiry_date and x.expiry_date < today else Decimal("0")
+                expiring = bal if bal > 0 and x.expiry_date and today <= x.expiry_date <= today + timedelta(days=7) else Decimal("0")
+                status = "stockout" if bal <= 0 else ("expired" if expired else ("expiring" if expiring else "healthy"))
                 items.append({"lot_id":x.lot_id,"ingredient_id":x.ingredient_id,"ingredient":ing.ingredient if ing else None,
-                    "sku":ing.sku if ing else None,"on_hand":bal,"usable_quantity":max(Decimal(0),bal-expiring),
-                    "expiring_quantity":expiring,"unit":x.unit,"unit_cost":x.unit_cost,"received_date":x.received_date,
+                    "sku":ing.sku if ing else None,"on_hand":bal,"usable_quantity":max(Decimal(0),bal-expiring-expired),
+                    "expiring_quantity":expiring,"expired_quantity":expired,"unit":x.unit,"unit_cost":x.unit_cost,"received_date":x.received_date,
                     "expiry_date":x.expiry_date,"supplier_id":x.supplier_id,"supplier":sup.supplier if sup else None,
                     "status":status,"last_counted_at":x.last_counted_at,"version":x.version})
             return self._wrap(items,page,size,total)

@@ -51,6 +51,26 @@ class ParsedComponent:
     quantity: int
     product_name: str
     normalized_name: str
+    product_id: str | None = None
+    sku: str | None = None
+    variant: str | None = None
+
+
+def parse_explicit_component(row: dict) -> ParsedComponent | None:
+    product_id = str(row.get("component_product_id") or "").strip() or None
+    sku = str(row.get("component_sku") or "").strip().upper() or None
+    raw_name = row.get("component_product_name")
+    variant = str(row.get("component_variant") or "").strip() or None
+    if not any((product_id, sku, raw_name)):
+        return None
+    name = display_name(" ".join(str(part).strip() for part in (raw_name, variant) if part)) if raw_name else ""
+    try:
+        quantity = int(row.get("component_quantity") or 1)
+    except (TypeError, ValueError):
+        quantity = 0
+    if quantity <= 0:
+        raise ValidationError("Số lượng component không hợp lệ.", {"code": "COMBO_COMPONENT_PARSE_ERROR"})
+    return ParsedComponent(quantity, name, normalize_name(name) if name else "", product_id, sku, variant)
 
 
 def parse_combo_components(value, *, maximum: int = 20) -> list[ParsedComponent]:

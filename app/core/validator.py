@@ -12,9 +12,12 @@ def validate_records(sheet_type: str, records: list[dict[str, Any]]) -> dict[str
             from app.core.menu import components_empty
             item_type = record.get("item_type")
             components = record.get("combo_components")
+            has_explicit_component = any(record.get(field) not in (None, "") for field in (
+                "component_product_id", "component_sku", "component_product_name",
+            ))
             if item_type == "single" and not components_empty(components):
                 missing.append("combo_components_must_be_empty")
-            if item_type == "combo" and components_empty(components):
+            if item_type == "combo" and components_empty(components) and not has_explicit_component:
                 missing.append("combo_components")
         if missing:
             errors.append({"row": index + 1, "missing_core_fields": missing})

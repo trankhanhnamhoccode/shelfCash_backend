@@ -102,7 +102,8 @@ def test_menu_schema_mapping_and_normalizers():
         "fields": [
             "product_sku", "item_type", "product_name", "combo_components",
             "selling_unit", "list_price", "discount_rate", "selling_price",
-            "savings_amount", "status",
+            "savings_amount", "status", "component_product_id", "component_sku",
+            "component_product_name", "component_variant", "component_quantity",
         ],
         "core_fields": ["product_sku", "item_type", "product_name", "selling_price"],
     }

@@ -12,6 +12,7 @@ NUMERIC_FIELDS = {
     "ingredient_quantity", "yield_quantity", "quantity_received", "unit_price", "total_cost",
     "minimum_order_quantity", "package_size", "lead_time_days", "temperature", "rainfall", "value",
     "list_price", "discount_rate", "savings_amount",
+    "component_quantity",
 }
 UNIT_MAP = {"kg": "kilogram", "g": "gram", "l": "liter", "lit": "liter", "lít": "liter", "ml": "milliliter", "cai": "piece", "cái": "piece", "chiec": "piece", "chiếc": "piece", "ly": "cup", "hop": "box", "hộp": "box", "thung": "case", "thùng": "case", "chai": "bottle", "goi": "package", "gói": "package"}
 TRUE_VALUES = {"true", "1", "yes", "y", "co", "có", "dung", "đúng"}

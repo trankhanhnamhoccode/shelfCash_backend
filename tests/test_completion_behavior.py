@@ -29,6 +29,32 @@ def _supplier(session_factory, store="STORE_001", ident="sup-1"):
         s.commit()
 
 
+def test_bootstrap_expired_lot_and_calendar_horizon_are_consistent(client, session_factory):
+    _ingredient(session_factory, ident="expiry-ing")
+    with session_factory() as s:
+        lot = InventoryLotModel(
+            lot_id="expired-lot", store_id="STORE_001", ingredient_id="expiry-ing",
+            received_date=date.today() - timedelta(days=10), expiry_date=date.today() - timedelta(days=1),
+            initial_quantity=Decimal("5"), unit="kg", source="test", version=1,
+        )
+        s.add(lot)
+        s.add(InventoryMovementModel(
+            movement_id="expired-move", store_id="STORE_001", lot_id="expired-lot",
+            movement_type="opening_balance", quantity_delta=Decimal("5"), unit="kg",
+            occurred_at=datetime.now(timezone.utc), source="test",
+        ))
+        s.commit()
+    response = client.get("/api/v1/stores/STORE_001/bootstrap")
+    assert response.status_code == 200
+    body = response.json()
+    item = next(row for row in body["inventory"] if row["lot_id"] == "expired-lot")
+    assert item["status"] == "expired"
+    assert item["usable_quantity"] == 0
+    assert item["expiring_quantity"] == 0
+    assert item["expired_quantity"] == 5
+    assert len(body["future_calendar"]) >= body["settings"]["forecast_horizon"]
+
+
 def test_history_batches_are_normalized_and_have_no_stock_side_effect(client, session_factory):
     product = client.post("/api/v1/stores/STORE_001/products", json={
         "product": "Drink", "sku": "DRINK", "price": 12000, "active": True

@@ -62,6 +62,8 @@ class MenuService:
             {
                 "bundle_line_id": line.bundle_line_id,
                 "component_product_id": component.product_id,
+                "component_sku": component.sku,
+                "component_product": component.product,
                 "sku": component.sku,
                 "product": component.product,
                 "quantity": line.quantity,

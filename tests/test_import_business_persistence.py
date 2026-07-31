@@ -13,11 +13,12 @@ from app.core.units import normalize_unit, validate_compatible
 from app.core.exceptions import ValidationError
 from app.schemas.llm import SheetProfile
 from app.models.business import (
-    CalendarFeatureModel, IngredientModel, InventoryLotModel, InventoryMovementModel, ProductModel,
+    CalendarFeatureModel, IngredientModel, InventoryLotModel, InventoryMovementModel, ProductModel, ProductBundleLineModel,
     PurchaseReceiptModel, RecipeLineModel, RecipeVersionModel, SalesDailyModel, UsageDailyModel,
     StoreSettingsModel, SupplierIngredientTermModel,
 )
 from app.models.import_normalized import ImportIssueModel, ImportJobModel
+from app.models.audit_log import AuditLogModel
 from app.services.business_persistence import ImportBusinessPersistenceService
 
 
@@ -35,6 +36,89 @@ def upload_confirm_process(client, csv: bytes, mapping: dict[str, str], sheet_ty
     assert confirmed.status_code == 200, confirmed.text
     processed = client.post(f"/api/v1/imports/{body['import_id']}/process")
     return body, processed
+
+
+MENU_MAPPING = {
+    "sku": "product_sku", "type": "item_type", "name": "product_name",
+    "components": "combo_components", "unit": "selling_unit",
+    "price": "selling_price", "status": "status",
+}
+
+
+def test_combo_name_resolver_unique_and_row_order_independent(client):
+    for rows in (
+        ["TEA-500,single,Milk Tea 500ml,,ly,30000,active", "COMBO-1,combo,Afternoon Combo,1 x Milk Tea,combo,40000,active"],
+        ["COMBO-2,combo,Evening Combo,1 x Milk Tea,combo,40000,active", "TEA-700,single,Other Tea 700ml,,ly,30000,active"],
+    ):
+        csv = ("sku,type,name,components,unit,price,status\n" + "\n".join(rows) + "\n").encode()
+        _, response = upload_confirm_process(client, csv, MENU_MAPPING, "menu", name=f"{rows[0][:5]}.csv")
+        assert response.status_code == 200, response.text
+    bootstrap = client.get("/api/v1/stores/STORE_001/bootstrap").json()
+    combo = next(item for item in bootstrap["menu"] if item["sku"] == "COMBO-1")
+    assert combo["components"][0]["component_sku"] == "TEA-500"
+    assert combo["components"][0]["component_product"] == "Milk Tea 500ml"
+
+
+def test_combo_ambiguity_rolls_back_and_sku_resolves_exact_variant(client):
+    variants = (
+        "sku,type,name,components,unit,price,status\n"
+        "TEA-500,single,Milk Tea 500ml,,ly,30000,active\n"
+        "TEA-700,single,Milk Tea 700ml,,ly,35000,active\n"
+    ).encode()
+    assert upload_confirm_process(client, variants, MENU_MAPPING, "menu", name="variants.csv")[1].status_code == 200
+    with client.app.state.session_factory() as session:
+        before = (session.scalar(select(func.count()).select_from(ProductModel)), session.scalar(select(func.count()).select_from(ProductBundleLineModel)))
+    ambiguous = b"sku,type,name,components,unit,price,status\nBAD-C,combo,Bad Combo,1 x Milk Tea,combo,40000,active\n"
+    _, response = upload_confirm_process(client, ambiguous, MENU_MAPPING, "menu", name="ambiguous.csv")
+    assert response.status_code == 422
+    assert response.json()["code"] == "AMBIGUOUS_PRODUCT_VARIANT"
+    assert response.json()["details"]["candidate_count"] == 2
+    with client.app.state.session_factory() as session:
+        after = (session.scalar(select(func.count()).select_from(ProductModel)), session.scalar(select(func.count()).select_from(ProductBundleLineModel)))
+    assert after == before
+
+    explicit_mapping = {**MENU_MAPPING, "component_sku": "component_sku", "qty": "component_quantity"}
+    explicit = b"sku,type,name,components,unit,price,status,component_sku,qty\nGOOD-C,combo,Good Combo,,combo,40000,active,TEA-700,1\n"
+    _, response = upload_confirm_process(client, explicit, explicit_mapping, "menu", name="explicit.csv")
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] in {"completed", "processed"}
+    combo = next(item for item in client.get("/api/v1/stores/STORE_001/bootstrap").json()["menu"] if item["sku"] == "GOOD-C")
+    assert combo["components"][0]["component_sku"] == "TEA-700"
+
+
+def test_component_product_id_store_scope_and_inactive_sku(client, session_factory):
+    with session_factory() as session:
+        active = ProductModel(product_id="component-active", store_id="STORE_001", product="Exact", normalized_name="exact", sku="EXACT-1", price=100, item_type="single", selling_unit="ly", active=True, source="test", version=1)
+        inactive = ProductModel(product_id="component-inactive", store_id="STORE_001", product="Inactive", normalized_name="inactive", sku="OFF-1", price=100, item_type="single", selling_unit="ly", active=False, source="test", version=1)
+        session.add_all([active, inactive]); session.commit()
+    mapping = {**MENU_MAPPING, "component_id": "component_product_id", "component_sku": "component_sku"}
+    valid = b"sku,type,name,components,unit,price,status,component_id,component_sku\nID-C,combo,ID Combo,,combo,90,active,component-active,\n"
+    assert upload_confirm_process(client, valid, mapping, "menu", name="by-id.csv")[1].status_code == 200
+    invalid = b"sku,type,name,components,unit,price,status,component_id,component_sku\nOFF-C,combo,Off Combo,,combo,90,active,,OFF-1\n"
+    response = upload_confirm_process(client, invalid, mapping, "menu", name="inactive.csv")[1]
+    assert response.status_code == 422 and response.json()["code"] == "COMPONENT_NOT_FOUND"
+
+
+def test_legacy_null_sku_is_only_upgraded_for_unambiguous_batch_identity(client, session_factory):
+    with session_factory() as session:
+        session.add(ProductModel(product_id="legacy-one", store_id="STORE_001", product="Legacy Tea", normalized_name="legacy tea", sku=None, price=100, item_type="single", selling_unit="ly", active=True, source="legacy", version=1))
+        session.commit()
+    single = b"sku,type,name,components,unit,price,status\nLEG-500,single,Legacy Tea,,ly,120,active\n"
+    assert upload_confirm_process(client, single, MENU_MAPPING, "menu", name="legacy-upgrade.csv")[1].status_code == 200
+    with session_factory() as session:
+        products = list(session.scalars(select(ProductModel).where(ProductModel.product == "Legacy Tea")))
+        assert len(products) == 1 and products[0].product_id == "legacy-one" and products[0].sku == "LEG-500"
+        assert session.scalar(select(func.count()).select_from(AuditLogModel).where(AuditLogModel.action == "legacy_product_sku_upgraded")) == 1
+
+    with session_factory() as session:
+        session.add(ProductModel(product_id="legacy-many", store_id="STORE_001", product="Variant Tea", normalized_name="variant tea", sku=None, price=100, item_type="single", selling_unit="ly", active=True, source="legacy", version=1))
+        session.commit()
+    variants = b"sku,type,name,components,unit,price,status\nVAR-500,single,Variant Tea,,ly,120,active\nVAR-700,single,Variant Tea,,ly,140,active\n"
+    assert upload_confirm_process(client, variants, MENU_MAPPING, "menu", name="legacy-ambiguous.csv")[1].status_code == 200
+    with session_factory() as session:
+        products = list(session.scalars(select(ProductModel).where(ProductModel.product == "Variant Tea")))
+        assert len(products) == 3
+        assert next(p for p in products if p.product_id == "legacy-many").sku is None
 
 
 def test_provenance_hash_is_stable_and_row_sensitive():
