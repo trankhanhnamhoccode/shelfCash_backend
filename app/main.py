@@ -93,7 +93,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             app.state.operational_service = OperationalService(session_factory)
             app.state.forecast_service = ForecastService(session_factory, active_settings)
             app.state.decision_planning_service = DecisionPlanningService(session_factory)
-            app.state.completion_service = CompletionService(session_factory, app.state.operational_service, app.state.forecast_service)
+            app.state.completion_service = CompletionService(session_factory, app.state.operational_service, app.state.forecast_service, app.state.decision_planning_service)
             yield
         finally:
             await provider.close()

@@ -67,7 +67,7 @@ class PlanRunModel(Base):
     __tablename__="plan_runs"
     plan_run_id:Mapped[str]=mapped_column(String(36),primary_key=True);store_id:Mapped[str]=mapped_column(ForeignKey("stores.store_id"),index=True);forecast_run_id:Mapped[str]=mapped_column(ForeignKey("forecast_runs.forecast_run_id"))
     strategy:Mapped[str]=mapped_column(String(16));budget_limit:Mapped[int]=mapped_column(Integer);as_of_date:Mapped[date]=mapped_column(Date);include_open_purchase_orders:Mapped[bool]=mapped_column(Boolean)
-    status:Mapped[str]=mapped_column(String(24));engine_status:Mapped[str]=mapped_column(String(40));request_hash:Mapped[str]=mapped_column(String(64));input_snapshot_json:Mapped[str|None]=mapped_column(Text);warnings_json:Mapped[str]=mapped_column(Text,default="[]");failure_code:Mapped[str|None]=mapped_column(String(64));failure_message:Mapped[str|None]=mapped_column(String(500));created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=utc_now)
+    status:Mapped[str]=mapped_column(String(24));engine_status:Mapped[str]=mapped_column(String(40));request_hash:Mapped[str]=mapped_column(String(64));input_snapshot_json:Mapped[str|None]=mapped_column(Text);warnings_json:Mapped[str]=mapped_column(Text,default="[]");failure_code:Mapped[str|None]=mapped_column(String(64));failure_message:Mapped[str|None]=mapped_column(String(500));procurement_plan_run_id:Mapped[str|None]=mapped_column(ForeignKey("procurement_plan_runs.procurement_plan_run_id"));created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=utc_now);completed_at:Mapped[datetime|None]=mapped_column(DateTime(timezone=True))
 
 class RecommendationModel(Base):
     __tablename__="recommendations"

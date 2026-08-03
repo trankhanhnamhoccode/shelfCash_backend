@@ -3,8 +3,9 @@ from decimal import Decimal
 from typing import Any
 from fastapi import APIRouter, Depends, Header, Request
 from pydantic import BaseModel, ConfigDict, Field
-from app.dependencies import get_completion_service, get_forecast_service, require_api_key
+from app.dependencies import get_completion_service, get_decision_planning_service, get_forecast_service, require_api_key
 from app.schemas.forecast import LegacyForecastMetadataResponse, LegacyForecastResultResponse
+from app.schemas.planning import LegacyPlanMetadataResponse, LegacyPlanResultResponse
 
 class Strict(BaseModel): model_config=ConfigDict(extra="forbid")
 class CountLine(Strict): lot_id:str;counted_quantity:Decimal=Field(ge=0,allow_inf_nan=False);unit:str;note:str|None=None
@@ -64,12 +65,13 @@ def forecast_post(store_id:str,b:ForecastIn,request:Request,k=Depends(idem),s=De
 def forecast_get(store_id:str,forecast_run_id:str,s=Depends(get_forecast_service)):return s.get_metadata(forecast_run_id,store_id)
 @router.get("/stores/{store_id}/forecast-runs/{forecast_run_id}/result", response_model=LegacyForecastResultResponse)
 def forecast_result(store_id:str,forecast_run_id:str,s=Depends(get_forecast_service)):return s.get_legacy_result(forecast_run_id,store_id)
-@router.post("/stores/{store_id}/plan-runs")
-def plan_post(store_id:str,b:PlanIn,k=Depends(idem),s=Depends(get_completion_service)):return s.plan_create(store_id,b,k)
-@router.get("/stores/{store_id}/plan-runs/{plan_run_id}")
-def plan_get(store_id:str,plan_run_id:str,s=Depends(get_completion_service)):return s.plan_get(store_id,plan_run_id,False)
-@router.get("/stores/{store_id}/plan-runs/{plan_run_id}/result")
-def plan_result(store_id:str,plan_run_id:str,s=Depends(get_completion_service)):return s.plan_get(store_id,plan_run_id,True)
+@router.post("/stores/{store_id}/plan-runs",response_model=LegacyPlanMetadataResponse)
+def plan_post(store_id:str,b:PlanIn,request:Request,k=Depends(idem),s=Depends(get_decision_planning_service)):
+ return s.create_legacy_plan(store_id,b,k,getattr(request.state,"request_id",None))
+@router.get("/stores/{store_id}/plan-runs/{plan_run_id}",response_model=LegacyPlanMetadataResponse)
+def plan_get(store_id:str,plan_run_id:str,s=Depends(get_decision_planning_service)):return s.get_legacy_plan_metadata(store_id,plan_run_id)
+@router.get("/stores/{store_id}/plan-runs/{plan_run_id}/result",response_model=LegacyPlanResultResponse)
+def plan_result(store_id:str,plan_run_id:str,s=Depends(get_decision_planning_service)):return s.get_legacy_plan_result(store_id,plan_run_id)
 @router.post("/stores/{store_id}/purchase-orders",status_code=201)
 def po_post(store_id:str,b:POCreateIn,k=Depends(idem),s=Depends(get_completion_service)):return s.po("create",store_id,None,b,k)
 @router.get("/stores/{store_id}/purchase-orders")

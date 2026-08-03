@@ -25,7 +25,7 @@ from app.models.operations import (
 from app.repositories.stores import StoreRepository
 
 class CompletionService:
- def __init__(self,factory,operational,forecast_service):self.factory=factory;self.operational=operational;self.forecast_service=forecast_service
+ def __init__(self,factory,operational,forecast_service,decision_planning_service=None):self.factory=factory;self.operational=operational;self.forecast_service=forecast_service;self.decision_planning_service=decision_planning_service
  def bootstrap(self,store):
   with self.factory() as s:
    x=StoreRepository(s).get_required(store)
@@ -268,25 +268,9 @@ class CompletionService:
  def _plan_status(self,x):
   return {"plan_run_id":x.plan_run_id,"status":x.status,"engine_status":x.engine_status,"forecast_run_id":x.forecast_run_id,"strategy":x.strategy,"budget_limit":x.budget_limit,"as_of_date":x.as_of_date}
  def plan_create(self,store,b,key):
-  with self.factory() as s:
-   StoreRepository(s).get_required(store);forecast=s.scalar(select(ForecastRunModel).where(ForecastRunModel.store_id==store,ForecastRunModel.forecast_run_id==b.forecast_run_id))
-   if not forecast:raise ResourceNotFoundError(details={"resource":"forecast_run"})
-   if b.strategy not in {"economy","balanced","safe"}:raise ValidationError("strategy không hợp lệ.")
-   rid=str(uuid4());payload=b.model_dump(mode="json");request_hash=canonical_hash(payload)
-   if key:
-    replay=IdempotencyService(IdempotencyRepository(s)).register(store_id=store,endpoint=f"/api/v1/stores/{store}/plan-runs",http_method="POST",idempotency_key=key,request_hash=request_hash)
-    if replay.is_replay:
-     rid=replay.record.resource_id;s.rollback()
-     raise ModelNotReadyError(details={"plan_run_id":rid,"engine_status":"planner_unavailable"})
-    replay.record.resource_type="plan_run";replay.record.resource_id=rid;replay.record.response_status=503
-   s.add(PlanRunModel(plan_run_id=rid,store_id=store,forecast_run_id=b.forecast_run_id,strategy=b.strategy,budget_limit=b.budget_limit,as_of_date=b.as_of_date,include_open_purchase_orders=b.include_open_purchase_orders,status="blocked",engine_status="planner_unavailable",request_hash=request_hash,input_snapshot_json=json.dumps({"forecast_status":forecast.status}),warnings_json="[]",failure_code="MODEL_NOT_READY",failure_message="Planner unavailable"));s.commit()
-  raise ModelNotReadyError(details={"plan_run_id":rid,"engine_status":"planner_unavailable"})
+  return self.decision_planning_service.create_legacy_plan(store,b,key)
  def plan_get(self,store,rid,result):
-  with self.factory() as s:
-   x=s.scalar(select(PlanRunModel).where(PlanRunModel.store_id==store,PlanRunModel.plan_run_id==rid))
-   if not x:raise ResourceNotFoundError(details={"resource":"plan_run"})
-   if result:raise ModelNotReadyError(details={"plan_run_id":rid,"engine_status":x.engine_status})
-   return self._plan_status(x)
+  return self.decision_planning_service.get_legacy_plan_result(store,rid) if result else self.decision_planning_service.get_legacy_plan_metadata(store,rid)
  def _po_public(self,s,po):
   supplier=s.scalar(select(SupplierModel).where(SupplierModel.supplier_id==po.supplier_id))
   lines=list(s.scalars(select(PurchaseOrderLineModel).where(PurchaseOrderLineModel.po_id==po.po_id).order_by(PurchaseOrderLineModel.po_line_id)))

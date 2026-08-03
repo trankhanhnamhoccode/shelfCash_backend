@@ -260,20 +260,11 @@ def test_model_unavailable_remains_explicitly_blocked(client, session_factory):
         "budget_limit": 1000, "as_of_date": "2026-07-28",
         "include_open_purchase_orders": True,
     }, headers={"Idempotency-Key": "plan-fallback"})
-    assert plan.status_code == plan_replay.status_code == 503
-    assert plan.json()["code"] == plan_replay.json()["code"] == "MODEL_NOT_READY"
-    plan_id = plan.json()["details"]["plan_run_id"]
-    assert plan_id == plan_replay.json()["details"]["plan_run_id"]
-    plan_status = client.get(f"/api/v1/stores/STORE_001/plan-runs/{plan_id}")
-    assert plan_status.status_code == 200
-    assert plan_status.json()["status"] == "blocked"
-    assert plan_status.json()["engine_status"] == "planner_unavailable"
-    result = client.get(f"/api/v1/stores/STORE_001/plan-runs/{plan_id}/result")
-    assert result.status_code == 503
-    assert result.json()["code"] == "MODEL_NOT_READY"
+    assert plan.status_code == plan_replay.status_code == 409
+    assert plan.json()["code"] == plan_replay.json()["code"] == "FORECAST_RUN_NOT_COMPLETED"
     with session_factory() as s:
         assert s.scalar(select(func.count()).select_from(ForecastRunModel)) == 1
-        assert s.scalar(select(func.count()).select_from(PlanRunModel)) == 1
+        assert s.scalar(select(func.count()).select_from(PlanRunModel)) == 0
         assert s.scalar(select(func.count()).select_from(RecommendationModel)) == 0
         assert s.scalar(select(func.count()).select_from(PurchaseOrderModel)) == 0
 

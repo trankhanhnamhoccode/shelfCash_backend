@@ -1,4 +1,6 @@
 import json
+import logging
+import time
 from datetime import datetime,timezone
 from decimal import Decimal
 from uuid import uuid4
@@ -6,7 +8,8 @@ from sqlalchemy import select
 
 from app.core.exceptions import PlanningError
 from app.core.provenance import canonical_hash
-from app.models.operations import ForecastPredictionModel,ForecastRunModel
+from app.models.operations import ForecastPredictionModel,ForecastRunModel,PlanRunModel,RecommendationModel
+from app.models.business import IngredientModel,SupplierModel
 from app.models.planning import (IngredientDemandPredictionModel,IngredientDemandRunModel,
     ProcurementPlanLineModel,ProcurementPlanModel,ProcurementPlanRunModel)
 from app.repositories.audit_logs import AuditLogRepository
@@ -17,9 +20,12 @@ from app.services.audit_service import AuditService
 from app.services.idempotency_service import IdempotencyService
 from app.services.procurement_planning_service import ProcurementPlanningService
 from app.services.recipe_bom_service import RecipeBomService
+from app.schemas.planning import ProcurementPlansRequest
 
 def now():return datetime.now(timezone.utc)
 def dump(x):return json.dumps(x,ensure_ascii=False,default=str)
+logger=logging.getLogger("shelfcash.planning")
+LEGACY_STRATEGIES={"economy":"lean","balanced":"balanced","safe":"protected","lean":"lean","protected":"protected"}
 
 class DecisionPlanningService:
  def __init__(self,factory):self.factory=factory
@@ -108,3 +114,81 @@ class DecisionPlanningService:
    for p in plans:
     metrics=json.loads(p.metrics_json);out.append({"procurement_plan_id":p.procurement_plan_id,"strategy":p.strategy,"is_feasible":p.is_feasible,"is_recommended":p.is_recommended,"total_purchase_cost":p.total_purchase_cost,"projected_shortage_quantity":float(p.projected_shortage_quantity),"projected_waste_quantity":float(p.projected_waste_quantity),"fill_rate":float(p.fill_rate),"budget_used":p.budget_used,"metrics":metrics,"warnings":json.loads(p.warnings_json),"daily_projections":json.loads(p.daily_projections_json),"lines":[{"ingredient_id":x.ingredient_id,"supplier_id":x.supplier_id,"supplier_term_id":x.supplier_term_id,"order_date":x.order_date,"expected_arrival_date":x.expected_arrival_date,"raw_required_quantity":float(x.raw_required_quantity),"order_quantity":float(x.order_quantity),"rounding_excess":float(x.order_quantity-x.raw_required_quantity),"unit":x.unit,"pack_count":x.pack_count,"unit_cost":x.unit_cost,"line_cost":x.line_cost,"moq":float(x.moq) if x.moq is not None else None,"pack_size":float(x.pack_size) if x.pack_size is not None else None,"lead_time_days":x.lead_time_days,"reason_codes":json.loads(x.reason_codes_json),"warnings":json.loads(x.warnings_json)} for x in repo.lines(p.procurement_plan_id)]})
    return {"procurement_plan_run_id":run.procurement_plan_run_id,"forecast_run_id":run_id,"ingredient_demand_run_id":run.ingredient_demand_run_id,"store_id":store,"status":run.status,"recommended_strategy":run.recommended_strategy,"warnings":json.loads(run.warnings_json or "[]"),"failure_code":run.failure_code,"failure_message":run.failure_message,"created_at":run.created_at,"completed_at":run.completed_at,"plans":out}
+
+ def create_legacy_plan(self,store,body,key=None,request_id=None):
+  started=time.monotonic();strategy=LEGACY_STRATEGIES.get(body.strategy)
+  if strategy is None:raise PlanningError("FORECAST_INPUT_INVALID","strategy không hợp lệ.",{"allowed":sorted(LEGACY_STRATEGIES)})
+  endpoint=f"/api/v1/stores/{store}/plan-runs";payload=body.model_dump(mode="json");request_hash=canonical_hash(payload)
+  logger.info("legacy_plan_adapter_started request_id=%s store_id=%s forecast_run_id=%s strategy=%s budget_limit=%s",request_id,store,body.forecast_run_id,strategy,body.budget_limit)
+  with self.factory() as s:
+   forecast,_=self._forecast(s,store,body.forecast_run_id)
+   if body.as_of_date!=forecast.cutoff_date:raise PlanningError("FORECAST_INPUT_INVALID","as_of_date phải bằng forecast cutoff_date.",{"as_of_date":body.as_of_date,"cutoff_date":forecast.cutoff_date})
+   if key:
+    replay=IdempotencyService(IdempotencyRepository(s)).register(store_id=store,endpoint=endpoint,http_method="POST",idempotency_key=key,request_hash=request_hash)
+    if replay.is_replay:
+     rid=replay.record.resource_id;s.rollback();return self.get_legacy_plan_metadata(store,rid)
+   rid=str(uuid4());legacy=PlanRunModel(plan_run_id=rid,store_id=store,forecast_run_id=body.forecast_run_id,strategy=body.strategy,
+    budget_limit=body.budget_limit,as_of_date=body.as_of_date,include_open_purchase_orders=body.include_open_purchase_orders,
+    status="running",engine_status="decision_planning",request_hash=request_hash,input_snapshot_json=dump({"request":payload,"planning_strategy":strategy}),warnings_json="[]",created_at=now())
+   s.add(legacy)
+   if key:
+    record=IdempotencyRepository(s).get(store_id=store,endpoint=endpoint,http_method="POST",idempotency_key=key);record.resource_type="plan_run";record.resource_id=rid;record.response_status=200
+   s.commit()
+  try:
+   logger.info("planning_started request_id=%s store_id=%s forecast_run_id=%s plan_run_id=%s strategy=%s",request_id,store,body.forecast_run_id,rid,strategy)
+   with self.factory() as s:demand=PlanningRepository(s).demand_run_for_forecast(body.forecast_run_id)
+   if not demand or demand.status!="completed":self.generate_demand(store,body.forecast_run_id)
+   logger.info("ingredient_demand_resolved request_id=%s store_id=%s forecast_run_id=%s plan_run_id=%s",request_id,store,body.forecast_run_id,rid)
+   result=self.generate_plans(store,body.forecast_run_id,ProcurementPlansRequest(strategies=[strategy],
+    use_open_purchase_orders=body.include_open_purchase_orders,use_latest_inventory=True,budget_override=body.budget_limit))
+   planning_run_id=result["procurement_plan_run_id"];selected=result["plans"][0]
+   logger.info("inventory_simulation_completed request_id=%s store_id=%s forecast_run_id=%s plan_run_id=%s planning_run_id=%s strategy=%s",request_id,store,body.forecast_run_id,rid,planning_run_id,strategy)
+   logger.info("procurement_plan_created request_id=%s store_id=%s forecast_run_id=%s plan_run_id=%s planning_run_id=%s strategy=%s",request_id,store,body.forecast_run_id,rid,planning_run_id,strategy)
+   with self.factory() as s:
+    legacy=s.get(PlanRunModel,rid);legacy.procurement_plan_run_id=planning_run_id;legacy.status="completed";legacy.engine_status="decision_planning";legacy.completed_at=now();legacy.warnings_json=dump(result["warnings"])
+    for line in selected["lines"]:
+     if line["supplier_id"] and line["order_quantity"]>0:
+      s.add(RecommendationModel(recommendation_id=str(uuid4()),plan_run_id=rid,store_id=store,ingredient_id=line["ingredient_id"],unit=line["unit"],order_quantity=Decimal(str(line["order_quantity"])),unit_cost=line["unit_cost"],cost=line["line_cost"],supplier_id=line["supplier_id"],moq=Decimal(str(line["moq"])),pack_size=Decimal(str(line["pack_size"])),lead_time_days=line["lead_time_days"],created_at=now()))
+    AuditService(AuditLogRepository(s)).record(store_id=store,action="legacy_plan_generated",resource_type="plan_run",resource_id=rid,after={"forecast_run_id":body.forecast_run_id,"procurement_plan_run_id":planning_run_id,"strategy":strategy},source="planning_service");s.commit()
+   logger.info("legacy_plan_adapter_completed request_id=%s store_id=%s forecast_run_id=%s plan_run_id=%s planning_run_id=%s strategy=%s duration=%.3f",request_id,store,body.forecast_run_id,rid,planning_run_id,strategy,time.monotonic()-started)
+   return self.get_legacy_plan_metadata(store,rid)
+  except PlanningError as exc:
+   with self.factory() as s:
+    legacy=s.get(PlanRunModel,rid)
+    if legacy:legacy.status="blocked";legacy.failure_code=exc.code;legacy.failure_message=exc.message;legacy.completed_at=now();s.commit()
+   logger.exception("legacy_plan_adapter_failed request_id=%s store_id=%s forecast_run_id=%s plan_run_id=%s strategy=%s failure_code=%s duration=%.3f",request_id,store,body.forecast_run_id,rid,strategy,exc.code,time.monotonic()-started)
+   raise
+  except Exception as exc:
+   with self.factory() as s:
+    legacy=s.get(PlanRunModel,rid)
+    if legacy:legacy.status="failed";legacy.failure_code="PROCUREMENT_PLAN_INFEASIBLE";legacy.failure_message=str(exc)[:500];legacy.completed_at=now();s.commit()
+   logger.exception("legacy_plan_adapter_failed request_id=%s store_id=%s forecast_run_id=%s plan_run_id=%s strategy=%s failure_code=PROCUREMENT_PLAN_INFEASIBLE duration=%.3f",request_id,store,body.forecast_run_id,rid,strategy,time.monotonic()-started)
+   raise PlanningError("PROCUREMENT_PLAN_INFEASIBLE","Planning execution thất bại.",http_status=500) from exc
+
+ def get_legacy_plan_metadata(self,store,rid):
+  with self.factory() as s:
+   StoreRepository(s).get_required(store);run=s.get(PlanRunModel,rid)
+   if not run or run.store_id!=store:raise PlanningError("PLANNING_RUN_NOT_FOUND","Không tìm thấy plan run.",{"plan_run_id":rid},http_status=404)
+   strategy=LEGACY_STRATEGIES.get(run.strategy,run.strategy)
+   return {"plan_run_id":run.plan_run_id,"store_id":run.store_id,"forecast_run_id":run.forecast_run_id,"procurement_plan_run_id":run.procurement_plan_run_id,
+    "status":run.status,"engine_status":run.engine_status,"strategy":run.strategy,"planning_strategy":strategy,"budget_limit":run.budget_limit,"as_of_date":run.as_of_date,
+    "include_open_purchase_orders":run.include_open_purchase_orders,"created_at":run.created_at,"completed_at":run.completed_at,
+    "result_url":f"/api/v1/stores/{store}/plan-runs/{rid}/result","warnings":json.loads(run.warnings_json or "[]"),"failure_code":run.failure_code,"failure_message":run.failure_message}
+
+ def get_legacy_plan_result(self,store,rid):
+  metadata=self.get_legacy_plan_metadata(store,rid)
+  if metadata["status"]!="completed":
+   raise PlanningError(metadata["failure_code"] or "PROCUREMENT_PLAN_INFEASIBLE",metadata["failure_message"] or "Plan run chưa completed.",{"plan_run_id":rid},http_status=409)
+  result=self.get_plans(store,metadata["forecast_run_id"],metadata["procurement_plan_run_id"]);selected=next((p for p in result["plans"] if p["strategy"]==metadata["planning_strategy"]),None)
+  if selected is None:raise PlanningError("PLANNING_PERSISTENCE_INCONSISTENCY","Không tìm thấy selected strategy trong planning result.",http_status=500)
+  with self.factory() as s:
+   recommendations={x.ingredient_id:x.recommendation_id for x in s.scalars(select(RecommendationModel).where(RecommendationModel.plan_run_id==rid))}
+   lines=[]
+   for line in selected["lines"]:
+    ingredient=s.get(IngredientModel,line["ingredient_id"]);supplier=s.get(SupplierModel,line["supplier_id"]) if line["supplier_id"] else None
+    lines.append({**line,"ingredient_name":ingredient.ingredient if ingredient else None,"supplier_name":supplier.supplier if supplier else None,"recommendation_id":recommendations.get(line["ingredient_id"])})
+  metrics=selected["metrics"]
+  return {**metadata,"is_feasible":selected["is_feasible"],"is_recommended":selected["is_recommended"],"total_purchase_cost":selected["total_purchase_cost"],
+   "projected_shortage_quantity":selected["projected_shortage_quantity"],"projected_waste_quantity":selected["projected_waste_quantity"],"fill_rate":selected["fill_rate"],
+   "budget_used":selected["budget_used"],"budget_remaining":metrics.get("budget_remaining"),"constraint_violations":metrics.get("constraint_violations",[]),
+   "warnings":sorted(set(metadata["warnings"]+selected["warnings"])),"plan_lines":lines,"simulation_summary":selected["daily_projections"]}
