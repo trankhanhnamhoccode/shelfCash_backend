@@ -54,5 +54,9 @@
   {"method":"POST","path":"/api/v1/stores/{store_id}/purchase-orders/{po_id}/receive","priority":"P1","group":"forecast_plan_po","purpose":"Receive purchase order"},
   {"method":"POST","path":"/api/v1/forecast-models/train","priority":"P0","group":"forecast_core","purpose":"Train and activate forecast model"},
   {"method":"POST","path":"/api/v1/forecasts","priority":"compatibility","group":"forecast_core","purpose":"Deprecated compatibility alias for persisted demand forecast"},
-  {"method":"GET","path":"/api/v1/forecasts/{forecast_run_id}","priority":"compatibility","group":"forecast_core","purpose":"Deprecated compatibility alias for persisted demand forecast"}
+  {"method":"GET","path":"/api/v1/forecasts/{forecast_run_id}","priority":"compatibility","group":"forecast_core","purpose":"Deprecated compatibility alias for persisted demand forecast"},
+  {"method":"POST","path":"/api/v1/stores/{store_id}/forecast-runs/{forecast_run_id}/ingredient-demand","priority":"P0","group":"demand_planning","purpose":"Generate persisted ingredient demand"},
+  {"method":"GET","path":"/api/v1/stores/{store_id}/forecast-runs/{forecast_run_id}/ingredient-demand","priority":"P0","group":"demand_planning","purpose":"Read persisted ingredient demand"},
+  {"method":"POST","path":"/api/v1/stores/{store_id}/forecast-runs/{forecast_run_id}/procurement-plans","priority":"P0","group":"demand_planning","purpose":"Generate procurement strategy plans"},
+  {"method":"GET","path":"/api/v1/stores/{store_id}/forecast-runs/{forecast_run_id}/procurement-plans","priority":"P0","group":"demand_planning","purpose":"Read persisted procurement strategy plans"}
 ]

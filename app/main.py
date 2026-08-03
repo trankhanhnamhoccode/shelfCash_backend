@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError as PydanticValidationError
 
-from app.api import catalog, completion, forecast, health, imports, llm, menu, operational, recipes
+from app.api import catalog, completion, forecast, health, imports, llm, menu, operational, planning, recipes
 from app.config import Settings, get_settings
 from app.core.exceptions import ShelfCashError
 from app.core.excel_reader import ExcelIngestionError
@@ -21,6 +21,7 @@ from app.services.operational_service import OperationalService
 from app.services.completion_service import CompletionService
 from app.services.menu_service import MenuService
 from app.services.forecast_service import ForecastService
+from app.services.decision_planning_service import DecisionPlanningService
 
 
 logger = logging.getLogger("shelfcash.api")
@@ -91,6 +92,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             app.state.recipe_api_service = RecipeApiService(session_factory)
             app.state.operational_service = OperationalService(session_factory)
             app.state.forecast_service = ForecastService(session_factory, active_settings)
+            app.state.decision_planning_service = DecisionPlanningService(session_factory)
             app.state.completion_service = CompletionService(session_factory, app.state.operational_service, app.state.forecast_service)
             yield
         finally:
@@ -112,6 +114,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(operational.router, prefix="/api/v1")
     app.include_router(completion.router, prefix="/api/v1")
     app.include_router(forecast.router, prefix="/api/v1")
+    app.include_router(planning.router, prefix="/api/v1")
 
     @app.exception_handler(ExcelIngestionError)
     async def excel_error(request: Request, exc: ExcelIngestionError):

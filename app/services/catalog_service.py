@@ -378,7 +378,7 @@ class RecipeApiService:
         recipe = None
         if version is not None:
             lines = list(session.execute(select(RecipeLineModel, IngredientModel).join(IngredientModel, IngredientModel.ingredient_id == RecipeLineModel.ingredient_id).where(RecipeLineModel.recipe_version_id == version.recipe_version_id)))
-            recipe = {"recipe_version_id": version.recipe_version_id, "version": version.version, "effective_from": version.effective_from, "effective_to": version.effective_to, "content_hash": version.content_hash, "lines": [{"recipe_line_id": line.recipe_line_id, "ingredient_id": ingredient.ingredient_id, "ingredient": ingredient.ingredient, "quantity": format(line.quantity.normalize(), "f"), "unit": line.unit} for line, ingredient in lines], "created_at": version.created_at}
+            recipe = {"recipe_version_id": version.recipe_version_id, "version": version.version, "effective_from": version.effective_from, "effective_to": version.effective_to, "yield_quantity": format(version.yield_quantity.normalize(), "f"), "process_loss_rate": format(version.process_loss_rate.normalize(), "f"), "content_hash": version.content_hash, "lines": [{"recipe_line_id": line.recipe_line_id, "ingredient_id": ingredient.ingredient_id, "ingredient": ingredient.ingredient, "quantity": format(line.quantity.normalize(), "f"), "unit": line.unit} for line, ingredient in lines], "created_at": version.created_at}
         return {"product_id": product_id, "store_id": store_id, "recipe": recipe}
 
     def put(self, store_id, product_id, data, key=None):
@@ -407,7 +407,8 @@ class RecipeApiService:
                 if ingredient is None: raise ResourceNotFoundError(details={"resource": "ingredient", "ingredient_id": line.ingredient_id})
                 converted.append({"ingredient_id": line.ingredient_id, "quantity": convert_quantity(line.quantity, line.unit, ingredient.base_unit), "unit": ingredient.base_unit})
             before = len(versions)
-            model = RecipeVersionService(repo).create_version(store_id, product_id, data.effective_from, converted, source="manual")
+            model = RecipeVersionService(repo).create_version(store_id, product_id, data.effective_from, converted,
+                source="manual", yield_quantity=data.yield_quantity, process_loss_rate=data.process_loss_rate)
             session.flush()
             created = len(repo.get_versions(store_id, product_id)) > before
             response = self._response(session, store_id, product_id, model)

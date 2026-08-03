@@ -34,6 +34,10 @@ def get_forecast_service(request: Request):
     return request.app.state.forecast_service
 
 
+def get_decision_planning_service(request: Request):
+    return request.app.state.decision_planning_service
+
+
 def get_db_session(request: Request):
     session = request.app.state.session_factory()
     try:

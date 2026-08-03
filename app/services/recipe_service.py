@@ -17,15 +17,17 @@ class RecipeVersionService:
         self.catalog = CatalogRepository(repository.session)
 
     @staticmethod
-    def compute_content_hash(product_id: str, effective_from: date, lines: list[dict]) -> str:
+    def compute_content_hash(product_id: str, effective_from: date, lines: list[dict], yield_quantity=Decimal("1"), process_loss_rate=Decimal("0")) -> str:
         canonical = sorted(
             [{"ingredient_id": x["ingredient_id"], "quantity": str(Decimal(str(x["quantity"])).normalize()), "unit": normalize_unit(x["unit"])} for x in lines],
             key=lambda x: x["ingredient_id"],
         )
-        raw = json.dumps({"product_id": product_id, "effective_from": effective_from.isoformat(), "lines": canonical}, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+        raw = json.dumps({"product_id": product_id, "effective_from": effective_from.isoformat(),
+            "yield_quantity": str(Decimal(yield_quantity)), "process_loss_rate": str(Decimal(process_loss_rate)),
+            "lines": canonical}, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
         return hashlib.sha256(raw.encode()).hexdigest()
 
-    def create_version(self, store_id: str, product_id: str, effective_from: date, lines: list[dict], source: str = "manual") -> RecipeVersionModel:
+    def create_version(self, store_id: str, product_id: str, effective_from: date, lines: list[dict], source: str = "manual", yield_quantity=Decimal("1"), process_loss_rate=Decimal("0")) -> RecipeVersionModel:
         product = self.catalog.get_product(store_id, product_id)
         if product is None:
             raise ValidationError("Product phải thuộc store.")
@@ -41,7 +43,10 @@ class RecipeVersionService:
             if Decimal(str(line["quantity"])) <= 0:
                 raise ValidationError("Recipe quantity phải lớn hơn 0.")
             validate_compatible(line["unit"], ingredient.base_unit)
-        content_hash = self.compute_content_hash(product_id, effective_from, lines)
+        yield_quantity, process_loss_rate = Decimal(yield_quantity), Decimal(process_loss_rate)
+        if yield_quantity <= 0: raise ValidationError("Recipe yield_quantity phải lớn hơn 0.")
+        if process_loss_rate < 0 or process_loss_rate >= 1: raise ValidationError("process_loss_rate phải trong [0,1).")
+        content_hash = self.compute_content_hash(product_id, effective_from, lines, yield_quantity, process_loss_rate)
         versions = self.repository.get_versions(store_id, product_id)
         for existing in versions:
             if existing.content_hash == content_hash:
@@ -54,7 +59,8 @@ class RecipeVersionService:
         model = RecipeVersionModel(
             recipe_version_id=str(uuid4()), store_id=store_id, product_id=product_id,
             version=(previous.version + 1 if previous else 1), effective_from=effective_from,
-            content_hash=content_hash, source=source,
+            content_hash=content_hash, source=source, yield_quantity=yield_quantity,
+            process_loss_rate=process_loss_rate,
         )
         self.repository.session.add(model)
         self.repository.session.flush()

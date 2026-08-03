@@ -34,3 +34,5 @@ __all__ = [
 from app.models.operations import (BudgetPeriodModel, ForecastModelVersionModel,
     ForecastPredictionModel, ForecastRunModel, PlanRunModel, PurchaseOrderLineModel,
     PurchaseOrderModel, RecommendationModel)
+from app.models.planning import (IngredientDemandPredictionModel, IngredientDemandRunModel,
+    ProcurementPlanLineModel, ProcurementPlanModel, ProcurementPlanRunModel)

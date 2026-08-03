@@ -117,3 +117,9 @@ class ForecastError(ShelfCashError):
 class InsufficientTrainingDataError(ForecastError):
     def __init__(self, message="Chưa đủ dữ liệu lịch sử để huấn luyện mô hình.", details=None):
         super().__init__("INSUFFICIENT_TRAINING_DATA", message, details)
+
+
+class PlanningError(ShelfCashError):
+    def __init__(self, code: str, message: str, details=None, *, http_status: int = 422):
+        self.code, self.http_status = code, http_status
+        super().__init__(message, details)

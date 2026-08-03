@@ -138,6 +138,8 @@ class RecipeVersionModel(Base):
         CheckConstraint("version >= 1", name="ck_recipe_version"),
         CheckConstraint("effective_to IS NULL OR effective_to >= effective_from", name="ck_recipe_dates"),
         Index("ix_recipe_product_effective", "product_id", "effective_from"),
+        CheckConstraint("yield_quantity > 0", name="ck_recipe_yield_positive"),
+        CheckConstraint("process_loss_rate >= 0 AND process_loss_rate < 1", name="ck_recipe_loss_rate"),
     )
     recipe_version_id: Mapped[str] = mapped_column(String(36), primary_key=True)
     store_id: Mapped[str] = mapped_column(String(128), ForeignKey("stores.store_id"), nullable=False)
@@ -145,6 +147,8 @@ class RecipeVersionModel(Base):
     version: Mapped[int] = mapped_column(Integer, nullable=False)
     effective_from: Mapped[date] = mapped_column(Date, nullable=False)
     effective_to: Mapped[date | None] = mapped_column(Date)
+    yield_quantity: Mapped[Decimal] = mapped_column(Numeric(20, 6), nullable=False, default=1)
+    process_loss_rate: Mapped[Decimal] = mapped_column(Numeric(10, 6), nullable=False, default=0)
     content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     source: Mapped[str] = mapped_column(String(32), nullable=False)
     source_import_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("import_jobs.import_id"))
