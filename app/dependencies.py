@@ -30,6 +30,10 @@ def get_completion_service(request: Request):
     return request.app.state.completion_service
 
 
+def get_forecast_service(request: Request):
+    return request.app.state.forecast_service
+
+
 def get_db_session(request: Request):
     session = request.app.state.session_factory()
     try:

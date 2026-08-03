@@ -273,6 +273,7 @@ class SalesDailyModel(Base):
     quantity: Mapped[Decimal] = mapped_column(Numeric(20, 6), nullable=False)
     unit_price: Mapped[int | None] = mapped_column(Integer)
     promotion: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    is_stockout: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     source: Mapped[str] = mapped_column(String(32), nullable=False)
     import_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("import_jobs.import_id"))
     profile_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("import_sheet_profiles.profile_id"))

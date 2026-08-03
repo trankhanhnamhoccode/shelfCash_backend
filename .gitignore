@@ -12,3 +12,8 @@ runtime/results/*
 runtime/*.db
 runtime/*.xlsx
 *.db
+
+# Local forecast integration tests
+/tests/test_forecast_api.py
+/tests/test_forecast_integration.py
+/tests/test_forecast_repository.py

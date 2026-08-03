@@ -106,3 +106,14 @@ class DatabaseNotReadyError(ShelfCashError):
     code = "DATABASE_NOT_READY"
     default_message = "Database chưa sẵn sàng."
     http_status = 503
+
+
+class ForecastError(ShelfCashError):
+    def __init__(self, code: str, message: str, details=None, *, http_status: int = 422):
+        self.code, self.http_status = code, http_status
+        super().__init__(message, details)
+
+
+class InsufficientTrainingDataError(ForecastError):
+    def __init__(self, message="Chưa đủ dữ liệu lịch sử để huấn luyện mô hình.", details=None):
+        super().__init__("INSUFFICIENT_TRAINING_DATA", message, details)

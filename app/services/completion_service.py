@@ -25,7 +25,7 @@ from app.models.operations import (
 from app.repositories.stores import StoreRepository
 
 class CompletionService:
- def __init__(self,factory,operational):self.factory=factory;self.operational=operational
+ def __init__(self,factory,operational,forecast_service):self.factory=factory;self.operational=operational;self.forecast_service=forecast_service
  def bootstrap(self,store):
   with self.factory() as s:
    x=StoreRepository(s).get_required(store)
@@ -261,24 +261,10 @@ class CompletionService:
    if key:
     rec=IdempotencyRepository(s).get(store_id=store,endpoint=path,http_method="POST",idempotency_key=key);rec.response_status=201;rec.response_body_json=json.dumps(result,default=str)
    s.commit();return result
- def _forecast_status(self,x):
-  return {"forecast_run_id":x.forecast_run_id,"status":x.status,"engine_status":x.engine_status,"cutoff_date":x.cutoff_date,"horizon_days":x.horizon_days}
  def forecast_create(self,store,b,key):
-  with self.factory() as s:
-   StoreRepository(s).get_required(store);payload=b.model_dump(mode="json");request_hash=canonical_hash(payload);rid=str(uuid4())
-   if key:
-    replay=IdempotencyService(IdempotencyRepository(s)).register(store_id=store,endpoint=f"/api/v1/stores/{store}/forecast-runs",http_method="POST",idempotency_key=key,request_hash=request_hash)
-    if replay.is_replay:
-     rid=replay.record.resource_id;s.rollback()
-     raise ModelNotReadyError(details={"forecast_run_id":rid,"engine_status":"model_unavailable"})
-    replay.record.resource_type="forecast_run";replay.record.resource_id=rid;replay.record.response_status=503
-   s.add(ForecastRunModel(forecast_run_id=rid,store_id=store,cutoff_date=b.cutoff_date,horizon_days=b.horizon_days,quantiles_json=json.dumps(b.quantiles),scope_json=json.dumps(b.scope),use_latest_calendar=b.use_latest_calendar,status="blocked",engine_status="model_unavailable",request_hash=request_hash,failure_code="MODEL_NOT_READY",failure_message="Forecast model unavailable"));s.commit()
-  raise ModelNotReadyError(details={"forecast_run_id":rid,"engine_status":"model_unavailable"})
+  return self.forecast_service.create_legacy_run(store,b,key)
  def forecast_get(self,store,rid,result):
-  with self.factory() as s:x=s.scalar(select(ForecastRunModel).where(ForecastRunModel.store_id==store,ForecastRunModel.forecast_run_id==rid))
-  if not x:raise ResourceNotFoundError(details={"resource":"forecast_run"})
-  if result:raise ModelNotReadyError(details={"forecast_run_id":rid,"engine_status":x.engine_status})
-  return self._forecast_status(x)
+  return self.forecast_service.get_legacy_result(rid,store) if result else self.forecast_service.get_metadata(rid,store)
  def _plan_status(self,x):
   return {"plan_run_id":x.plan_run_id,"status":x.status,"engine_status":x.engine_status,"forecast_run_id":x.forecast_run_id,"strategy":x.strategy,"budget_limit":x.budget_limit,"as_of_date":x.as_of_date}
  def plan_create(self,store,b,key):

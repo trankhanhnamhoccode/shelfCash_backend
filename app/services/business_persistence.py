@@ -221,19 +221,24 @@ class ImportBusinessPersistenceService:
             quantity = self._decimal(row.get("quantity_sold"), "quantity_sold")
             price = row.get("selling_price")
             price = None if price is None else int(self._decimal(price, "selling_price"))
+            stockout = row.get("is_stockout")
+            stockout = None if stockout is None else bool(stockout)
             if key in grouped and grouped[key]["price"] != price:
                 raise ValidationError("Nhiều unit price khác nhau cho cùng sales aggregate.", {"date": day.isoformat()})
-            grouped.setdefault(key, {"quantity": Decimal(0), "price": price, "hashes": []})
+            grouped.setdefault(key, {"quantity": Decimal(0), "price": price, "hashes": [], "stockouts": []})
             grouped[key]["quantity"] += quantity
+            grouped[key]["stockouts"].append(stockout)
             grouped[key]["hashes"].append(self._row_hash(job, sheet, row, index))
         for (day, product_id, promotion), data in grouped.items():
             model = self.session.scalar(select(SalesDailyModel).where(SalesDailyModel.store_id == job.store_id, SalesDailyModel.date == day, SalesDailyModel.product_id == product_id, SalesDailyModel.promotion == promotion))
             row_hash = canonical_hash({"source_rows": sorted(data["hashes"])})
             if model is None:
-                self.session.add(SalesDailyModel(sales_record_id=str(uuid4()), store_id=job.store_id, date=day, product_id=product_id, quantity=data["quantity"], unit_price=data["price"], promotion=promotion, source="import", import_id=job.import_id, profile_id=sheet["profile_id"], source_row_hash=row_hash))
+                known_stockouts = [value for value in data["stockouts"] if value is not None]
+                self.session.add(SalesDailyModel(sales_record_id=str(uuid4()), store_id=job.store_id, date=day, product_id=product_id, quantity=data["quantity"], unit_price=data["price"], promotion=promotion, is_stockout=(any(known_stockouts) if known_stockouts else None), source="import", import_id=job.import_id, profile_id=sheet["profile_id"], source_row_hash=row_hash))
                 self.summary.sales_records_created += 1
             else:
-                model.quantity, model.unit_price, model.import_id, model.profile_id, model.source_row_hash = data["quantity"], data["price"], job.import_id, sheet["profile_id"], row_hash
+                known_stockouts = [value for value in data["stockouts"] if value is not None]
+                model.quantity, model.unit_price, model.is_stockout, model.import_id, model.profile_id, model.source_row_hash = data["quantity"], data["price"], (any(known_stockouts) if known_stockouts else None), job.import_id, sheet["profile_id"], row_hash
                 self.summary.sales_records_updated += 1
 
     def _persist_usage_history(self, job, sheet):

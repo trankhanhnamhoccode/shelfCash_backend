@@ -1,9 +1,10 @@
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
-from fastapi import APIRouter, Depends, Header
+from fastapi import APIRouter, Depends, Header, Request
 from pydantic import BaseModel, ConfigDict, Field
-from app.dependencies import get_completion_service, require_api_key
+from app.dependencies import get_completion_service, get_forecast_service, require_api_key
+from app.schemas.forecast import LegacyForecastMetadataResponse, LegacyForecastResultResponse
 
 class Strict(BaseModel): model_config=ConfigDict(extra="forbid")
 class CountLine(Strict): lot_id:str;counted_quantity:Decimal=Field(ge=0,allow_inf_nan=False);unit:str;note:str|None=None
@@ -56,12 +57,13 @@ def supplier_put(store_id:str,constraint_id:str,b:SupplierTermIn,k=Depends(idem)
 def settings(store_id:str,b:SettingsIn,s=Depends(get_completion_service)):return s.write("settings",store_id,b,None)
 @router.put("/stores/{store_id}/calendar-features")
 def calendar(store_id:str,b:CalendarIn,s=Depends(get_completion_service)):return s.write("calendar",store_id,b,None)
-@router.post("/stores/{store_id}/forecast-runs")
-def forecast_post(store_id:str,b:ForecastIn,k=Depends(idem),s=Depends(get_completion_service)):return s.forecast_create(store_id,b,k)
-@router.get("/stores/{store_id}/forecast-runs/{forecast_run_id}")
-def forecast_get(store_id:str,forecast_run_id:str,s=Depends(get_completion_service)):return s.forecast_get(store_id,forecast_run_id,False)
-@router.get("/stores/{store_id}/forecast-runs/{forecast_run_id}/result")
-def forecast_result(store_id:str,forecast_run_id:str,s=Depends(get_completion_service)):return s.forecast_get(store_id,forecast_run_id,True)
+@router.post("/stores/{store_id}/forecast-runs", response_model=LegacyForecastMetadataResponse)
+def forecast_post(store_id:str,b:ForecastIn,request:Request,k=Depends(idem),s=Depends(get_forecast_service)):
+ return s.create_legacy_run(store_id,b,k,getattr(request.state,"request_id",None))
+@router.get("/stores/{store_id}/forecast-runs/{forecast_run_id}", response_model=LegacyForecastMetadataResponse)
+def forecast_get(store_id:str,forecast_run_id:str,s=Depends(get_forecast_service)):return s.get_metadata(forecast_run_id,store_id)
+@router.get("/stores/{store_id}/forecast-runs/{forecast_run_id}/result", response_model=LegacyForecastResultResponse)
+def forecast_result(store_id:str,forecast_run_id:str,s=Depends(get_forecast_service)):return s.get_legacy_result(forecast_run_id,store_id)
 @router.post("/stores/{store_id}/plan-runs")
 def plan_post(store_id:str,b:PlanIn,k=Depends(idem),s=Depends(get_completion_service)):return s.plan_create(store_id,b,k)
 @router.get("/stores/{store_id}/plan-runs/{plan_run_id}")

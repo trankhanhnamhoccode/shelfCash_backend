@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError as PydanticValidationError
 
-from app.api import catalog, completion, health, imports, llm, menu, operational, recipes
+from app.api import catalog, completion, forecast, health, imports, llm, menu, operational, recipes
 from app.config import Settings, get_settings
 from app.core.exceptions import ShelfCashError
 from app.core.excel_reader import ExcelIngestionError
@@ -20,6 +20,7 @@ from app.services.catalog_service import CatalogApiService, RecipeApiService
 from app.services.operational_service import OperationalService
 from app.services.completion_service import CompletionService
 from app.services.menu_service import MenuService
+from app.services.forecast_service import ForecastService
 
 
 logger = logging.getLogger("shelfcash.api")
@@ -70,6 +71,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def lifespan(app: FastAPI):
         active_settings.upload_dir.mkdir(parents=True, exist_ok=True)
         active_settings.result_dir.mkdir(parents=True, exist_ok=True)
+        active_settings.forecast_artifact_root.mkdir(parents=True, exist_ok=True)
         engine = create_engine_from_settings(active_settings)
         session_factory = create_session_factory(engine)
         provider = create_llm_provider(active_settings)
@@ -88,7 +90,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             app.state.menu_service = MenuService(session_factory)
             app.state.recipe_api_service = RecipeApiService(session_factory)
             app.state.operational_service = OperationalService(session_factory)
-            app.state.completion_service = CompletionService(session_factory, app.state.operational_service)
+            app.state.forecast_service = ForecastService(session_factory, active_settings)
+            app.state.completion_service = CompletionService(session_factory, app.state.operational_service, app.state.forecast_service)
             yield
         finally:
             await provider.close()
@@ -108,6 +111,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(recipes.router, prefix="/api/v1")
     app.include_router(operational.router, prefix="/api/v1")
     app.include_router(completion.router, prefix="/api/v1")
+    app.include_router(forecast.router, prefix="/api/v1")
 
     @app.exception_handler(ExcelIngestionError)
     async def excel_error(request: Request, exc: ExcelIngestionError):

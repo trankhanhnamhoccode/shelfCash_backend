@@ -38,6 +38,7 @@ def session_factory(database_url):
 def client(tmp_path: Path, database_url: str):
     settings = Settings(
         llm_provider="disabled", upload_dir=tmp_path / "uploads", result_dir=tmp_path / "results",
+        forecast_artifact_root=tmp_path / "forecast_artifacts",
         database_url=database_url, max_file_size_mb=1,
     )
     engine = create_engine_from_url(database_url)

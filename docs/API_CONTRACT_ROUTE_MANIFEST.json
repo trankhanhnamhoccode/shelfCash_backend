@@ -40,9 +40,9 @@
   {"method":"PUT","path":"/api/v1/stores/{store_id}/settings","priority":"P0","group":"supplier_alias_settings_calendar","purpose":"Write settings"},
   {"method":"GET","path":"/api/v1/stores/{store_id}/calendar-features","priority":"P0","group":"supplier_alias_settings_calendar","purpose":"Read calendar features"},
   {"method":"PUT","path":"/api/v1/stores/{store_id}/calendar-features","priority":"P0","group":"supplier_alias_settings_calendar","purpose":"Write calendar features"},
-  {"method":"POST","path":"/api/v1/stores/{store_id}/forecast-runs","priority":"P1","group":"forecast_plan_po","purpose":"Create forecast run"},
+  {"method":"POST","path":"/api/v1/stores/{store_id}/forecast-runs","priority":"P0","group":"forecast_plan_po","purpose":"Create real Forecast Core run (canonical frontend contract)"},
   {"method":"GET","path":"/api/v1/stores/{store_id}/forecast-runs/{forecast_run_id}","priority":"P1","group":"forecast_plan_po","purpose":"Get forecast run"},
-  {"method":"GET","path":"/api/v1/stores/{store_id}/forecast-runs/{forecast_run_id}/result","priority":"P1","group":"forecast_plan_po","purpose":"Get forecast result"},
+  {"method":"GET","path":"/api/v1/stores/{store_id}/forecast-runs/{forecast_run_id}/result","priority":"P0","group":"forecast_plan_po","purpose":"Get persisted Forecast Core predictions"},
   {"method":"POST","path":"/api/v1/stores/{store_id}/plan-runs","priority":"P1","group":"forecast_plan_po","purpose":"Create plan run"},
   {"method":"GET","path":"/api/v1/stores/{store_id}/plan-runs/{plan_run_id}","priority":"P1","group":"forecast_plan_po","purpose":"Get plan run"},
   {"method":"GET","path":"/api/v1/stores/{store_id}/plan-runs/{plan_run_id}/result","priority":"P1","group":"forecast_plan_po","purpose":"Get plan result"},
@@ -51,5 +51,8 @@
   {"method":"GET","path":"/api/v1/stores/{store_id}/purchase-orders/{po_id}","priority":"P1","group":"forecast_plan_po","purpose":"Get purchase order"},
   {"method":"PATCH","path":"/api/v1/stores/{store_id}/purchase-orders/{po_id}","priority":"P1","group":"forecast_plan_po","purpose":"Update purchase order"},
   {"method":"POST","path":"/api/v1/stores/{store_id}/purchase-orders/{po_id}/confirm","priority":"P1","group":"forecast_plan_po","purpose":"Confirm purchase order"},
-  {"method":"POST","path":"/api/v1/stores/{store_id}/purchase-orders/{po_id}/receive","priority":"P1","group":"forecast_plan_po","purpose":"Receive purchase order"}
+  {"method":"POST","path":"/api/v1/stores/{store_id}/purchase-orders/{po_id}/receive","priority":"P1","group":"forecast_plan_po","purpose":"Receive purchase order"},
+  {"method":"POST","path":"/api/v1/forecast-models/train","priority":"P0","group":"forecast_core","purpose":"Train and activate forecast model"},
+  {"method":"POST","path":"/api/v1/forecasts","priority":"compatibility","group":"forecast_core","purpose":"Deprecated compatibility alias for persisted demand forecast"},
+  {"method":"GET","path":"/api/v1/forecasts/{forecast_run_id}","priority":"compatibility","group":"forecast_core","purpose":"Deprecated compatibility alias for persisted demand forecast"}
 ]
