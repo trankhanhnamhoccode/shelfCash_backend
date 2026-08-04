@@ -98,8 +98,7 @@ def test_supplier_settings_and_calendar_production_behavior(client, session_fact
     _ingredient(session_factory)
     _supplier(session_factory)
     term = {"ingredient_id": "ing-1", "supplier_id": "sup-1", "unit_cost": 100,
-            "moq": "1", "pack_size": "1", "lead_time_days": 2,
-            "safety_stock": "0", "capacity": "10", "unit": "kg"}
+            "moq": "1", "pack_size": "1", "lead_time_days": 2, "unit": "kg"}
     created = client.post("/api/v1/stores/STORE_001/supplier-constraints", json=term)
     assert created.status_code == 201
     updated = client.put(
@@ -227,8 +226,7 @@ def test_model_unavailable_remains_explicitly_blocked(client, session_factory):
     _supplier(session_factory)
     term = client.post("/api/v1/stores/STORE_001/supplier-constraints", json={
         "ingredient_id": "ing-1", "supplier_id": "sup-1", "unit_cost": 100,
-        "moq": "1", "pack_size": "1", "lead_time_days": 2,
-        "safety_stock": "0", "capacity": "10", "unit": "kg",
+        "moq": "1", "pack_size": "1", "lead_time_days": 2, "unit": "kg",
     })
     assert term.status_code == 201
     forecast_body = {"cutoff_date": "2026-07-28", "horizon_days": 7,

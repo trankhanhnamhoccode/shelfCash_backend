@@ -32,6 +32,7 @@
   {"method":"POST","path":"/api/v1/stores/{store_id}/sales-history/batch","priority":"P0","group":"history","purpose":"Write sales batch"},
   {"method":"POST","path":"/api/v1/stores/{store_id}/purchase-history/batch","priority":"P0","group":"history","purpose":"Write purchase batch"},
   {"method":"GET","path":"/api/v1/stores/{store_id}/supplier-constraints","priority":"P0","group":"supplier_alias_settings_calendar","purpose":"List supplier constraints"},
+  {"method":"GET","path":"/api/v1/stores/{store_id}/inventory-constraints","priority":"P0","group":"supplier_alias_settings_calendar","purpose":"List effective inventory and business constraints"},
   {"method":"POST","path":"/api/v1/stores/{store_id}/supplier-constraints","priority":"P0","group":"supplier_alias_settings_calendar","purpose":"Create supplier constraint"},
   {"method":"PUT","path":"/api/v1/stores/{store_id}/supplier-constraints/{constraint_id}","priority":"P0","group":"supplier_alias_settings_calendar","purpose":"Update supplier constraint"},
   {"method":"GET","path":"/api/v1/stores/{store_id}/aliases","priority":"P0","group":"supplier_alias_settings_calendar","purpose":"Read aliases"},

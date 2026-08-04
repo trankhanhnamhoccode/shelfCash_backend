@@ -14,6 +14,7 @@ from app.models.business import (
  ProductBundleLineModel, ProductModel, PurchaseReceiptModel, SalesDailyModel, StoreSettingsModel, SupplierModel,
  SupplierIngredientTermModel, RecipeVersionModel, RecipeLineModel, UsageDailyModel,
 )
+from app.repositories.inventory_constraints import InventoryConstraintRepository
 from app.repositories.audit_logs import AuditLogRepository
 from app.repositories.idempotency import IdempotencyRepository
 from app.services.audit_service import AuditService
@@ -95,8 +96,15 @@ class CompletionService:
   with self.factory() as s:
    StoreRepository(s).get_required(store)
    rows=s.execute(select(SupplierIngredientTermModel,SupplierModel).join(SupplierModel,SupplierModel.supplier_id==SupplierIngredientTermModel.supplier_id).where(SupplierIngredientTermModel.store_id==store,SupplierIngredientTermModel.active.is_(True)).order_by(SupplierModel.normalized_name,SupplierIngredientTermModel.ingredient_id))
-   items=[{"constraint_id":x.constraint_id,"ingredient_id":x.ingredient_id,"supplier_id":x.supplier_id,"supplier":sup.supplier,"unit_cost":x.unit_cost,"moq":str(x.moq),"pack_size":str(x.pack_size),"order_unit":x.order_unit,"lead_time_days":x.lead_time_days,"safety_stock":str(x.safety_stock),"capacity":str(x.capacity) if x.capacity is not None else None,"unit":x.unit,"version":x.version} for x,sup in rows]
+   items=[{"constraint_id":x.constraint_id,"ingredient_id":x.ingredient_id,"supplier_id":x.supplier_id,"supplier":sup.supplier,"unit_cost":x.unit_cost,"moq":str(x.moq),"pack_size":str(x.pack_size),"order_unit":x.order_unit,"lead_time_days":x.lead_time_days,"unit":x.unit,"version":x.version,"active":x.active} for x,sup in rows]
    return {"items":items,"page":1,"page_size":50,"total":len(items)}
+ def inventory_constraints(self,store,ingredient_id=None,constraint_type=None,as_of_date=None):
+  with self.factory() as s:
+   StoreRepository(s).get_required(store);rows=InventoryConstraintRepository(s).list(store,ingredient_id,constraint_type,as_of_date)
+   names={x.ingredient_id:x.ingredient for x in s.scalars(select(IngredientModel).where(IngredientModel.store_id==store))}
+   return {"store_id":store,"as_of_date":as_of_date,"items":[{"constraint_id":x.constraint_id,"ingredient_id":x.ingredient_id,
+    "ingredient_name":names.get(x.ingredient_id),"constraint_type":x.constraint_type,"value":str(x.value),"unit":x.unit,
+    "effective_date":x.effective_date,"end_date":x.end_date,"version":x.version,"active":x.active} for x in rows]}
  def write(self,kind,store,body,key,target=None):
   if kind in {"inventory_count","inventory_adjustment"}:
    return self._inventory_write(kind,store,body,key)
@@ -179,7 +187,7 @@ class CompletionService:
     if replay.is_replay:s.rollback();return json.loads(replay.record.response_body_json)
    ingredient=s.scalar(select(IngredientModel).where(IngredientModel.store_id==store,IngredientModel.ingredient_id==b.ingredient_id));supplier=s.scalar(select(SupplierModel).where(SupplierModel.store_id==store,SupplierModel.supplier_id==b.supplier_id))
    if not ingredient or not supplier:raise ResourceNotFoundError(details={"resource":"ingredient_or_supplier"})
-   values={n:convert_quantity(getattr(b,n),b.unit,ingredient.base_unit) if getattr(b,n) is not None else None for n in ("moq","pack_size","safety_stock","capacity")}
+   values={n:convert_quantity(getattr(b,n),b.unit,ingredient.base_unit) for n in ("moq","pack_size")}
    versions=list(s.scalars(select(SupplierIngredientTermModel).where(SupplierIngredientTermModel.store_id==store,SupplierIngredientTermModel.supplier_id==b.supplier_id,SupplierIngredientTermModel.ingredient_id==b.ingredient_id).order_by(SupplierIngredientTermModel.version)))
    current=next((x for x in versions if x.active),None)
    if kind=="supplier_update":
@@ -194,8 +202,8 @@ class CompletionService:
    if same:model=current
    else:
     if current:current.active=False
-    model=SupplierIngredientTermModel(constraint_id=str(uuid4()),store_id=store,supplier_id=b.supplier_id,ingredient_id=b.ingredient_id,unit_cost=b.unit_cost,moq=values["moq"],pack_size=values["pack_size"],order_unit=None,lead_time_days=b.lead_time_days,safety_stock=values["safety_stock"],capacity=values["capacity"],unit=ingredient.base_unit,version=max([x.version for x in versions] or [0])+1,active=True,source="api");s.add(model)
-   s.flush();result={"constraint_id":model.constraint_id,"ingredient_id":model.ingredient_id,"supplier_id":model.supplier_id,"supplier":supplier.supplier,"unit_cost":model.unit_cost,"moq":str(model.moq),"pack_size":str(model.pack_size),"order_unit":model.order_unit,"lead_time_days":model.lead_time_days,"safety_stock":str(model.safety_stock),"capacity":str(model.capacity) if model.capacity is not None else None,"unit":model.unit,"version":model.version}
+    model=SupplierIngredientTermModel(constraint_id=str(uuid4()),store_id=store,supplier_id=b.supplier_id,ingredient_id=b.ingredient_id,unit_cost=b.unit_cost,moq=values["moq"],pack_size=values["pack_size"],order_unit=None,lead_time_days=b.lead_time_days,unit=ingredient.base_unit,version=max([x.version for x in versions] or [0])+1,active=True,source="api");s.add(model)
+   s.flush();result={"constraint_id":model.constraint_id,"ingredient_id":model.ingredient_id,"supplier_id":model.supplier_id,"supplier":supplier.supplier,"unit_cost":model.unit_cost,"moq":str(model.moq),"pack_size":str(model.pack_size),"order_unit":model.order_unit,"lead_time_days":model.lead_time_days,"unit":model.unit,"version":model.version,"active":model.active}
    AuditService(AuditLogRepository(s)).record(store_id=store,action=kind,resource_type="supplier_constraint",resource_id=model.constraint_id,after={"version":model.version},source="api")
    if key:
     rec=IdempotencyRepository(s).get(store_id=store,endpoint=path,http_method="POST" if kind=="supplier_create" else "PUT",idempotency_key=key);rec.resource_type="supplier_constraint";rec.resource_id=model.constraint_id;rec.response_status=201 if kind=="supplier_create" else 200;rec.response_body_json=json.dumps(result,default=str,ensure_ascii=False)

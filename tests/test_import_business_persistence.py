@@ -13,7 +13,7 @@ from app.core.units import normalize_unit, validate_compatible
 from app.core.exceptions import ValidationError
 from app.schemas.llm import SheetProfile
 from app.models.business import (
-    CalendarFeatureModel, IngredientModel, InventoryLotModel, InventoryMovementModel, ProductModel, ProductBundleLineModel,
+    CalendarFeatureModel, IngredientModel, InventoryConstraintModel, InventoryLotModel, InventoryMovementModel, ProductModel, ProductBundleLineModel,
     PurchaseReceiptModel, RecipeLineModel, RecipeVersionModel, SalesDailyModel, UsageDailyModel,
     StoreSettingsModel, SupplierIngredientTermModel,
 )
@@ -526,3 +526,23 @@ def test_calendar_and_settings_upsert(client):
         assert settings.monthly_budget == 2_000_000
         assert settings.forecast_horizon == 21
         assert settings.version == 2
+
+
+def test_business_constraint_import_resolves_ingredient_and_is_versioned_idempotently(client):
+    with client.app.state.session_factory() as session:
+        session.add(IngredientModel(ingredient_id="milk-constraint", store_id="STORE_001", ingredient="Milk constraint",
+            normalized_name="milk constraint", base_unit="lít", active=True, source="test")); session.commit()
+    mapping = {"kind": "constraint_type", "ingredient": "ingredient_name", "value": "value", "unit": "unit", "effective": "effective_date"}
+    first = b"kind,ingredient,value,unit,effective\nsafety_stock,Milk constraint,12000,ml,2026-07-01\n"
+    _, response = upload_confirm_process(client, first, mapping, "business_constraints", name="constraint.csv")
+    assert response.status_code == 200, response.text
+    _, response = upload_confirm_process(client, first, mapping, "business_constraints", name="constraint-same.csv")
+    assert response.status_code == 200, response.text
+    changed = b"kind,ingredient,value,unit,effective\nsafety_stock,Milk constraint,13,liter,2026-08-01\n"
+    _, response = upload_confirm_process(client, changed, mapping, "business_constraints", name="constraint-v2.csv")
+    assert response.status_code == 200, response.text
+    with client.app.state.session_factory() as session:
+        rows = list(session.scalars(select(InventoryConstraintModel).order_by(InventoryConstraintModel.version)))
+        assert len(rows) == 2
+        assert rows[0].active is False and rows[0].end_date == date(2026, 7, 31)
+        assert rows[1].active is True and rows[1].version == 2 and rows[1].ingredient_id == "milk-constraint"

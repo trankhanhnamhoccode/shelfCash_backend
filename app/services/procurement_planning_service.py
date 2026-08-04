@@ -11,13 +11,14 @@ from app.models.business import (InventoryLotModel, InventoryMovementModel, Stor
     SupplierIngredientTermModel, SupplierModel, IngredientModel)
 from app.models.operations import BudgetPeriodModel, PurchaseOrderLineModel, PurchaseOrderModel
 from app.services.inventory_simulation_service import InventorySimulationService
+from app.services.business_constraint_resolver import BusinessConstraintResolver
 
 D=Decimal
 SCENARIOS={"lean":"p25","balanced":"p50","protected":"p75"}
 
 
 class ProcurementPlanningService:
-    def __init__(self,session):self.session=session;self.simulator=InventorySimulationService()
+    def __init__(self,session):self.session=session;self.simulator=InventorySimulationService();self.constraints=BusinessConstraintResolver(session)
 
     def build(self,store_id,forecast,demand_rows,strategies,use_open_purchase_orders=True,budget_override=None):
         by_ingredient=defaultdict(list)
@@ -27,14 +28,23 @@ class ProcurementPlanningService:
         budget,warnings=self._budget(store_id,forecast.cutoff_date,budget_override)
         plans=[]
         for strategy in strategies:
-            quantile=SCENARIOS[strategy];lines=[];proposed=defaultdict(list);baseline={};violations=[];plan_warnings=list(warnings)
+            quantile=SCENARIOS[strategy];lines=[];proposed=defaultdict(list);baseline={};violations=[];plan_warnings=list(warnings);constraint_trace={}
             for ingredient_id,rows in by_ingredient.items():
                 unit=rows[0].unit;demands=[{"date":x.target_date,"quantity":D(getattr(x,quantile))} for x in rows]
                 baseline[ingredient_id]=self.simulator.simulate(ingredient_id,unit,demands,inventory[ingredient_id],existing_inbound.get(ingredient_id,[]))
                 terms=self._terms(store_id,ingredient_id)
                 term=self._select_term(terms,forecast.cutoff_date,baseline[ingredient_id].get("first_shortage_date"))
-                safety=max((convert_quantity(D(x.safety_stock),x.unit,unit) for x in terms),default=D(0))
+                configured_safety=self.constraints.resolve_quantity(store_id,"safety_stock",ingredient_id,unit,forecast.cutoff_date)
+                safety=D(0) if configured_safety is None else D(configured_safety)
+                maximum=self.constraints.resolve_quantity(store_id,"maximum_stock",ingredient_id,unit,forecast.cutoff_date)
+                fallback="ZERO_WITH_WARNING" if configured_safety is None else None
+                if configured_safety is None: plan_warnings.append("SAFETY_STOCK_NOT_CONFIGURED")
+                constraint_trace[ingredient_id]={"configured_safety_stock":None if configured_safety is None else str(configured_safety),
+                    "effective_safety_stock":str(safety),"fallback_policy":fallback,
+                    "maximum_stock":None if maximum is None else str(maximum),"unit":unit}
                 raw=max(D(0),D(baseline[ingredient_id]["shortage_quantity"])+max(D(0),safety-D(baseline[ingredient_id]["ending_inventory"])))
+                if maximum is not None:
+                    raw=min(raw,max(D(0),D(maximum)-D(baseline[ingredient_id]["ending_inventory"])))
                 reasons=[];line_warnings=[]
                 if D(baseline[ingredient_id]["shortage_quantity"])>0:reasons.append("PROJECTED_STOCKOUT")
                 if safety>D(baseline[ingredient_id]["ending_inventory"]):reasons.append("SAFETY_STOCK_GAP")
@@ -50,8 +60,6 @@ class ProcurementPlanningService:
                     if order<D(term.moq):
                         packs=int((D(term.moq)/D(term.pack_size)).to_integral_value(rounding=ROUND_CEILING));order=D(packs)*D(term.pack_size);reasons.append("MOQ_ROUNDING")
                     if order>raw_term:reasons.append("PACK_SIZE_ROUNDING")
-                if term.capacity is not None and order>D(term.capacity):
-                    violations.append({"code":"SUPPLIER_CAPACITY_EXCEEDED","ingredient_id":ingredient_id,"capacity":str(term.capacity),"order_quantity":str(order)})
                 arrival=forecast.cutoff_date+timedelta(days=term.lead_time_days)
                 first=baseline[ingredient_id].get("first_shortage_date")
                 if first and arrival.isoformat()>first:
@@ -64,7 +72,7 @@ class ProcurementPlanningService:
                     "expected_arrival_date":arrival,"raw_required_quantity":raw_term,"order_quantity":order,"unit":term.unit,
                     "pack_count":packs,"unit_cost":term.unit_cost,"line_cost":cost,"moq":D(term.moq),"pack_size":D(term.pack_size),
                     "lead_time_days":term.lead_time_days,"rounding_excess":excess,"reason_codes":reasons,"warnings":line_warnings})
-            projections=[];shortage=D(0);waste=D(0);demand=D(0);fulfilled=D(0);expiry_risk=D(0);stockouts=set();capacity_violations=[]
+            projections=[];shortage=D(0);waste=D(0);demand=D(0);fulfilled=D(0);expiry_risk=D(0);stockouts=set()
             for ingredient_id,rows in by_ingredient.items():
                 unit=rows[0].unit;demands=[{"date":x.target_date,"quantity":D(getattr(x,quantile))} for x in rows]
                 sim=self.simulator.simulate(ingredient_id,unit,demands,inventory[ingredient_id],existing_inbound.get(ingredient_id,[])+proposed.get(ingredient_id,[]))
@@ -73,12 +81,12 @@ class ProcurementPlanningService:
                 plan_warnings.append("STORAGE_CAPACITY_NOT_CONFIGURED")
             cost=sum(x["line_cost"] for x in lines);budget_violation=[]
             if budget is not None and cost>budget:budget_violation=[{"code":"BUDGET_EXCEEDED","budget":budget,"cost":cost}]
-            violations.extend(capacity_violations+budget_violation);fill=D(1) if demand==0 else fulfilled/demand
+            violations.extend(budget_violation);fill=D(1) if demand==0 else fulfilled/demand
             plans.append({"strategy":strategy,"is_feasible":not violations,"is_recommended":False,"total_purchase_cost":cost,
                 "total_order_quantity":sum((D(x["order_quantity"]) for x in lines),D(0)),"projected_shortage_quantity":shortage,
                 "projected_waste_quantity":waste,"fill_rate":fill,"stockout_ingredient_count":len(stockouts),
                 "expiry_risk_quantity":expiry_risk,"budget_used":cost,"budget_remaining":None if budget is None else budget-cost,
-                "constraint_violations":violations,"warnings":sorted(set(plan_warnings)),"lines":lines,"daily_projections":projections})
+                "constraint_violations":violations,"constraint_trace":constraint_trace,"warnings":sorted(set(plan_warnings)),"lines":lines,"daily_projections":projections})
         recommended=next((x for x in plans if x["strategy"]=="balanced" and x["is_feasible"]),None) or next((x for x in plans if x["is_feasible"]),None)
         if recommended:recommended["is_recommended"]=True
         return plans,recommended["strategy"] if recommended else None

@@ -24,7 +24,13 @@ class PurchaseRecordIn(Strict):
     external_record_id:str=Field(min_length=1);date:date;ingredient_id:str;supplier_id:str;quantity:Decimal=Field(gt=0,allow_inf_nan=False);unit:str;unit_cost:int=Field(ge=0);expiry_date:date|None=None;supplier_lot_code:str|None=None
 class PurchaseBatchIn(Strict): source:str;inventory_effect:str;records:list[PurchaseRecordIn]=Field(min_length=1)
 class SupplierTermIn(Strict):
-    ingredient_id:str;supplier_id:str;unit_cost:int=Field(ge=0);moq:Decimal=Field(ge=0);pack_size:Decimal=Field(gt=0);lead_time_days:int=Field(ge=0);safety_stock:Decimal=Field(ge=0);capacity:Decimal|None=Field(default=None,ge=0);unit:str;version:int|None=Field(default=None,ge=1)
+    ingredient_id:str;supplier_id:str;unit_cost:int=Field(ge=0);moq:Decimal=Field(ge=0);pack_size:Decimal=Field(gt=0);lead_time_days:int=Field(ge=0);unit:str;version:int|None=Field(default=None,ge=1)
+class SupplierTermOut(Strict):
+    constraint_id:str;ingredient_id:str;supplier_id:str;supplier:str;unit_cost:int;moq:Decimal;pack_size:Decimal;order_unit:str|None;lead_time_days:int;unit:str;version:int;active:bool
+class SupplierTermList(Strict): items:list[SupplierTermOut];page:int;page_size:int;total:int
+class InventoryConstraintOut(Strict):
+    constraint_id:str;ingredient_id:str|None;ingredient_name:str|None;constraint_type:str;value:Decimal;unit:str|None;effective_date:date;end_date:date|None;version:int;active:bool
+class InventoryConstraintList(Strict): store_id:str;as_of_date:date|None;items:list[InventoryConstraintOut]
 class POCreateLine(Strict): recommendation_id:str;order_quantity_override:Decimal|None=Field(default=None,ge=0,allow_inf_nan=False)
 class POCreateIn(Strict): plan_run_id:str;lines:list[POCreateLine]=Field(min_length=1)
 class POLineUpdate(Strict): po_line_id:str;order_quantity:Decimal=Field(gt=0,allow_inf_nan=False)
@@ -48,8 +54,11 @@ def adjustments(store_id:str,b:AdjustmentIn,k=Depends(idem),s=Depends(get_comple
 def sales_batch(store_id:str,b:SalesBatchIn,k=Depends(idem),s=Depends(get_completion_service)):return s.write("sales_batch",store_id,b,k)
 @router.post("/stores/{store_id}/purchase-history/batch",status_code=201)
 def purchase_batch(store_id:str,b:PurchaseBatchIn,k=Depends(idem),s=Depends(get_completion_service)):return s.write("purchase_batch",store_id,b,k)
-@router.get("/stores/{store_id}/supplier-constraints")
+@router.get("/stores/{store_id}/supplier-constraints",response_model=SupplierTermList)
 def supplier_get(store_id:str,s=Depends(get_completion_service)):return s.supplier_list(store_id)
+@router.get("/stores/{store_id}/inventory-constraints",response_model=InventoryConstraintList)
+def inventory_constraints_get(store_id:str,ingredient_id:str|None=None,constraint_type:str|None=None,as_of_date:date|None=None,s=Depends(get_completion_service)):
+ return s.inventory_constraints(store_id,ingredient_id,constraint_type,as_of_date)
 @router.post("/stores/{store_id}/supplier-constraints",status_code=201)
 def supplier_post(store_id:str,b:SupplierTermIn,k=Depends(idem),s=Depends(get_completion_service)):return s.write("supplier_create",store_id,b,k)
 @router.put("/stores/{store_id}/supplier-constraints/{constraint_id}")

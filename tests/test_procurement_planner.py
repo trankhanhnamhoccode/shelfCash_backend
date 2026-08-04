@@ -2,7 +2,7 @@ from datetime import date
 from decimal import Decimal
 from types import SimpleNamespace
 
-from app.models.business import IngredientModel,SupplierIngredientTermModel,SupplierModel
+from app.models.business import IngredientModel,InventoryConstraintModel,SupplierIngredientTermModel,SupplierModel
 from app.services.procurement_planning_service import ProcurementPlanningService
 
 
@@ -11,7 +11,8 @@ def test_planner_moq_pack_supplier_budget_strategies_and_resimulation(session_fa
         s.add(IngredientModel(ingredient_id="i-plan",store_id="STORE_001",ingredient="Milk",normalized_name="milk-plan",base_unit="kg",active=True,source="test"))
         for supplier_id,cost in (("slow-expensive",20),("fast-cheap",10)):
             s.add(SupplierModel(supplier_id=supplier_id,store_id="STORE_001",supplier=supplier_id,normalized_name=supplier_id,active=True,source="test"));s.flush()
-            s.add(SupplierIngredientTermModel(constraint_id=f"term-{supplier_id}",store_id="STORE_001",supplier_id=supplier_id,ingredient_id="i-plan",unit_cost=cost,moq=Decimal("10"),pack_size=Decimal("5"),lead_time_days=0 if supplier_id=="fast-cheap" else 3,safety_stock=Decimal("2"),capacity=None,unit="kg",version=1,active=True,source="test"))
+            s.add(SupplierIngredientTermModel(constraint_id=f"term-{supplier_id}",store_id="STORE_001",supplier_id=supplier_id,ingredient_id="i-plan",unit_cost=cost,moq=Decimal("10"),pack_size=Decimal("5"),lead_time_days=0 if supplier_id=="fast-cheap" else 3,unit="kg",version=1,active=True,source="test"))
+        s.add(InventoryConstraintModel(constraint_id="safety-plan",store_id="STORE_001",ingredient_id="i-plan",constraint_type="safety_stock",value=Decimal("2"),unit="kg",effective_date=date(2026,7,1),version=1,active=True,source="test"))
         s.flush()
         forecast=SimpleNamespace(cutoff_date=date(2026,8,3))
         demand=[SimpleNamespace(ingredient_id="i-plan",target_date=date(2026,8,4),unit="kg",p25=Decimal("3"),p50=Decimal("7"),p75=Decimal("13"))]

@@ -10,7 +10,7 @@ from app.models.import_normalized import (
 )
 from app.models.store import StoreModel
 from app.models.business import (
-    CalendarFeatureModel, IngredientAliasModel, IngredientModel, InventoryLotModel,
+    CalendarFeatureModel, IngredientAliasModel, IngredientModel, InventoryConstraintModel, InventoryLotModel, LegacySupplierInventoryValueModel,
     InventoryMovementModel, ProductBundleLineModel, ProductModel, PurchaseReceiptModel, RecipeLineModel,
     RecipeVersionModel, SalesDailyModel, StoreSettingsModel, SupplierIngredientTermModel,
     SupplierModel, UsageDailyModel,
@@ -28,7 +28,7 @@ __all__ = [
     "StoreModel",
     "StoreSettingsModel", "IngredientModel", "IngredientAliasModel", "ProductModel", "ProductBundleLineModel",
     "RecipeVersionModel", "RecipeLineModel", "SupplierModel",
-    "SupplierIngredientTermModel", "InventoryLotModel", "InventoryMovementModel",
+    "SupplierIngredientTermModel", "LegacySupplierInventoryValueModel", "InventoryConstraintModel", "InventoryLotModel", "InventoryMovementModel",
     "SalesDailyModel", "UsageDailyModel", "PurchaseReceiptModel", "CalendarFeatureModel",
 ]
 from app.models.operations import (BudgetPeriodModel, ForecastModelVersionModel,

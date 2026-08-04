@@ -123,3 +123,9 @@ class PlanningError(ShelfCashError):
     def __init__(self, code: str, message: str, details=None, *, http_status: int = 422):
         self.code, self.http_status = code, http_status
         super().__init__(message, details)
+
+
+class BusinessConstraintError(ShelfCashError):
+    def __init__(self, code: str, message: str, details=None, *, http_status: int = 422):
+        self.code, self.http_status = code, http_status
+        super().__init__(message, details)

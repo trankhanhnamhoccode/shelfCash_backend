@@ -9,7 +9,7 @@ from uuid import uuid4
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
-from app.core.exceptions import ValidationError
+from app.core.exceptions import BusinessConstraintError, ValidationError
 from app.core.exceptions import MenuError
 from app.core.menu import components_empty, parse_combo_components, parse_explicit_component
 from app.core.names import display_name, normalize_lookup_name, normalize_name
@@ -17,7 +17,7 @@ from app.core.packaging_units import is_known_packaging_unit, normalize_packagin
 from app.core.provenance import canonical_hash, purchase_business_key, source_row_hash
 from app.core.units import convert_quantity, normalize_unit, validate_compatible
 from app.models.business import (
-    CalendarFeatureModel, InventoryLotModel, InventoryMovementModel, ProductBundleLineModel, ProductModel, PurchaseReceiptModel,
+    CalendarFeatureModel, InventoryConstraintModel, InventoryLotModel, InventoryMovementModel, ProductBundleLineModel, ProductModel, PurchaseReceiptModel,
     SalesDailyModel, StoreSettingsModel, SupplierIngredientTermModel, UsageDailyModel,
 )
 from app.models.import_normalized import ImportIssueModel
@@ -46,6 +46,7 @@ class BusinessWriteSummary:
     usage_records_updated: int = 0
     purchase_receipts_created: int = 0
     supplier_terms_created: int = 0
+    inventory_constraints_created: int = 0
     calendar_features_created: int = 0
     calendar_features_updated: int = 0
     settings_created: int = 0
@@ -404,7 +405,6 @@ class ImportBusinessPersistenceService:
                 pack_size=package_size_in_base_unit,
                 order_unit=order_unit,
                 lead_time_days=lead,
-                safety_stock=Decimal(0),
                 unit=target_base_unit,
                 version=(latest.version + 1 if latest else 1),
                 active=True,
@@ -453,7 +453,7 @@ class ImportBusinessPersistenceService:
                 continue
             if latest:
                 latest.active = False
-            self.session.add(SupplierIngredientTermModel(constraint_id=str(uuid4()), store_id=job.store_id, supplier_id=supplier.supplier_id, ingredient_id=ingredient.ingredient_id, unit_cost=cost, moq=moq, pack_size=pack, lead_time_days=lead, safety_stock=Decimal(0), unit=ingredient.base_unit, version=(latest.version + 1 if latest else 1), active=True, source="import", source_import_id=job.import_id, source_profile_id=sheet["profile_id"], source_row_hash=content))
+            self.session.add(SupplierIngredientTermModel(constraint_id=str(uuid4()), store_id=job.store_id, supplier_id=supplier.supplier_id, ingredient_id=ingredient.ingredient_id, unit_cost=cost, moq=moq, pack_size=pack, lead_time_days=lead, unit=ingredient.base_unit, version=(latest.version + 1 if latest else 1), active=True, source="import", source_import_id=job.import_id, source_profile_id=sheet["profile_id"], source_row_hash=content))
             self.summary.supplier_terms_created += 1
 
     def _persist_calendar_features(self, job, sheet):
@@ -495,6 +495,74 @@ class ImportBusinessPersistenceService:
             for key, value in values.items(): setattr(model, key, value)
             model.version += 1
             self.summary.settings_updated += 1
+
+    # Overrides the legacy settings-only handler above. Inventory constraints
+    # are versioned independently from store settings and supplier terms.
+    def _persist_business_constraints(self, job, sheet):
+        settings_values = {}
+        ingredient_types = {"safety_stock", "maximum_stock", "minimum_stock", "shelf_life_target", "reorder_point"}
+        store_types = {"storage_capacity", "maximum_storage_volume", "budget", "warehouse_capacity"}
+        for row in sheet["rows"]:
+            kind = str(row.get("constraint_type") or "").strip().casefold().replace(" ", "_").replace("-", "_")
+            value = row.get("value")
+            if kind in {"monthly_budget", "forecast_horizon"}:
+                settings_values[kind] = int(self._decimal(value, kind)); continue
+            if kind == "default_strategy":
+                if value not in {"economy", "balanced", "safe"}: raise ValidationError("default_strategy is invalid.")
+                settings_values[kind] = value; continue
+            if kind not in ingredient_types | store_types:
+                self.summary.rows_skipped += 1; continue
+            ingredient = None
+            if kind in ingredient_types:
+                name = row.get("ingredient_name") or row.get("ingredient")
+                ingredient = self.catalog.get_ingredient_by_name(job.store_id, name) or self.catalog.resolve_alias(job.store_id, name)
+                if ingredient is None:
+                    raise BusinessConstraintError("INGREDIENT_NOT_FOUND", "Ingredient for business constraint was not found.", {"ingredient_name": name})
+            raw_unit = row.get("unit")
+            try:
+                unit = normalize_unit(raw_unit) if raw_unit else (ingredient.base_unit if ingredient is not None else None)
+                if ingredient is not None:
+                    if unit is None: raise ValueError("unit required")
+                    validate_compatible(unit, ingredient.base_unit)
+            except Exception as exc:
+                raise BusinessConstraintError("BUSINESS_CONSTRAINT_UNIT_INVALID", "Business constraint unit is invalid.", {"unit": raw_unit, "constraint_type": kind}) from exc
+            try:
+                effective = self._date(row.get("effective_date"), "effective_date")
+                end_date = self._date(row.get("end_date"), "end_date") if row.get("end_date") else None
+                if end_date is not None and end_date < effective: raise ValueError("end before effective")
+            except Exception as exc:
+                raise BusinessConstraintError("BUSINESS_CONSTRAINT_EFFECTIVE_DATE_INVALID", "Business constraint effective date is invalid.", {"constraint_type": kind}) from exc
+            numeric = self._decimal(value, "value")
+            ingredient_id = ingredient.ingredient_id if ingredient else None
+            content = canonical_hash({"ingredient_id": ingredient_id, "constraint_type": kind, "value": numeric,
+                "unit": unit, "effective_date": effective, "end_date": end_date})
+            latest = self.session.scalar(select(InventoryConstraintModel).where(
+                InventoryConstraintModel.store_id == job.store_id, InventoryConstraintModel.ingredient_id == ingredient_id,
+                InventoryConstraintModel.constraint_type == kind).order_by(InventoryConstraintModel.version.desc()))
+            if latest and latest.source_row_hash == content:
+                self.summary.rows_skipped += 1; continue
+            if latest and effective <= latest.effective_date:
+                raise BusinessConstraintError("BUSINESS_CONSTRAINT_EFFECTIVE_DATE_INVALID", "A new constraint version must start after the previous version.",
+                    {"constraint_type": kind, "effective_date": str(effective), "previous_effective_date": str(latest.effective_date)})
+            if latest and latest.active:
+                latest.active = False
+                if latest.end_date is None or latest.end_date >= effective: latest.end_date = date.fromordinal(effective.toordinal() - 1)
+            self.session.add(InventoryConstraintModel(constraint_id=str(uuid4()), store_id=job.store_id,
+                ingredient_id=ingredient_id, constraint_type=kind, value=numeric, unit=unit, effective_date=effective,
+                end_date=end_date, version=(latest.version + 1 if latest else 1), active=True, source="import",
+                source_import_id=job.import_id, source_profile_id=sheet["profile_id"], source_row_hash=content))
+            self.summary.inventory_constraints_created += 1
+        if not settings_values: return
+        if "forecast_horizon" in settings_values and not 1 <= settings_values["forecast_horizon"] <= 90:
+            raise ValidationError("forecast_horizon must be between 1 and 90.")
+        model = self.session.scalar(select(StoreSettingsModel).where(StoreSettingsModel.store_id == job.store_id))
+        if model is None:
+            self.session.add(StoreSettingsModel(setting_id=str(uuid4()), store_id=job.store_id,
+                monthly_budget=settings_values.get("monthly_budget", 0), forecast_horizon=settings_values.get("forecast_horizon", 7),
+                default_strategy=settings_values.get("default_strategy", "balanced"), version=1)); self.summary.settings_created += 1
+        elif any(getattr(model, key) != value for key, value in settings_values.items()):
+            for key, value in settings_values.items(): setattr(model, key, value)
+            model.version += 1; self.summary.settings_updated += 1
 
     def _persist_menu(self, job, sheet):
         rows = sheet["rows"]

@@ -203,7 +203,7 @@ def test_cross_store_supplier_term_lot_and_history_rejected(seeded):
         session.flush()
         terms = SupplierTermRepository(session)
         with pytest.raises(ValidationError):
-            terms.add(SupplierIngredientTermModel(constraint_id=str(uuid4()), store_id="STORE_001", supplier_id=supplier.supplier_id, ingredient_id=other.ingredient_id, unit_cost=1, moq=0, pack_size=1, lead_time_days=0, safety_stock=0, unit="kg", version=1, source="manual"))
+            terms.add(SupplierIngredientTermModel(constraint_id=str(uuid4()), store_id="STORE_001", supplier_id=supplier.supplier_id, ingredient_id=other.ingredient_id, unit_cost=1, moq=0, pack_size=1, lead_time_days=0, unit="kg", version=1, source="manual"))
         with pytest.raises(ValidationError):
             InventoryRepository(session).add_lot(InventoryLotModel(lot_id=str(uuid4()), store_id="STORE_001", ingredient_id=other.ingredient_id, received_date=date.today(), initial_quantity=0, unit="kg", source="manual", version=1))
         history = HistoryRepository(session)

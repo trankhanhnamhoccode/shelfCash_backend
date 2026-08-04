@@ -175,8 +175,7 @@ class SupplierIngredientTermModel(Base):
     __tablename__ = "supplier_ingredient_terms"
     __table_args__ = (
         UniqueConstraint("supplier_id", "ingredient_id", "version", name="uq_supplier_term_version"),
-        CheckConstraint("unit_cost >= 0 AND moq >= 0 AND pack_size > 0 AND lead_time_days >= 0 AND safety_stock >= 0", name="ck_supplier_term_values"),
-        CheckConstraint("capacity IS NULL OR capacity >= 0", name="ck_supplier_term_capacity"),
+        CheckConstraint("unit_cost >= 0 AND moq >= 0 AND pack_size > 0 AND lead_time_days >= 0", name="ck_supplier_term_values"),
         CheckConstraint("version >= 1", name="ck_supplier_term_version"),
         CheckConstraint(UNIT_CHECK, name="ck_supplier_term_unit"),
         Index("ix_supplier_terms_store_ingredient", "store_id", "ingredient_id"),
@@ -190,9 +189,42 @@ class SupplierIngredientTermModel(Base):
     pack_size: Mapped[Decimal] = mapped_column(Numeric(20, 6), nullable=False)
     order_unit: Mapped[str | None] = mapped_column(String(64))
     lead_time_days: Mapped[int] = mapped_column(Integer, nullable=False)
+    unit: Mapped[str] = mapped_column(String(16), nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    source: Mapped[str] = mapped_column(String(32), nullable=False)
+    source_import_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("import_jobs.import_id"))
+    source_profile_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("import_sheet_profiles.profile_id"))
+    source_row_hash: Mapped[str | None] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now)
+
+
+class LegacySupplierInventoryValueModel(Base):
+    """Migration archive only; never used as an operational source of truth."""
+    __tablename__ = "legacy_supplier_inventory_values"
+    constraint_id: Mapped[str] = mapped_column(String(36), primary_key=True)
     safety_stock: Mapped[Decimal] = mapped_column(Numeric(20, 6), nullable=False)
     capacity: Mapped[Decimal | None] = mapped_column(Numeric(20, 6))
-    unit: Mapped[str] = mapped_column(String(16), nullable=False)
+
+
+class InventoryConstraintModel(Base):
+    __tablename__ = "inventory_constraints"
+    __table_args__ = (
+        UniqueConstraint("store_id", "ingredient_id", "constraint_type", "version", name="uq_inventory_constraint_version"),
+        CheckConstraint("value >= 0", name="ck_inventory_constraint_value"),
+        CheckConstraint("version >= 1", name="ck_inventory_constraint_version"),
+        CheckConstraint("end_date IS NULL OR end_date >= effective_date", name="ck_inventory_constraint_dates"),
+        Index("ix_inventory_constraints_lookup", "store_id", "ingredient_id", "constraint_type", "effective_date"),
+    )
+    constraint_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    store_id: Mapped[str] = mapped_column(String(128), ForeignKey("stores.store_id"), nullable=False)
+    ingredient_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("ingredients.ingredient_id"))
+    constraint_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    value: Mapped[Decimal] = mapped_column(Numeric(20, 6), nullable=False)
+    unit: Mapped[str | None] = mapped_column(String(16))
+    effective_date: Mapped[date] = mapped_column(Date, nullable=False)
+    end_date: Mapped[date | None] = mapped_column(Date)
     version: Mapped[int] = mapped_column(Integer, nullable=False)
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     source: Mapped[str] = mapped_column(String(32), nullable=False)

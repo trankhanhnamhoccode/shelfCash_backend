@@ -424,8 +424,6 @@ Khi sửa recipe, backend tạo version mới. Không ghi đè version cũ.
   "moq": 12,
   "pack_size": 12,
   "lead_time_days": 2,
-  "safety_stock": 4,
-  "capacity": 60,
   "unit": "lít",
   "version": 2
 }

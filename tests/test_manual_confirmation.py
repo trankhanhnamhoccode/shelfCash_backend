@@ -1,8 +1,14 @@
 from app.core.canonical_schemas import CANONICAL_SCHEMAS
+from app.core.names import normalize_name
+from app.models.business import IngredientModel
 from tests.test_excel_upload import upload_fake
 
 
 def test_manual_confirmation_and_process(client):
+    with client.app.state.session_factory() as session:
+        session.add(IngredientModel(ingredient_id="manual-milk", store_id="STORE_001", ingredient="Sữa",
+            normalized_name=normalize_name("Sữa"), base_unit="lít", active=True, source="test"))
+        session.commit()
     uploaded = upload_fake(client)
     assert uploaded.status_code == 201, uploaded.text
     body = uploaded.json()
