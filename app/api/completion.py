@@ -29,7 +29,11 @@ class SupplierTermOut(Strict):
     constraint_id:str;ingredient_id:str;supplier_id:str;supplier:str;unit_cost:int;moq:Decimal;pack_size:Decimal;order_unit:str|None;lead_time_days:int;unit:str;version:int;active:bool
 class SupplierTermList(Strict): items:list[SupplierTermOut];page:int;page_size:int;total:int
 class InventoryConstraintOut(Strict):
-    constraint_id:str;ingredient_id:str|None;ingredient_name:str|None;constraint_type:str;value:Decimal;unit:str|None;effective_date:date;end_date:date|None;version:int;active:bool
+    constraint_id:str;ingredient_id:str|None;ingredient_name:str|None
+    constraint_type:str=Field(description="Registered business constraint type; determines scope, dimension, units, and value rules.")
+    value:Decimal=Field(description="Canonical value for the constraint type (for example days or a 0..1 ratio).")
+    unit:str|None=Field(description="Type-dependent canonical unit: physical quantity unit, day, ratio, or VND.")
+    effective_date:date;end_date:date|None;version:int;active:bool
 class InventoryConstraintList(Strict): store_id:str;as_of_date:date|None;items:list[InventoryConstraintOut]
 class POCreateLine(Strict): recommendation_id:str;order_quantity_override:Decimal|None=Field(default=None,ge=0,allow_inf_nan=False)
 class POCreateIn(Strict): plan_run_id:str;lines:list[POCreateLine]=Field(min_length=1)

@@ -10,6 +10,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from app.core.exceptions import BusinessConstraintError, ValidationError
+from app.core.business_constraints import constraint_definition, validate_and_normalize_business_constraint
 from app.core.exceptions import MenuError
 from app.core.menu import components_empty, parse_combo_components, parse_explicit_component
 from app.core.names import display_name, normalize_lookup_name, normalize_name
@@ -500,8 +501,6 @@ class ImportBusinessPersistenceService:
     # are versioned independently from store settings and supplier terms.
     def _persist_business_constraints(self, job, sheet):
         settings_values = {}
-        ingredient_types = {"safety_stock", "maximum_stock", "minimum_stock", "shelf_life_target", "reorder_point"}
-        store_types = {"storage_capacity", "maximum_storage_volume", "budget", "warehouse_capacity"}
         for row in sheet["rows"]:
             kind = str(row.get("constraint_type") or "").strip().casefold().replace(" ", "_").replace("-", "_")
             value = row.get("value")
@@ -510,29 +509,21 @@ class ImportBusinessPersistenceService:
             if kind == "default_strategy":
                 if value not in {"economy", "balanced", "safe"}: raise ValidationError("default_strategy is invalid.")
                 settings_values[kind] = value; continue
-            if kind not in ingredient_types | store_types:
-                self.summary.rows_skipped += 1; continue
+            kind, definition = constraint_definition(kind)
             ingredient = None
-            if kind in ingredient_types:
-                name = row.get("ingredient_name") or row.get("ingredient")
+            name = row.get("ingredient_name") or row.get("ingredient")
+            if definition.scope == "ingredient" or (definition.scope == "store_or_ingredient" and name):
                 ingredient = self.catalog.get_ingredient_by_name(job.store_id, name) or self.catalog.resolve_alias(job.store_id, name)
                 if ingredient is None:
                     raise BusinessConstraintError("INGREDIENT_NOT_FOUND", "Ingredient for business constraint was not found.", {"ingredient_name": name})
-            raw_unit = row.get("unit")
-            try:
-                unit = normalize_unit(raw_unit) if raw_unit else (ingredient.base_unit if ingredient is not None else None)
-                if ingredient is not None:
-                    if unit is None: raise ValueError("unit required")
-                    validate_compatible(unit, ingredient.base_unit)
-            except Exception as exc:
-                raise BusinessConstraintError("BUSINESS_CONSTRAINT_UNIT_INVALID", "Business constraint unit is invalid.", {"unit": raw_unit, "constraint_type": kind}) from exc
+            normalized = validate_and_normalize_business_constraint(kind, value, row.get("unit") or row.get("currency"), ingredient)
             try:
                 effective = self._date(row.get("effective_date"), "effective_date")
                 end_date = self._date(row.get("end_date"), "end_date") if row.get("end_date") else None
                 if end_date is not None and end_date < effective: raise ValueError("end before effective")
             except Exception as exc:
                 raise BusinessConstraintError("BUSINESS_CONSTRAINT_EFFECTIVE_DATE_INVALID", "Business constraint effective date is invalid.", {"constraint_type": kind}) from exc
-            numeric = self._decimal(value, "value")
+            numeric, unit = normalized.value, normalized.unit
             ingredient_id = ingredient.ingredient_id if ingredient else None
             content = canonical_hash({"ingredient_id": ingredient_id, "constraint_type": kind, "value": numeric,
                 "unit": unit, "effective_date": effective, "end_date": end_date})

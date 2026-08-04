@@ -18,7 +18,7 @@ SHEETS = {
         "Lead time": [2],
     }),
     "Định lượng món": pd.DataFrame({"Tên món": ["Cà phê sữa"], "Nguyên liệu": ["Cà phê"], "Định lượng": [20], "Đơn vị nguyên liệu": ["g"]}),
-    "Điều kiện vận hành": pd.DataFrame({"Loại điều kiện": ["maximum stock"], "Áp dụng cho NL": ["Sữa"], "Giá trị": [100], "Bắt đầu": ["2026-07-01"], "Ghi chú": ["Kho mát"]}),
+    "Điều kiện vận hành": pd.DataFrame({"Loại điều kiện": ["maximum stock"], "Áp dụng cho NL": ["Sữa"], "Giá trị": [100], "Đơn vị": ["lít"], "Bắt đầu": ["2026-07-01"], "Ghi chú": ["Kho mát"]}),
     "Calendar + Weather": pd.DataFrame({"Ngày": ["2026-07-27"], "Cuối tuần": ["Không"], "Ngày lễ": ["Không"], "Nhiệt độ": [31], "Lượng mưa": [2.5]}),
 }
 

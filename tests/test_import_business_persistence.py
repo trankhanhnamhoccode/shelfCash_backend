@@ -546,3 +546,32 @@ def test_business_constraint_import_resolves_ingredient_and_is_versioned_idempot
         assert len(rows) == 2
         assert rows[0].active is False and rows[0].end_date == date(2026, 7, 31)
         assert rows[1].active is True and rows[1].version == 2 and rows[1].ingredient_id == "milk-constraint"
+
+
+def test_business_constraint_import_supports_type_aware_units_and_api(client):
+    with client.app.state.session_factory() as session:
+        session.add(IngredientModel(ingredient_id="typed-milk", store_id="STORE_001", ingredient="Typed milk",
+            normalized_name="typed milk", base_unit=normalize_unit("liter"), active=True, source="test")); session.commit()
+    mapping = {"kind": "constraint_type", "ingredient": "ingredient_name", "value": "value", "unit": "unit", "effective": "effective_date"}
+    csv = ("kind,ingredient,value,unit,effective\n"
+        "safety_stock,Typed milk,12000,ml,2026-07-01\n"
+        "maximum_stock,Typed milk,40,liter,2026-07-01\n"
+        "shelf_life_target,Typed milk,7,days,2026-07-01\n"
+        "service_level_target,,95,percent,2026-07-01\n"
+        "storage_capacity,,1000,liter,2026-07-01\n").encode()
+    _, response = upload_confirm_process(client, csv, mapping, "business_constraints", name="typed-constraints.csv")
+    assert response.status_code == 200, response.text
+    _, response = upload_confirm_process(client, csv, mapping, "business_constraints", name="typed-constraints-same.csv")
+    assert response.status_code == 200, response.text
+    with client.app.state.session_factory() as session:
+        rows = list(session.scalars(select(InventoryConstraintModel).where(InventoryConstraintModel.store_id == "STORE_001")))
+        assert len(rows) == 5
+        by_type = {row.constraint_type: row for row in rows}
+        assert (by_type["shelf_life_target"].value, by_type["shelf_life_target"].unit) == (7, "day")
+        assert (by_type["service_level_target"].value, by_type["service_level_target"].unit) == (Decimal("0.95"), "ratio")
+        assert by_type["safety_stock"].unit == "ml" and by_type["maximum_stock"].unit == normalize_unit("liter")
+    api = client.get("/api/v1/stores/STORE_001/inventory-constraints")
+    assert api.status_code == 200
+    items = {item["constraint_type"]: item for item in api.json()["items"]}
+    assert items["shelf_life_target"]["value"] == "7.000000" and items["shelf_life_target"]["unit"] == "day"
+    assert items["service_level_target"]["value"] == "0.950000" and items["service_level_target"]["unit"] == "ratio"

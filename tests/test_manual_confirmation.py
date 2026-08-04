@@ -18,7 +18,7 @@ def test_manual_confirmation_and_process(client):
             "sheet_id": target["sheet_id"], "sheet_type": "business_constraints",
             "column_mapping": {
                 "Loại điều kiện": "constraint_type", "Áp dụng cho NL": "ingredient_name",
-                "Giá trị": "value", "Bắt đầu": "effective_date", "Ghi chú": "note",
+                "Giá trị": "value", "Đơn vị": "unit", "Bắt đầu": "effective_date", "Ghi chú": "note",
             },
         }]
     }

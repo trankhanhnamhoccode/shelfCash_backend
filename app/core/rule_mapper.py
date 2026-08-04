@@ -30,6 +30,7 @@ ALIASES = {
     "constraint_type": ["loai rang buoc", "loai dieu kien", "constraint type", "business rule"],
     "ingredient_name": ["nguyen lieu", "ten hang", "ten nl", "ap dung cho nl", "material", "ingredient", "ingredient name"],
     "effective_date": ["ngay hieu luc", "bat dau", "ap dung tu", "effective date"],
+    "end_date": ["ngay ket thuc", "ket thuc", "ap dung den", "end date"],
     "note": ["ghi chu", "note", "description"],
     "value": ["gia tri", "value"],
     "unit": ["don vi", "dvt", "unit"],

@@ -25,3 +25,16 @@ Planner trace distinguishes missing from configured zero:
 ```
 
 Missing configuration adds `SAFETY_STOCK_NOT_CONFIGURED`. A configured zero has `configured_safety_stock: "0"`, no fallback policy, and no missing warning.
+
+## Type-dependent dimensions and canonical units
+
+| Constraint types | Scope | Dimension | Canonical unit/value |
+|---|---|---|---|
+| `safety_stock`, `maximum_stock`, `minimum_stock`, `reorder_point` | ingredient | quantity | Existing physical units, compatible with the ingredient base unit |
+| `shelf_life_target` | ingredient | duration | Positive integer days, stored as `day` (`day`, `days`, `d`, and `ngày` are accepted) |
+| `service_level_target` | store or ingredient | ratio | `0..1 ratio`; `percent`, `percentage`, and `%` inputs are divided by 100 |
+| `storage_capacity`, `warehouse_capacity` | store | physical capacity | A supported mass, volume, or count unit; mixed dimensions are not aggregated by planning |
+| `maximum_storage_volume` | store | volume | `lít` or `ml` |
+| `budget` | store | currency | Non-negative value stored as `VND` |
+
+`store_closed_date` is not an inventory constraint. Import it through `calendar_features.is_store_closed`; a business-constraint row using that type returns `BUSINESS_CONSTRAINT_TYPE_UNSUPPORTED`.

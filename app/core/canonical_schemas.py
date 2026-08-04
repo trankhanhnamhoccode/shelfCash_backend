@@ -28,7 +28,7 @@ CANONICAL_SCHEMAS = {
         "core_fields": ["date"],
     },
     "business_constraints": {
-        "fields": ["constraint_type", "ingredient_name", "value", "unit", "currency", "effective_date", "note"],
+        "fields": ["constraint_type", "ingredient_name", "value", "unit", "currency", "effective_date", "end_date", "note"],
         "core_fields": ["constraint_type", "value"],
     },
     "menu": {
