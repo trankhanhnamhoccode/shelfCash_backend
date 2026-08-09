@@ -16,3 +16,7 @@ class ArtifactError(ForecastCoreError):
 
 class FeatureSchemaError(ForecastCoreError):
     """Raised when runtime features do not match the saved schema."""
+
+
+class FeatureTypeError(ForecastCoreError):
+    """Raised when a model feature cannot be represented as a numeric dtype."""

@@ -10,7 +10,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from app.core.exceptions import BusinessConstraintError, ValidationError
-from app.core.business_constraints import constraint_definition, validate_and_normalize_business_constraint
+from app.core.business_constraints import constraint_definition, normalize_constraint_type, validate_and_normalize_business_constraint
 from app.core.exceptions import MenuError
 from app.core.menu import components_empty, parse_combo_components, parse_explicit_component
 from app.core.names import display_name, normalize_lookup_name, normalize_name
@@ -30,7 +30,25 @@ from app.services.entity_resolution import EntityResolutionService
 from app.services.recipe_service import RecipeVersionService
 from app.services.audit_service import AuditService
 
-SCHEMA_VERSION = "20260728_0004"
+SCHEMA_VERSION = "20260804_0018"
+
+_DAY_ALIASES={"mon":0,"monday":0,"thu 2":0,"thu hai":0,"t2":0,"tue":1,"tuesday":1,"thu 3":1,"thu ba":1,"t3":1,
+    "wed":2,"wednesday":2,"thu 4":2,"thu tu":2,"t4":2,"thu":3,"thursday":3,"thu 5":3,"thu nam":3,"t5":3,
+    "fri":4,"friday":4,"thu 6":4,"thu sau":4,"t6":4,"sat":5,"saturday":5,"thu 7":5,"thu bay":5,"t7":5,
+    "sun":6,"sunday":6,"chu nhat":6,"cn":6}
+
+def normalize_delivery_days(value):
+    if value is None or str(value).strip()=="":return None
+    raw=value if isinstance(value,(list,tuple)) else str(value).replace(";",",").split(",")
+    result=[]
+    for item in raw:
+        key=normalize_lookup_name(str(item))
+        if key.isdigit() and 0<=int(key)<=6:day=int(key)
+        else:
+            day=_DAY_ALIASES.get(key)
+            if day is None:raise ValidationError("available_delivery_days contains an unsupported day.",{"field":"available_delivery_days","raw_value":item})
+        if day not in result:result.append(day)
+    return sorted(result)
 
 
 @dataclass
@@ -192,6 +210,7 @@ class ImportBusinessPersistenceService:
                     unit=ingredient.base_unit, source="import", source_import_id=job.import_id,
                     source_profile_id=sheet["profile_id"], source_row_hash=row_hash,
                     reconciliation_key=None if batch else reconciliation, version=1,
+                    warehouse_name=row.get("warehouse_name"),
                 )
                 self.inventory.add_lot(lot)
                 self.session.flush()
@@ -245,6 +264,7 @@ class ImportBusinessPersistenceService:
 
     def _persist_usage_history(self, job, sheet):
         grouped = defaultdict(Decimal)
+        waste_grouped=defaultdict(Decimal);sources=defaultdict(set)
         hashes = defaultdict(list)
         for index, row in enumerate(sheet["rows"]):
             ingredient = self._ingredient(job.store_id, row)
@@ -252,28 +272,37 @@ class ImportBusinessPersistenceService:
             quantity = convert_quantity(self._decimal(row.get("quantity_used"), "quantity_used"), row.get("unit"), ingredient.base_unit)
             key = (day, ingredient.ingredient_id, ingredient.base_unit)
             grouped[key] += quantity
+            waste_raw=row.get("waste_quantity")
+            if waste_raw not in (None,""):
+                waste_grouped[key]+=convert_quantity(self._decimal(waste_raw,"waste_quantity"),row.get("unit"),ingredient.base_unit)
+            if row.get("source"):sources[key].add(str(row.get("source")))
             hashes[key].append(self._row_hash(job, sheet, row, index))
         for (day, ingredient_id, unit), quantity in grouped.items():
             model = self.session.scalar(select(UsageDailyModel).where(UsageDailyModel.store_id == job.store_id, UsageDailyModel.date == day, UsageDailyModel.ingredient_id == ingredient_id))
             row_hash = canonical_hash({"source_rows": sorted(hashes[(day, ingredient_id, unit)])})
             if model is None:
-                self.session.add(UsageDailyModel(usage_record_id=str(uuid4()), store_id=job.store_id, date=day, ingredient_id=ingredient_id, quantity=quantity, unit=unit, source="import", import_id=job.import_id, profile_id=sheet["profile_id"], source_row_hash=row_hash))
+                self.session.add(UsageDailyModel(usage_record_id=str(uuid4()), store_id=job.store_id, date=day, ingredient_id=ingredient_id, quantity=quantity, unit=unit, source="import",usage_source=",".join(sorted(sources[(day,ingredient_id,unit)])) or None,waste_quantity=waste_grouped[(day,ingredient_id,unit)], import_id=job.import_id, profile_id=sheet["profile_id"], source_row_hash=row_hash))
                 self.summary.usage_records_created += 1
             else:
-                model.quantity, model.unit, model.import_id, model.profile_id, model.source_row_hash = quantity, unit, job.import_id, sheet["profile_id"], row_hash
+                model.quantity, model.unit,model.usage_source,model.waste_quantity, model.import_id, model.profile_id, model.source_row_hash = quantity, unit,",".join(sorted(sources[(day,ingredient_id,unit)])) or None,waste_grouped[(day,ingredient_id,unit)], job.import_id, sheet["profile_id"], row_hash
                 self.summary.usage_records_updated += 1
 
     def _persist_recipes(self, job, sheet):
-        grouped = defaultdict(list)
+        grouped = defaultdict(list);metadata={}
         for row in sheet["rows"]:
             product = self._product(job.store_id, row)
             ingredient = self._ingredient(job.store_id, row, "ingredient_unit")
             quantity = convert_quantity(self._decimal(row.get("ingredient_quantity"), "ingredient_quantity", positive=True), row.get("ingredient_unit"), ingredient.base_unit)
             effective = self._date(row.get("effective_date") or job.forecast_date or job.created_at.date(), "effective_date")
             grouped[(product.product_id, effective)].append({"ingredient_id": ingredient.ingredient_id, "quantity": quantity, "unit": ingredient.base_unit})
+            key=(product.product_id,effective);candidate=(row.get("yield_quantity") or 1,row.get("yield_unit"),row.get("recipe_version"))
+            if key in metadata and metadata[key]!=candidate:raise ValidationError("Recipe rows disagree on yield/version metadata.")
+            metadata[key]=candidate
         for (product_id, effective), lines in grouped.items():
             before = len(self.recipes.repository.get_versions(job.store_id, product_id))
-            self.recipes.create_version(job.store_id, product_id, effective, lines, source="import")
+            yield_quantity,yield_unit,requested_version=metadata[(product_id,effective)]
+            self.recipes.create_version(job.store_id, product_id, effective, lines, source="import",
+                yield_quantity=self._decimal(yield_quantity,"yield_quantity",positive=True),yield_unit=yield_unit,requested_version=requested_version)
             after = len(self.recipes.repository.get_versions(job.store_id, product_id))
             self.summary.recipe_versions_created += int(after > before)
 
@@ -285,13 +314,14 @@ class ImportBusinessPersistenceService:
             quantity = convert_quantity(self._decimal(row.get("quantity_received"), "quantity_received"), row.get("unit"), ingredient.base_unit)
             cost = row.get("unit_price")
             cost = None if cost is None else int(self._decimal(cost, "unit_price"))
+            total_cost=None if row.get("total_cost") in (None,"") else self._decimal(row.get("total_cost"),"total_cost")
             expiry = self._date(row["expiry_date"], "expiry_date") if row.get("expiry_date") else None
             batch = row.get("batch_id")
             key = purchase_business_key(store_id=job.store_id, receipt_date=day, ingredient_id=ingredient.ingredient_id, supplier_id=supplier.supplier_id if supplier else None, quantity=quantity, unit=ingredient.base_unit, unit_cost=cost, expiry_date=expiry, batch_code=batch)
             if self.session.scalar(select(PurchaseReceiptModel).where(PurchaseReceiptModel.store_id == job.store_id, PurchaseReceiptModel.business_key_hash == key)):
                 self.summary.rows_skipped += 1
                 continue
-            self.session.add(PurchaseReceiptModel(receipt_id=str(uuid4()), store_id=job.store_id, ingredient_id=ingredient.ingredient_id, supplier_id=supplier.supplier_id if supplier else None, receipt_date=day, quantity=quantity, unit=ingredient.base_unit, unit_cost=cost, expiry_date=expiry, batch_code=batch, source="import", import_id=job.import_id, profile_id=sheet["profile_id"], source_row_hash=self._row_hash(job, sheet, row, index), business_key_hash=key))
+            self.session.add(PurchaseReceiptModel(receipt_id=str(uuid4()), store_id=job.store_id, ingredient_id=ingredient.ingredient_id, supplier_id=supplier.supplier_id if supplier else None, receipt_date=day, quantity=quantity, unit=ingredient.base_unit, unit_cost=cost,total_cost=total_cost,purchase_order_id=row.get("purchase_order_id"), expiry_date=expiry, batch_code=batch, source="import", import_id=job.import_id, profile_id=sheet["profile_id"], source_row_hash=self._row_hash(job, sheet, row, index), business_key_hash=key))
             self.summary.purchase_receipts_created += 1
 
     def _persist_supplier_constraints(self, job, sheet):
@@ -374,6 +404,7 @@ class ImportBusinessPersistenceService:
             lead = int(self._decimal(
                 row.get("lead_time_days") or 0, "lead_time_days"
             ))
+            delivery_days=normalize_delivery_days(row.get("available_delivery_days"))
             content = canonical_hash({
                 "unit_cost": cost,
                 "moq": minimum_base_quantity,
@@ -381,6 +412,7 @@ class ImportBusinessPersistenceService:
                 "lead_time_days": lead,
                 "unit": target_base_unit,
                 "order_unit": order_unit,
+                "available_delivery_days":delivery_days,
             })
             latest = self.session.scalar(
                 select(SupplierIngredientTermModel).where(
@@ -405,6 +437,7 @@ class ImportBusinessPersistenceService:
                 moq=minimum_base_quantity,
                 pack_size=package_size_in_base_unit,
                 order_unit=order_unit,
+                available_delivery_days=None if delivery_days is None else json.dumps(delivery_days),
                 lead_time_days=lead,
                 unit=target_base_unit,
                 version=(latest.version + 1 if latest else 1),
@@ -473,36 +506,9 @@ class ImportBusinessPersistenceService:
                 self.summary.rows_skipped += 1
 
     def _persist_business_constraints(self, job, sheet):
-        values = {}
-        for row in sheet["rows"]:
-            kind, value = row.get("constraint_type"), row.get("value")
-            if kind in {"monthly_budget", "forecast_horizon"}:
-                values[kind] = int(self._decimal(value, kind))
-            elif kind == "default_strategy":
-                if value not in {"economy", "balanced", "safe"}:
-                    raise ValidationError("default_strategy không hợp lệ.")
-                values[kind] = value
-            else:
-                self.summary.rows_skipped += 1
-        if not values:
-            return
-        if "forecast_horizon" in values and not 1 <= values["forecast_horizon"] <= 90:
-            raise ValidationError("forecast_horizon phải từ 1 đến 90.")
-        model = self.session.scalar(select(StoreSettingsModel).where(StoreSettingsModel.store_id == job.store_id))
-        if model is None:
-            self.session.add(StoreSettingsModel(setting_id=str(uuid4()), store_id=job.store_id, monthly_budget=values.get("monthly_budget", 0), forecast_horizon=values.get("forecast_horizon", 7), default_strategy=values.get("default_strategy", "balanced"), version=1))
-            self.summary.settings_created += 1
-        elif any(getattr(model, key) != value for key, value in values.items()):
-            for key, value in values.items(): setattr(model, key, value)
-            model.version += 1
-            self.summary.settings_updated += 1
-
-    # Overrides the legacy settings-only handler above. Inventory constraints
-    # are versioned independently from store settings and supplier terms.
-    def _persist_business_constraints(self, job, sheet):
         settings_values = {}
         for row in sheet["rows"]:
-            kind = str(row.get("constraint_type") or "").strip().casefold().replace(" ", "_").replace("-", "_")
+            kind = normalize_constraint_type(row.get("constraint_type"))
             value = row.get("value")
             if kind in {"monthly_budget", "forecast_horizon"}:
                 settings_values[kind] = int(self._decimal(value, kind)); continue
@@ -525,8 +531,9 @@ class ImportBusinessPersistenceService:
                 raise BusinessConstraintError("BUSINESS_CONSTRAINT_EFFECTIVE_DATE_INVALID", "Business constraint effective date is invalid.", {"constraint_type": kind}) from exc
             numeric, unit = normalized.value, normalized.unit
             ingredient_id = ingredient.ingredient_id if ingredient else None
+            currency=unit if definition.dimension=="currency" else None;note=row.get("note")
             content = canonical_hash({"ingredient_id": ingredient_id, "constraint_type": kind, "value": numeric,
-                "unit": unit, "effective_date": effective, "end_date": end_date})
+                "unit": unit,"currency":currency,"note":note, "effective_date": effective, "end_date": end_date})
             latest = self.session.scalar(select(InventoryConstraintModel).where(
                 InventoryConstraintModel.store_id == job.store_id, InventoryConstraintModel.ingredient_id == ingredient_id,
                 InventoryConstraintModel.constraint_type == kind).order_by(InventoryConstraintModel.version.desc()))
@@ -540,6 +547,7 @@ class ImportBusinessPersistenceService:
                 if latest.end_date is None or latest.end_date >= effective: latest.end_date = date.fromordinal(effective.toordinal() - 1)
             self.session.add(InventoryConstraintModel(constraint_id=str(uuid4()), store_id=job.store_id,
                 ingredient_id=ingredient_id, constraint_type=kind, value=numeric, unit=unit, effective_date=effective,
+                currency=currency,note=note,
                 end_date=end_date, version=(latest.version + 1 if latest else 1), active=True, source="import",
                 source_import_id=job.import_id, source_profile_id=sheet["profile_id"], source_row_hash=content))
             self.summary.inventory_constraints_created += 1

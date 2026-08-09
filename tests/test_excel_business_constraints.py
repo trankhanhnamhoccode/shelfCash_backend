@@ -14,6 +14,7 @@ def business_rules_workbook():
         {"Constraint Type": "shelf_life_target", "Ingredient": "Excel milk", "Value": 7, "Unit": "day", "Effective Date": "2026-07-01"},
         {"Constraint Type": "service_level_target", "Ingredient": None, "Value": 95, "Unit": "percent", "Effective Date": "2026-07-01"},
         {"Constraint Type": "storage_capacity", "Ingredient": None, "Value": 1000, "Unit": "liter", "Effective Date": "2026-07-01"},
+        {"Constraint Type": "budget", "Ingredient": None, "Value": 5000000, "Unit": "VND", "Effective Date": "2026-07-01"},
     ])
     output = BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
@@ -41,3 +42,24 @@ def test_excel_business_rules_processes_duration_ratio_quantity_and_capacity(cli
     items = {item["constraint_type"]: item for item in response.json()["items"]}
     assert items["shelf_life_target"]["value"] == "7.000000" and items["shelf_life_target"]["unit"] == "day"
     assert items["service_level_target"]["value"] == "0.950000" and items["service_level_target"]["unit"] == "ratio"
+    assert items["budget"]["value"] == "5000000.000000" and items["budget"]["unit"] == "VND"
+
+
+def test_excel_business_rules_rejects_store_closed_date_with_calendar_remediation(client):
+    frame = pd.DataFrame([{"Constraint Type": "store_closed_date", "Ingredient": None, "Value": 1,
+        "Unit": "day", "Effective Date": "2026-07-01"}])
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        frame.to_excel(writer, sheet_name="Business Rules", index=False)
+    created = client.post("/api/v1/imports", data={"store_id": "STORE_001", "forecast_date": "2026-08-03"},
+        files={"files": ("BusinessRules_store_closed.xlsx", output.getvalue(), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")})
+    assert created.status_code == 201
+    body = created.json(); sheet = body["sheets"][0]
+    confirmed = client.post(f"/api/v1/imports/{body['import_id']}/confirm", json={"mappings": [{"sheet_id": sheet["sheet_id"],
+        "sheet_type": "business_constraints", "column_mapping": {"Constraint Type": "constraint_type", "Ingredient": "ingredient_name",
+            "Value": "value", "Unit": "unit", "Effective Date": "effective_date"}}]})
+    assert confirmed.status_code == 200
+    processed = client.post(f"/api/v1/imports/{body['import_id']}/process")
+    assert processed.status_code == 422
+    assert processed.json()["code"] == "BUSINESS_CONSTRAINT_TYPE_UNSUPPORTED"
+    assert processed.json()["details"]["use_instead"] == "calendar_features.is_store_closed"

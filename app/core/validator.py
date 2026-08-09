@@ -19,6 +19,17 @@ def validate_records(sheet_type: str, records: list[dict[str, Any]]) -> dict[str
                 missing.append("combo_components_must_be_empty")
             if item_type == "combo" and components_empty(components) and not has_explicit_component:
                 missing.append("combo_components")
-        if missing:
-            errors.append({"row": index + 1, "missing_core_fields": missing})
-    return {"row_count": len(records), "valid_rows": len(records) - len(errors), "invalid_rows": len(errors), "errors": errors[:100]}
+        for field in missing:
+            errors.append({
+                "sheet": record.get("_source_sheet"),
+                "row": index + 1,
+                "row_number": record.get("_source_excel_row", index + 1),
+                "field": field,
+                "code": "CORE_FIELD_MISSING",
+                "message": f"Required canonical field '{field}' is missing or invalid.",
+                "raw_value": record.get(field),
+                "remediation": f"Map or provide a valid value for '{field}'.",
+                "missing_core_fields": missing,
+            })
+    invalid_rows = len({item["row"] for item in errors})
+    return {"row_count": len(records), "valid_rows": len(records) - invalid_rows, "invalid_rows": invalid_rows, "errors": errors[:100]}

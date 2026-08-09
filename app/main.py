@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError as PydanticValidationError
 
-from app.api import catalog, completion, forecast, health, imports, llm, menu, operational, planning, recipes
+from app.api import business_constraints, catalog, completion, forecast, health, imports, llm, menu, operational, planning, recipes
 from app.config import Settings, get_settings
 from app.core.exceptions import ShelfCashError
 from app.core.excel_reader import ExcelIngestionError
@@ -112,6 +112,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(menu.router, prefix="/api/v1")
     app.include_router(recipes.router, prefix="/api/v1")
     app.include_router(operational.router, prefix="/api/v1")
+    app.include_router(business_constraints.router, prefix="/api/v1")
     app.include_router(completion.router, prefix="/api/v1")
     app.include_router(forecast.router, prefix="/api/v1")
     app.include_router(planning.router, prefix="/api/v1")

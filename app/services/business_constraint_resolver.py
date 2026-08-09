@@ -1,4 +1,4 @@
-from app.core.business_constraints import constraint_definition
+from app.core.business_constraints import CONSTRAINT_DEFINITIONS, constraint_definition
 from app.core.exceptions import PlanningError
 from app.core.units import convert_quantity
 from app.repositories.inventory_constraints import InventoryConstraintRepository
@@ -61,6 +61,18 @@ class BusinessConstraintResolver:
                 "unit": item.unit, "value": str(item.value),
             })
         return item.value
+
+    def resolve_storage_capacity(self, store_id, as_of_date=None):
+        """Resolve one store capacity deterministically; lower priority is more specific."""
+        capacity_types = sorted(
+            (item for item in CONSTRAINT_DEFINITIONS.values() if item.dimension == "capacity"),
+            key=lambda item: item.resolution_priority,
+        )
+        for definition in capacity_types:
+            item = self.resolve_constraint(store_id, definition.canonical_name, None, as_of_date)
+            if item is not None:
+                return item
+        return None
 
     @staticmethod
     def _definition(constraint_type):

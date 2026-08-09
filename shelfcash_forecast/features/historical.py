@@ -32,6 +32,8 @@ def add_historical_features(
     grouped = frame.groupby(GROUP_COLUMNS, observed=True)
 
     frame["last_observed_demand"] = grouped["demand_proxy"].ffill()
+    frame["last_observed_price"] = grouped["selling_price"].ffill()
+    frame["price_lag_1"] = grouped["selling_price"].shift(1).ffill()
     frame["history_observation_count"] = grouped["demand_proxy"].transform(
         lambda series: series.notna().cumsum()
     )
@@ -59,7 +61,7 @@ def add_historical_features(
         frame["rolling_mean_7"] - previous_seven_mean
     )
 
-    stockout_numeric = frame["is_stockout"].astype("Float64")
+    stockout_numeric = frame["effective_is_stockout"].astype("Float64")
     frame["_stockout_numeric"] = stockout_numeric
     for window in (7, 28):
         frame[f"stockout_count_{window}"] = _rolling_transform(

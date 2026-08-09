@@ -12,7 +12,7 @@ from shelfcash_forecast.evaluation.metrics import (
     evaluate_quantile_predictions,
 )
 from shelfcash_forecast.evaluation.splits import generate_walk_forward_folds
-from shelfcash_forecast.features.specification import CategoryEncoder
+from shelfcash_forecast.features.specification import CategoryEncoder, normalize_model_numeric_features
 from shelfcash_forecast.models.predictor import predict_raw_quantiles
 from shelfcash_forecast.models.trainer import train_model_bundle
 
@@ -54,8 +54,8 @@ def run_walk_forward(
             continue
 
         encoder = CategoryEncoder.fit(train_fold)
-        encoded_train = encoder.transform(train_fold)
-        encoded_valid = encoder.transform(valid_fold)
+        encoded_train = normalize_model_numeric_features(encoder.transform(train_fold))
+        encoded_valid = normalize_model_numeric_features(encoder.transform(valid_fold))
         bundle = train_model_bundle(encoded_train, config)
         fold_prediction = correct_quantile_crossing(
             predict_raw_quantiles(bundle, encoded_valid)

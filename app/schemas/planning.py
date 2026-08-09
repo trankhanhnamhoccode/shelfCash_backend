@@ -22,4 +22,7 @@ class LegacyPlanResultResponse(LegacyPlanMetadataResponse):
     projected_shortage_quantity:float;projected_waste_quantity:float;fill_rate:float
     budget_used:int;budget_remaining:int|None
     constraint_violations:list[dict[str,Any]];plan_lines:list[dict[str,Any]]
+    budget_trace:dict[str,Any]
+    storage_capacity_trace:dict[str,Any]
+    shelf_life_trace:dict[str,Any]
     simulation_summary:list[dict[str,Any]]

@@ -10,6 +10,7 @@ from uuid import uuid4
 from sqlalchemy.exc import IntegrityError
 
 from app.core.canonical_schemas import CANONICAL_SCHEMAS
+from app.core.business_constraints import normalize_constraint_type
 from app.core.exceptions import (
     DuplicateRequestError,
     ImportNotFoundError,
@@ -18,6 +19,7 @@ from app.core.exceptions import (
     InvalidStateTransitionError,
     MappingIncompleteError,
     ValidationError,
+    BusinessConstraintError,
 )
 from app.core.excel_reader import (
     ALLOWED_EXTENSIONS,
@@ -390,8 +392,10 @@ class ImportService:
                 session.rollback()
                 raise
 
-    def process(self, import_id):
+    def process(self, import_id, *, policy: str = "atomic"):
         import_id = str(import_id)
+        if policy not in {"atomic", "partial_success", "preview_only"}:
+            raise ValidationError("Unsupported import processing policy.", {"policy": policy})
         logger.info(
             "import_stage_started request_id=%s stage=process_import import_id=%s",
             get_request_id(), import_id,
@@ -431,6 +435,7 @@ class ImportService:
                 }
                 summary: dict[str, Any] = {}
                 business_sheets: list[dict[str, Any]] = []
+                all_issues: list[dict[str, Any]] = []
                 profiles_by_id = {
                     profile.profile_id: profile
                     for profile in repository.profiles(import_id)
@@ -439,6 +444,34 @@ class ImportService:
                     profile = profiles_by_id[mapping.profile_id]
                     sheet = self._pipeline_sheet(repository, profile, mapping)
                     kind, rows, validation = self.pipeline.process_sheet(sheet)
+                    row_issues = list(validation["errors"])
+                    if kind == "business_constraints":
+                        for index, row in enumerate(rows):
+                            if normalize_constraint_type(row.get("constraint_type")) == "store_closed_date":
+                                row_issues.append({
+                                    "sheet": row.get("_source_sheet", profile.sheet_name),
+                                    "row": index + 1,
+                                    "row_number": row.get("_source_excel_row", index + 1),
+                                    "field": "constraint_type",
+                                    "code": "BUSINESS_CONSTRAINT_TYPE_UNSUPPORTED",
+                                    "message": "store_closed_date belongs to the calendar domain.",
+                                    "raw_value": row.get("constraint_type"),
+                                    "remediation": "Use calendar_features.is_store_closed instead.",
+                                    "use_instead": "calendar_features.is_store_closed",
+                                })
+                    invalid_indexes = {int(item["row"]) - 1 for item in row_issues if item.get("row")}
+                    if row_issues:
+                        validation["errors"] = row_issues[:100]
+                        validation["invalid_rows"] = len(invalid_indexes)
+                        validation["valid_rows"] = max(0, len(rows) - len(invalid_indexes))
+                        all_issues.extend(row_issues)
+                        if policy == "partial_success":
+                            rows = [row for index, row in enumerate(rows) if index not in invalid_indexes]
+                        # Delay atomic failure until every sheet has been inspected.
+                        validation_for_report = validation["errors"]
+                        validation["errors"] = []
+                    else:
+                        validation_for_report = []
                     if validation["errors"]:
                         repository.replace_issues(
                             import_id=import_id,
@@ -462,6 +495,7 @@ class ImportService:
                             }
                         )
                     summary[profile.compatibility_sheet_id] = validation
+                    summary[profile.compatibility_sheet_id]["errors"] = validation_for_report
                     repository.replace_issues(
                         import_id=import_id,
                         profile_id=profile.profile_id,
@@ -481,8 +515,35 @@ class ImportService:
                         "import_id": import_id,
                         "processed_at": datetime.now(timezone.utc).isoformat(),
                         "sheet_count": len(profiles_by_id),
+                        "processing_policy": policy,
                     },
                 ).model_dump(mode="json")
+                canonical["issues"] = all_issues
+                if all_issues and policy == "atomic":
+                    job.validation_summary_json = json_dump(summary)
+                    session.flush()
+                    session.commit()
+                    if len(all_issues) == 1 and all_issues[0]["code"] == "BUSINESS_CONSTRAINT_TYPE_UNSUPPORTED":
+                        raise BusinessConstraintError(
+                            "BUSINESS_CONSTRAINT_TYPE_UNSUPPORTED",
+                            all_issues[0]["message"],
+                            {**all_issues[0], "issues": all_issues},
+                        )
+                    raise ValidationError(
+                        "Import contains invalid rows; atomic processing wrote no business data.",
+                        {"processing_policy": policy, "issues": all_issues},
+                    )
+                if policy == "preview_only":
+                    job.result_json = json_dump(canonical)
+                    job.validation_summary_json = json_dump(summary)
+                    job.business_write_summary_json = json_dump({})
+                    job.business_schema_version = SCHEMA_VERSION
+                    job.status = "confirmed"
+                    job.legacy_status = "confirmed"
+                    session.flush()
+                    record = repository.to_record(job)
+                    session.commit()
+                    return record
                 persistence = ImportBusinessPersistenceService(session)
                 business_summary = persistence.persist(job=job, sheets=business_sheets)
                 canonical["menu"] = persistence.menu_result

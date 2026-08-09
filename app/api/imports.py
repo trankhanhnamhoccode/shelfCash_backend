@@ -1,4 +1,5 @@
 from datetime import date
+from typing import Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, File, Form, Header, UploadFile, status
@@ -90,9 +91,19 @@ def confirm_import(import_id: UUID, payload: ConfirmRequest, service=Depends(get
 
 
 @router.post("/{import_id}/process", response_model=ProcessResponse)
-def process_import(import_id: UUID, service=Depends(get_service)):
-    record = service.process(import_id)
-    return {"import_id": record["import_id"], "status": record["status"], "validation_summary": record["result"]["validation_summary"]}
+def process_import(
+    import_id: UUID,
+    policy: Literal["atomic", "partial_success", "preview_only"] = "atomic",
+    service=Depends(get_service),
+):
+    record = service.process(import_id, policy=policy)
+    result = record["result"]
+    return {
+        "import_id": record["import_id"], "status": record["status"],
+        "validation_summary": result["validation_summary"],
+        "processing_policy": result.get("ingestion_metadata", {}).get("processing_policy", policy),
+        "issues": result.get("issues", []),
+    }
 
 
 @router.get("/{import_id}/result")

@@ -42,11 +42,12 @@ class ForecastDataRepository:
             .order_by(CalendarFeatureModel.date)
         ).all()
         columns = ["date", "is_weekend", "is_holiday", "is_store_closed", "is_promotion",
-                   "promotion_name", "temperature", "rainfall"]
+                   "promotion_name", "temperature", "rainfall", "known_at"]
         return pd.DataFrame([{
             "date": row.date, "is_weekend": row.is_weekend, "is_holiday": row.is_holiday,
             "is_store_closed": row.is_store_closed, "is_promotion": row.is_promotion,
             "promotion_name": row.promotion_name,
             "temperature": float(row.temperature) if row.temperature is not None else None,
             "rainfall": float(row.rainfall) if row.rainfall is not None else None,
+            "known_at": row.created_at,
         } for row in rows], columns=columns)

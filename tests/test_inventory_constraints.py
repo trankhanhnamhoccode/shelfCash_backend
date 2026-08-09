@@ -57,7 +57,9 @@ def test_planner_distinguishes_missing_from_configured_zero_with_multiple_suppli
         add_catalog(session); session.flush()
         missing, _ = ProcurementPlanningService(session).build("STORE_001", forecast, demand, ["balanced"], False, 1000)
         assert "SAFETY_STOCK_NOT_CONFIGURED" in missing[0]["warnings"]
-        assert missing[0]["constraint_trace"]["milk"] == {"configured_safety_stock": None, "effective_safety_stock": "0", "fallback_policy": "ZERO_WITH_WARNING", "maximum_stock": None, "unit": "lít"}
+        trace=missing[0]["constraint_trace"]["milk"]
+        assert {key:trace[key] for key in ("configured_safety_stock","effective_safety_stock","fallback_policy","maximum_stock","minimum_stock","unit")} == {"configured_safety_stock": None, "effective_safety_stock": "0", "fallback_policy": "ZERO_WITH_WARNING", "maximum_stock": None, "minimum_stock": None, "unit": "lít"}
+        assert trace["target_ending_inventory"] == "0" and trace["target_ending_policy"] == "MAX_SAFETY_AND_MINIMUM"
         session.add(constraint("zero", "0")); session.flush()
         configured, _ = ProcurementPlanningService(session).build("STORE_001", forecast, demand, ["balanced"], False, 1000)
         assert "SAFETY_STOCK_NOT_CONFIGURED" not in configured[0]["warnings"]

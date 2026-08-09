@@ -89,7 +89,8 @@ class DecisionPlanningService:
    if key:
     rec=IdempotencyRepository(s).get(store_id=store,endpoint=endpoint,http_method="POST",idempotency_key=key);rec.resource_type="procurement_plan_run";rec.resource_id=planning_run.procurement_plan_run_id
    s.commit()
-   try:plans,recommended=ProcurementPlanningService(s).build(store,forecast,demands,body.strategies,body.use_open_purchase_orders,body.budget_override)
+   strategy_source="explicit" if "strategies" in body.model_fields_set else "request_default"
+   try:plans,recommended=ProcurementPlanningService(s).build(store,forecast,demands,body.strategies,body.use_open_purchase_orders,body.budget_override,strategy_source)
    except PlanningError as exc:
     failed=s.get(ProcurementPlanRunModel,planning_run.procurement_plan_run_id);failed.status="blocked";failed.failure_code=exc.code;failed.failure_message=exc.message;failed.completed_at=now();s.commit();raise
    except Exception as exc:
@@ -190,5 +191,7 @@ class DecisionPlanningService:
   metrics=selected["metrics"]
   return {**metadata,"is_feasible":selected["is_feasible"],"is_recommended":selected["is_recommended"],"total_purchase_cost":selected["total_purchase_cost"],
    "projected_shortage_quantity":selected["projected_shortage_quantity"],"projected_waste_quantity":selected["projected_waste_quantity"],"fill_rate":selected["fill_rate"],
-   "budget_used":selected["budget_used"],"budget_remaining":metrics.get("budget_remaining"),"constraint_violations":metrics.get("constraint_violations",[]),
-   "warnings":sorted(set(metadata["warnings"]+selected["warnings"])),"plan_lines":lines,"simulation_summary":selected["daily_projections"]}
+   "budget_used":selected["budget_used"],"budget_remaining":metrics.get("budget_remaining"),"budget_trace":metrics.get("budget_trace",{}),"constraint_violations":metrics.get("constraint_violations",[]),
+   "warnings":sorted(set(metadata["warnings"]+selected["warnings"])),"storage_capacity_trace":metrics.get("storage_capacity_trace",{}),
+   "shelf_life_trace":metrics.get("shelf_life_trace",{}),
+   "plan_lines":lines,"simulation_summary":selected["daily_projections"]}

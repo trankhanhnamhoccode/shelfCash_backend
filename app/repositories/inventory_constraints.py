@@ -15,6 +15,7 @@ class InventoryConstraintRepository:
             InventoryConstraintModel.store_id == store_id,
             InventoryConstraintModel.constraint_type == constraint_type,
             InventoryConstraintModel.ingredient_id == ingredient_id,
+            InventoryConstraintModel.superseded_by_constraint_id.is_(None),
             InventoryConstraintModel.effective_date <= day,
             or_(InventoryConstraintModel.end_date.is_(None), InventoryConstraintModel.end_date >= day),
         ).order_by(InventoryConstraintModel.version.desc())))

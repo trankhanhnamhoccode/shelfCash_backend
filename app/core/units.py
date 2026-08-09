@@ -7,9 +7,9 @@ _ALIASES = {
     "kg": "kg", "kilogram": "kg", "kilograms": "kg",
     "g": "g", "gram": "g", "grams": "g",
     "l": "lít", "liter": "lít", "litre": "lít", "liters": "lít",
-    "litres": "lít", "lít": "lít",
+    "litres": "lít", "lit": "lít", "lít": "lít",
     "ml": "ml", "milliliter": "ml", "millilitre": "ml",
-    "piece": "cái", "pieces": "cái", "pcs": "cái", "cái": "cái",
+    "piece": "cái", "pieces": "cái", "pcs": "cái", "unit": "cái", "units": "cái", "cái": "cái",
 }
 _DIMENSIONS = {"kg": "mass", "g": "mass", "lít": "volume", "ml": "volume", "cái": "count"}
 _TO_BASE = {"kg": Decimal("1000"), "g": Decimal("1"), "lít": Decimal("1000"), "ml": Decimal("1"), "cái": Decimal("1")}
@@ -47,3 +47,8 @@ def convert_quantity(quantity: Decimal | str | int, from_unit: str | None, to_un
         return value
     validate_compatible(source, target)
     return value * _TO_BASE[source] / _TO_BASE[target]
+
+
+def canonical_unit_name(value: str) -> str:
+    """Stable English unit name for API traces; conversion still uses internal units."""
+    return {"kg": "kilogram", "g": "gram", "lít": "liter", "ml": "milliliter", "cái": "piece"}[normalize_unit(value)]

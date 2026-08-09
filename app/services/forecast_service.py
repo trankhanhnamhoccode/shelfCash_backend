@@ -22,7 +22,7 @@ from app.services.audit_service import AuditService
 from app.services.idempotency_service import IdempotencyService
 from app.core.provenance import canonical_hash
 from shelfcash_forecast import ForecastConfig, predict_demand, train_forecast_core
-from shelfcash_forecast.exceptions import ArtifactError, DataValidationError, FeatureSchemaError, InsufficientDataError
+from shelfcash_forecast.exceptions import ArtifactError, DataValidationError, FeatureSchemaError, FeatureTypeError, InsufficientDataError
 
 logger = logging.getLogger("shelfcash.forecast")
 REQUIRED_ARTIFACTS = {"model_q25.txt", "model_q50.txt", "model_q75.txt", "calibrator.json",
@@ -289,6 +289,7 @@ class ForecastService:
     @staticmethod
     def _code(exc):
         if isinstance(exc, ForecastError): return exc.code
+        if isinstance(exc, FeatureTypeError): return "FORECAST_FEATURE_TYPE_INVALID"
         if isinstance(exc, ArtifactError): return "FORECAST_ARTIFACT_INVALID"
         if isinstance(exc, (DataValidationError, FeatureSchemaError, ValueError)): return "FORECAST_INPUT_INVALID"
         if isinstance(exc, InsufficientDataError): return "INSUFFICIENT_TRAINING_DATA"
@@ -297,6 +298,8 @@ class ForecastService:
     def _raise_core(self, exc, training):
         if isinstance(exc, (ForecastError, ModelNotReadyError, InsufficientTrainingDataError)): raise exc
         if isinstance(exc, InsufficientDataError): raise InsufficientTrainingDataError(details={"reason": str(exc)}) from exc
+        if isinstance(exc, FeatureTypeError):
+            raise ForecastError("FORECAST_FEATURE_TYPE_INVALID", "Forecast feature has an invalid numeric dtype.", {"reason": str(exc)}) from exc
         if isinstance(exc, ArtifactError): raise ForecastError("FORECAST_ARTIFACT_INVALID", "Model artifacts không hợp lệ.", {"reason": str(exc)}, http_status=500) from exc
         if isinstance(exc, (DataValidationError, FeatureSchemaError, ValueError)):
             code = "INSUFFICIENT_TRAINING_DATA" if training else "FORECAST_INPUT_INVALID"

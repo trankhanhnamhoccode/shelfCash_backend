@@ -160,10 +160,10 @@ class NormalizedImportRepository:
                     issue_id=str(uuid4()),
                     import_id=import_id,
                     profile_id=profile_id,
-                    source_row=item.get("row"),
+                    source_row=item.get("row_number", item.get("row")),
                     severity="error",
-                    code="ROW_VALIDATION_ERROR",
-                    message="Canonical row validation failed.",
+                    code=item.get("code", "ROW_VALIDATION_ERROR"),
+                    message=item.get("message", "Canonical row validation failed."),
                     details_json=json_dump(item),
                     issue_source=issue_source,
                 )

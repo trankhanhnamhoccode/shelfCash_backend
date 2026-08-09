@@ -12,6 +12,8 @@ CUTOFF_FEATURE_COLUMNS = [
     "product_name",
     "history_observation_count",
     "last_observed_demand",
+    "last_observed_price",
+    "price_lag_1",
     "cutoff_lag_1",
     "cutoff_lag_2",
     "cutoff_lag_7",

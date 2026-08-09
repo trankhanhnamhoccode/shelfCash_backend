@@ -88,3 +88,5 @@ class ProcessResponse(BaseModel):
     import_id: UUID
     status: str
     validation_summary: dict[str, Any]
+    processing_policy: str = "atomic"
+    issues: list[dict[str, Any]] = Field(default_factory=list)

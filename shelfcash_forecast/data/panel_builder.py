@@ -6,6 +6,7 @@ import pandas as pd
 def build_daily_panel(
     sales: pd.DataFrame,
     calendar: pd.DataFrame | None = None,
+    inventory_availability: pd.DataFrame | None = None,
     end_date: str | pd.Timestamp | None = None,
 ) -> pd.DataFrame:
     """Create one row per day and observed store-product series."""
@@ -54,6 +55,19 @@ def build_daily_panel(
 
     if calendar is not None and not calendar.empty:
         panel = panel.merge(calendar, on="date", how="left", validate="many_to_one")
+
+    if inventory_availability is not None and not inventory_availability.empty:
+        inventory = inventory_availability.drop_duplicates(
+            ["date", "store_key", "product_key"], keep="last"
+        )
+        panel = panel.merge(
+            inventory,
+            on=["date", "store_key", "product_key"],
+            how="left",
+            validate="one_to_one",
+        )
+    elif "is_available" not in panel.columns:
+        panel["is_available"] = pd.Series(pd.NA, index=panel.index, dtype="boolean")
 
     if "is_store_closed" not in panel.columns:
         panel["is_store_closed"] = False

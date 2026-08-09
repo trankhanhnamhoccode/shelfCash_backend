@@ -10,13 +10,19 @@ from app.core.units import normalize_unit, unit_dimension, validate_compatible
 
 @dataclass(frozen=True)
 class ConstraintDefinition:
+    canonical_name: str
+    aliases: tuple[str, ...]
     dimension: str
     scope: str
+    ingredient_required: bool
+    unit_required: bool
+    allowed_units: tuple[str, ...]
     canonical_unit: str | None = None
-    allowed_units: tuple[str, ...] = ()
     minimum: Decimal = Decimal("0")
     maximum: Decimal | None = None
     integer_value: bool = False
+    planner_support: str = "configured_only"
+    resolution_priority: int | None = None
 
 
 @dataclass(frozen=True)
@@ -28,17 +34,28 @@ class NormalizedBusinessConstraint:
     scope: str
 
 
+PHYSICAL_UNITS = ("kg", "g", "lít", "ml", "cái")
+VOLUME_UNITS = ("lít", "ml")
+
+
+def _definition(name, aliases, dimension, scope, ingredient_required, unit_required, allowed_units,
+                canonical_unit=None, minimum=Decimal("0"), maximum=None, integer_value=False,
+                planner_support="configured_only", resolution_priority=None):
+    return ConstraintDefinition(name, tuple(aliases), dimension, scope, ingredient_required, unit_required,
+        tuple(allowed_units), canonical_unit, minimum, maximum, integer_value, planner_support, resolution_priority)
+
+
 CONSTRAINT_DEFINITIONS = {
-    "safety_stock": ConstraintDefinition("quantity", "ingredient"),
-    "maximum_stock": ConstraintDefinition("quantity", "ingredient"),
-    "minimum_stock": ConstraintDefinition("quantity", "ingredient"),
-    "reorder_point": ConstraintDefinition("quantity", "ingredient"),
-    "shelf_life_target": ConstraintDefinition("duration", "ingredient", "day", ("day",), Decimal("0"), integer_value=True),
-    "service_level_target": ConstraintDefinition("ratio", "store_or_ingredient", "ratio", ("ratio",), Decimal("0")),
-    "storage_capacity": ConstraintDefinition("quantity_or_capacity", "store"),
-    "warehouse_capacity": ConstraintDefinition("quantity_or_capacity", "store"),
-    "maximum_storage_volume": ConstraintDefinition("volume", "store"),
-    "budget": ConstraintDefinition("currency", "store", "VND", ("VND",)),
+    "safety_stock": _definition("safety_stock", ("safety stock",), "quantity", "ingredient", True, True, PHYSICAL_UNITS, planner_support="supported"),
+    "maximum_stock": _definition("maximum_stock", ("maximum stock", "max_stock"), "quantity", "ingredient", True, True, PHYSICAL_UNITS, planner_support="supported"),
+    "minimum_stock": _definition("minimum_stock", ("minimum stock", "min_stock"), "quantity", "ingredient", True, True, PHYSICAL_UNITS),
+    "reorder_point": _definition("reorder_point", ("reorder point",), "quantity", "ingredient", True, True, PHYSICAL_UNITS),
+    "shelf_life_target": _definition("shelf_life_target", ("shelf life target", "shelf_life"), "duration", "ingredient", True, True, ("day",), "day", integer_value=True),
+    "service_level_target": _definition("service_level_target", ("service level target", "service_level"), "ratio", "store_or_ingredient", False, True, ("ratio", "percent"), "ratio"),
+    "storage_capacity": _definition("storage_capacity", ("storage capacity",), "capacity", "store", False, True, PHYSICAL_UNITS, resolution_priority=2),
+    "warehouse_capacity": _definition("warehouse_capacity", ("warehouse capacity",), "capacity", "store", False, True, PHYSICAL_UNITS, resolution_priority=3),
+    "maximum_storage_volume": _definition("maximum_storage_volume", ("maximum storage volume", "max_storage_volume"), "capacity", "store", False, True, VOLUME_UNITS, "lít", resolution_priority=1),
+    "budget": _definition("budget", ("store_budget",), "currency", "store", False, True, ("VND",), "VND"),
 }
 
 _DURATION_UNITS = {"day": "day", "days": "day", "d": "day", "ngay": "day"}
@@ -53,7 +70,42 @@ def _fold(value) -> str:
 
 
 def normalize_constraint_type(value) -> str:
-    return _fold(value).replace(" ", "_").replace("-", "_")
+    normalized = _fold(value).replace(" ", "_").replace("-", "_")
+    return CONSTRAINT_ALIAS_INDEX.get(normalized, normalized)
+
+
+def _build_alias_index():
+    result = {}
+    for canonical, definition in CONSTRAINT_DEFINITIONS.items():
+        if definition.canonical_name != canonical:
+            raise RuntimeError(f"Constraint registry key mismatch: {canonical}")
+        for raw in (canonical, *definition.aliases):
+            alias = _fold(raw).replace(" ", "_").replace("-", "_")
+            previous = result.get(alias)
+            if previous is not None and previous != canonical:
+                raise RuntimeError(f"Duplicate business constraint alias: {raw}")
+            result[alias] = canonical
+    return result
+
+
+CONSTRAINT_ALIAS_INDEX = _build_alias_index()
+
+
+def constraint_type_catalog():
+    return [{
+        "constraint_type": item.canonical_name,
+        "aliases": list(item.aliases),
+        "scope": item.scope,
+        "dimension": item.dimension,
+        "ingredient_required": item.ingredient_required,
+        "unit_required": item.unit_required,
+        "allowed_units": list(item.allowed_units),
+        "canonical_unit": item.canonical_unit,
+        "minimum_value": item.minimum,
+        "maximum_value": item.maximum,
+        "planner_support": item.planner_support,
+        "resolution_priority": item.resolution_priority,
+    } for item in CONSTRAINT_DEFINITIONS.values()]
 
 
 def constraint_definition(constraint_type) -> tuple[str, ConstraintDefinition]:
@@ -94,7 +146,7 @@ def _unit_error(kind, definition, unit, allowed_units=None):
 
 def validate_and_normalize_business_constraint(constraint_type, value, unit, ingredient=None) -> NormalizedBusinessConstraint:
     kind, definition = constraint_definition(constraint_type)
-    if definition.scope == "ingredient" and ingredient is None:
+    if definition.ingredient_required and ingredient is None:
         raise BusinessConstraintError("INGREDIENT_NOT_FOUND", "Ingredient is required for this business constraint.", {"constraint_type": kind})
     if definition.scope == "store" and ingredient is not None:
         raise BusinessConstraintError("BUSINESS_CONSTRAINT_VALUE_INVALID", "Store-level constraint cannot target an ingredient.", {"constraint_type": kind})
@@ -120,11 +172,11 @@ def validate_and_normalize_business_constraint(constraint_type, value, unit, ing
             if number < 0 or number > 1:
                 raise BusinessConstraintError("BUSINESS_CONSTRAINT_VALUE_INVALID", "Ratio must be between 0 and 1.",
                     {"constraint_type": kind, "dimension": "ratio", "value": str(number), "unit": canonical_unit})
-        elif definition.dimension in {"quantity_or_capacity", "volume"}:
+        elif definition.dimension == "capacity":
             if not raw_unit:
                 _unit_error(kind, definition, unit, ["kg", "g", "liter", "ml", "piece"])
             canonical_unit = normalize_unit(raw_unit)
-            if definition.dimension == "volume" and unit_dimension(canonical_unit) != "volume":
+            if definition.canonical_unit == "lít" and unit_dimension(canonical_unit) != "volume":
                 _unit_error(kind, definition, unit, ["liter", "ml"])
         elif definition.dimension == "currency":
             canonical_unit = _CURRENCY_UNITS.get(_fold(raw_unit or definition.canonical_unit))
@@ -137,8 +189,7 @@ def validate_and_normalize_business_constraint(constraint_type, value, unit, ing
     except Exception as exc:
         allowed = {
             "quantity": [ingredient.base_unit] if ingredient else [],
-            "quantity_or_capacity": ["kg", "g", "liter", "ml", "piece"],
-            "volume": ["liter", "ml"],
+            "capacity": list(definition.allowed_units),
             "duration": sorted(_DURATION_UNITS),
             "ratio": sorted(_RATIO_UNITS),
             "currency": sorted(_CURRENCY_UNITS),

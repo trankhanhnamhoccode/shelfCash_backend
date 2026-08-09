@@ -23,6 +23,7 @@ from shelfcash_forecast.features.future import (
     add_deterministic_future_features,
 )
 from shelfcash_forecast.features.historical import add_historical_features
+from shelfcash_forecast.features.specification import normalize_model_numeric_features
 from shelfcash_forecast.features.training_table import (
     add_target_seasonal_lags,
     build_runtime_rows,
@@ -53,7 +54,10 @@ def predict_demand(
     if sales.empty:
         raise InsufficientDataError("Không có sales_history tại hoặc trước cutoff_date.")
 
-    panel = build_daily_panel(sales, calendar, end_date=cutoff)
+    inventory = adapted.inventory_availability
+    if inventory is not None:
+        inventory = inventory.loc[inventory["date"].le(cutoff)].copy()
+    panel = build_daily_panel(sales, calendar, inventory, end_date=cutoff)
     panel = resolve_missing_sales(panel)
     panel = reconstruct_demand(panel)
     panel = add_historical_features(panel, config)
@@ -61,8 +65,9 @@ def predict_demand(
     runtime = build_runtime_rows(panel, cutoff, forecast_horizon)
     runtime = add_target_seasonal_lags(runtime, panel, config)
     runtime = add_deterministic_future_features(runtime)
-    runtime = add_calendar_future_features(runtime, calendar)
+    runtime = add_calendar_future_features(runtime, calendar, allow_unversioned_context=True)
     runtime = artifacts.encoder.transform(runtime)
+    runtime = normalize_model_numeric_features(runtime)
 
     missing_features = set(artifacts.model_bundle.feature_names) - set(runtime.columns)
     if missing_features:

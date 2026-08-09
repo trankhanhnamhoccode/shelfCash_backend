@@ -34,7 +34,7 @@ from shelfcash_forecast.features.future import (
     add_deterministic_future_features,
 )
 from shelfcash_forecast.features.historical import add_historical_features
-from shelfcash_forecast.features.specification import CategoryEncoder
+from shelfcash_forecast.features.specification import CategoryEncoder, normalize_model_numeric_features
 from shelfcash_forecast.features.training_table import (
     add_target_seasonal_lags,
     build_training_table,
@@ -52,7 +52,7 @@ def _prepare_modelling_table(
     sales, quality_report = validate_sales(adapted.sales_history)
     calendar = validate_calendar(adapted.calendar_features, quality_report)
 
-    panel = build_daily_panel(sales, calendar)
+    panel = build_daily_panel(sales, calendar, adapted.inventory_availability)
     panel = resolve_missing_sales(panel)
     panel = reconstruct_demand(panel)
     panel = add_historical_features(panel, config)
@@ -61,7 +61,18 @@ def _prepare_modelling_table(
     table = add_target_seasonal_lags(table, panel, config)
     table = add_deterministic_future_features(table)
     table = add_calendar_future_features(table, calendar)
-    return table, panel, calendar, quality_report.to_dict()
+    quality = quality_report.to_dict()
+    reconstructed = panel["stockout_reconstruction_source"].isin(
+        ["is_stockout_historical_median", "inventory_historical_median"]
+    )
+    quality["stockout_reconstruction_used"] = bool(reconstructed.any())
+    quality["stockout_reconstruction_confidence"] = (
+        float(panel.loc[reconstructed, "stockout_reconstruction_confidence"].mean())
+        if reconstructed.any() else 0.0
+    )
+    if not panel["is_stockout"].notna().any() and not reconstructed.any():
+        quality["warnings"].append("STOCKOUT_RECONSTRUCTION_UNAVAILABLE")
+    return table, panel, calendar, quality
 
 
 def _eligible_rows(frame: pd.DataFrame, config: ForecastConfig) -> pd.DataFrame:
@@ -108,9 +119,9 @@ def train_forecast_core(
         )
 
     encoder = CategoryEncoder.fit(train)
-    encoded_train = encoder.transform(train)
-    encoded_calibration = encoder.transform(calibration)
-    encoded_test = encoder.transform(test)
+    encoded_train = normalize_model_numeric_features(encoder.transform(train))
+    encoded_calibration = normalize_model_numeric_features(encoder.transform(calibration))
+    encoded_test = normalize_model_numeric_features(encoder.transform(test))
 
     model_bundle = train_model_bundle(encoded_train, config)
 
@@ -154,6 +165,10 @@ def train_forecast_core(
     }
 
     warnings = list(quality_report.get("warnings", []))
+    if not table["target_planned_price"].notna().any():
+        warnings.append("FUTURE_PLANNED_PRICE_MISSING")
+    if not table["target_promotion_known"].eq(1).any():
+        warnings.append("FUTURE_PROMOTION_PLAN_MISSING")
     model_wape = test_metrics["overall"].get("wape_p50")
     baseline_wape = baseline_metrics["seasonal_naive"].get("wape")
     if (
@@ -173,8 +188,22 @@ def train_forecast_core(
         "nominal_interval_coverage": config.nominal_coverage,
         "censored_target_policy": "exclude_when_stockout_is_known",
         "missing_stockout_policy": "use_observed_sales_with_warning",
-        "future_price_used": False,
-        "future_promotion_used": False,
+        "future_price_used": bool(table["target_planned_price"].notna().any()),
+        "future_price_source": "calendar_features.planned_price" if table["target_planned_price"].notna().any() else None,
+        "future_promotion_used": bool(table["target_promotion_known"].eq(1).any()),
+        "future_promotion_source": "calendar_features" if table["target_promotion_known"].eq(1).any() else None,
+        "stockout_reconstruction_used": quality_report["stockout_reconstruction_used"],
+        "stockout_reconstruction_confidence": quality_report["stockout_reconstruction_confidence"],
+        "feature_coverage": {
+            "planned_price": float(table["target_planned_price"].notna().mean()),
+            "historical_price": float(table["last_observed_price"].notna().mean()),
+            "future_promotion": float(table["target_promotion_known"].eq(1).mean()),
+            "discount_rate": float(table["target_discount_rate"].notna().mean()),
+            "calendar": float(table["calendar_available"].eq(1).mean()),
+            "stockout_direct": float(panel["is_stockout"].notna().mean()),
+            "stockout_reconstructed": float(panel["stockout_reconstruction_source"].isin(["is_stockout_historical_median", "inventory_historical_median"]).mean()),
+        },
+        "missing_feature_warnings": sorted(w for w in warnings if "MISSING" in w or "UNAVAILABLE" in w),
         "split": split.to_dict(),
         "warnings": sorted(set(warnings)),
     }

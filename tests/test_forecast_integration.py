@@ -3,7 +3,7 @@ from decimal import Decimal
 from uuid import uuid4
 
 from app.models.business import (CalendarFeatureModel,IngredientModel,InventoryLotModel,
-    InventoryMovementModel,ProductModel,RecipeLineModel,RecipeVersionModel,SalesDailyModel,
+    InventoryConstraintModel,InventoryMovementModel,ProductModel,RecipeLineModel,RecipeVersionModel,SalesDailyModel,
     SupplierIngredientTermModel,SupplierModel)
 from app.schemas.forecast import ForecastPredictRequest, ForecastTrainRequest
 from shelfcash_forecast import ForecastConfig
@@ -51,6 +51,9 @@ def test_db_to_real_core_to_persisted_predictions(client, monkeypatch):
         s.add(RecipeLineModel(recipe_line_id="tea-line",recipe_version_id="tea-recipe",ingredient_id="tea-leaf",quantity=Decimal("200"),unit="g"))
         s.add(SupplierModel(supplier_id="tea-supplier",store_id="STORE_001",supplier="Tea supplier",normalized_name="tea-supplier",active=True,source="test"));s.flush()
         s.add(SupplierIngredientTermModel(constraint_id="tea-term",store_id="STORE_001",supplier_id="tea-supplier",ingredient_id="tea-leaf",unit_cost=100,moq=Decimal("1"),pack_size=Decimal("0.5"),lead_time_days=0,unit="kg",version=1,active=True,source="test"))
+        s.add(InventoryConstraintModel(constraint_id="tea-shelf-life",store_id="STORE_001",ingredient_id="tea-leaf",
+            constraint_type="shelf_life_target",value=Decimal("5"),unit="day",effective_date=date(2026,7,1),
+            version=1,active=True,source="test"))
         s.add(InventoryLotModel(lot_id="tea-lot",store_id="STORE_001",ingredient_id="tea-leaf",supplier_id="tea-supplier",received_date=cutoff,expiry_date=date(2026,8,5),initial_quantity=Decimal("1"),unit="kg",unit_cost=100,source="test",version=1));s.flush()
         from datetime import datetime,timezone
         s.add(InventoryMovementModel(movement_id=str(uuid4()),store_id="STORE_001",lot_id="tea-lot",movement_type="opening_balance",quantity_delta=Decimal("1"),unit="kg",occurred_at=datetime(2026,8,3,tzinfo=timezone.utc),source="test"));s.commit()
@@ -95,6 +98,10 @@ def test_db_to_real_core_to_persisted_predictions(client, monkeypatch):
     assert Decimal(str(legacy_plan["plan_lines"][0]["order_quantity"]))%Decimal("0.5")==0
     assert legacy_plan["total_purchase_cost"]==balanced["total_purchase_cost"]
     assert legacy_plan["projected_shortage_quantity"]==balanced["projected_shortage_quantity"]
+    assert legacy_plan["storage_capacity_trace"]["configured"] is False
+    assert legacy_plan["storage_capacity_trace"]["evaluation_status"] == "not_configured"
+    assert legacy_plan["shelf_life_trace"]["tea-leaf"]["configured_days"] == 5
+    assert legacy_plan["budget_trace"]["source"] == "request_override"
     wrong_store=client.get(f"/api/v1/stores/STORE_TEST_001/plan-runs/{legacy_id}/result")
     assert wrong_store.status_code==404 and wrong_store.json()["code"]=="PLANNING_RUN_NOT_FOUND"
     changed={**legacy_body,"budget_limit":99999}
@@ -128,6 +135,11 @@ def test_db_to_real_core_to_persisted_predictions(client, monkeypatch):
     assert plans_get.json()["procurement_plan_run_id"]==legacy_metadata["procurement_plan_run_id"]
     latest_balanced=plans_get.json()["plans"][0]
     assert latest_balanced["strategy"]=="balanced"
+    assert latest_balanced["metrics"]["storage_capacity_trace"] == legacy_plan["storage_capacity_trace"]
+    assert latest_balanced["metrics"]["shelf_life_trace"] == legacy_plan["shelf_life_trace"]
+    assert latest_balanced["metrics"]["strategy_source"] == "explicit"
+    assert latest_balanced["metrics"]["budget_trace"] == legacy_plan["budget_trace"]
+    assert latest_balanced["metrics"]["constraint_trace"]["tea-leaf"]["strategy_source"] == "explicit"
     assert latest_balanced["lines"]==legacy_plan["plan_lines"] or (
         latest_balanced["lines"][0]["order_quantity"]==legacy_plan["plan_lines"][0]["order_quantity"]
         and latest_balanced["lines"][0]["supplier_id"]==legacy_plan["plan_lines"][0]["supplier_id"])

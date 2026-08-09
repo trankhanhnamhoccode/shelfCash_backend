@@ -5,13 +5,15 @@ from dataclasses import dataclass
 import pandas as pd
 
 
-CATEGORICAL_SOURCE_COLUMNS = ["store_key", "product_key"]
-CATEGORICAL_MODEL_COLUMNS = ["store_code", "product_code"]
+CATEGORICAL_SOURCE_COLUMNS = ["store_key", "product_key", "target_promotion_category"]
+CATEGORICAL_MODEL_COLUMNS = ["store_code", "product_code", "promotion_category_code"]
 
 NUMERIC_FEATURES = [
     "horizon",
     "history_observation_count",
     "last_observed_demand",
+    "last_observed_price",
+    "price_lag_1",
     "cutoff_lag_1",
     "cutoff_lag_2",
     "cutoff_lag_7",
@@ -45,9 +47,30 @@ NUMERIC_FEATURES = [
     "target_temperature",
     "target_rainfall",
     "calendar_available",
+    "target_planned_price",
+    "effective_price",
+    "price_change",
+    "target_is_promotion",
+    "target_discount_rate",
+    "target_calendar_event",
 ]
 
 MODEL_FEATURES = CATEGORICAL_MODEL_COLUMNS + NUMERIC_FEATURES
+
+
+def normalize_model_numeric_features(frame: pd.DataFrame) -> pd.DataFrame:
+    from shelfcash_forecast.exceptions import FeatureTypeError
+
+    result = frame.copy()
+    for column in NUMERIC_FEATURES:
+        if column not in result:
+            raise FeatureTypeError(f"Missing numeric model feature: {column}")
+        converted = pd.to_numeric(result[column], errors="coerce")
+        invalid = result[column].notna() & converted.isna()
+        if invalid.any():
+            raise FeatureTypeError(f"Feature {column} contains non-numeric values")
+        result[column] = converted.astype("float64")
+    return result
 
 
 @dataclass

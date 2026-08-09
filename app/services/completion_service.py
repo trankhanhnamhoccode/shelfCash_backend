@@ -8,6 +8,7 @@ from app.core.exceptions import (
  ModelNotReadyError, ResourceNotFoundError, ValidationError, VersionConflictError,
 )
 from app.core.provenance import canonical_hash
+from app.core.business_constraints import constraint_definition
 from app.core.units import convert_quantity
 from app.models.business import (
  CalendarFeatureModel, IngredientAliasModel, IngredientModel, InventoryLotModel, InventoryMovementModel,
@@ -96,15 +97,24 @@ class CompletionService:
   with self.factory() as s:
    StoreRepository(s).get_required(store)
    rows=s.execute(select(SupplierIngredientTermModel,SupplierModel).join(SupplierModel,SupplierModel.supplier_id==SupplierIngredientTermModel.supplier_id).where(SupplierIngredientTermModel.store_id==store,SupplierIngredientTermModel.active.is_(True)).order_by(SupplierModel.normalized_name,SupplierIngredientTermModel.ingredient_id))
-   items=[{"constraint_id":x.constraint_id,"ingredient_id":x.ingredient_id,"supplier_id":x.supplier_id,"supplier":sup.supplier,"unit_cost":x.unit_cost,"moq":str(x.moq),"pack_size":str(x.pack_size),"order_unit":x.order_unit,"lead_time_days":x.lead_time_days,"unit":x.unit,"version":x.version,"active":x.active} for x,sup in rows]
+   items=[{"constraint_id":x.constraint_id,"ingredient_id":x.ingredient_id,"supplier_id":x.supplier_id,"supplier":sup.supplier,"unit_cost":x.unit_cost,"moq":str(x.moq),"pack_size":str(x.pack_size),"order_unit":x.order_unit,"available_delivery_days":None if x.available_delivery_days is None else json.loads(x.available_delivery_days),"lead_time_days":x.lead_time_days,"unit":x.unit,"version":x.version,"active":x.active} for x,sup in rows]
    return {"items":items,"page":1,"page_size":50,"total":len(items)}
  def inventory_constraints(self,store,ingredient_id=None,constraint_type=None,as_of_date=None):
   with self.factory() as s:
-   StoreRepository(s).get_required(store);rows=InventoryConstraintRepository(s).list(store,ingredient_id,constraint_type,as_of_date)
+   StoreRepository(s).get_required(store)
+   canonical_type=constraint_definition(constraint_type)[0] if constraint_type is not None else None
+   rows=InventoryConstraintRepository(s).list(store,ingredient_id,canonical_type,as_of_date)
    names={x.ingredient_id:x.ingredient for x in s.scalars(select(IngredientModel).where(IngredientModel.store_id==store))}
    return {"store_id":store,"as_of_date":as_of_date,"items":[{"constraint_id":x.constraint_id,"ingredient_id":x.ingredient_id,
-    "ingredient_name":names.get(x.ingredient_id),"constraint_type":x.constraint_type,"value":str(x.value),"unit":x.unit,
-    "effective_date":x.effective_date,"end_date":x.end_date,"version":x.version,"active":x.active} for x in rows]}
+    "ingredient_name":names.get(x.ingredient_id),"constraint_type":x.constraint_type,"value":str(x.value),"unit":x.unit,"currency":x.currency,
+   "effective_date":x.effective_date,"end_date":x.end_date,"version":x.version,"active":x.active} for x in rows]}
+ def inventory_constraint_write(self,operation,store,body,key,constraint_id=None):
+  from app.services.inventory_constraint_write_service import InventoryConstraintWriteService
+  service=InventoryConstraintWriteService(self.factory)
+  if operation=="create":return service.create(store,body,key)
+  if operation=="update":return service.update(store,constraint_id,body,key)
+  if operation=="deactivate":return service.deactivate(store,constraint_id,body,key)
+  raise ValidationError("Unsupported inventory constraint operation.")
  def write(self,kind,store,body,key,target=None):
   if kind in {"inventory_count","inventory_adjustment"}:
    return self._inventory_write(kind,store,body,key)

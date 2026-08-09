@@ -1,6 +1,6 @@
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any,Literal
 from fastapi import APIRouter, Depends, Header, Request
 from pydantic import BaseModel, ConfigDict, Field
 from app.dependencies import get_completion_service, get_decision_planning_service, get_forecast_service, require_api_key
@@ -26,15 +26,30 @@ class PurchaseBatchIn(Strict): source:str;inventory_effect:str;records:list[Purc
 class SupplierTermIn(Strict):
     ingredient_id:str;supplier_id:str;unit_cost:int=Field(ge=0);moq:Decimal=Field(ge=0);pack_size:Decimal=Field(gt=0);lead_time_days:int=Field(ge=0);unit:str;version:int|None=Field(default=None,ge=1)
 class SupplierTermOut(Strict):
-    constraint_id:str;ingredient_id:str;supplier_id:str;supplier:str;unit_cost:int;moq:Decimal;pack_size:Decimal;order_unit:str|None;lead_time_days:int;unit:str;version:int;active:bool
+    constraint_id:str;ingredient_id:str;supplier_id:str;supplier:str;unit_cost:int;moq:Decimal;pack_size:Decimal;order_unit:str|None;available_delivery_days:list[int]|None;lead_time_days:int;unit:str;version:int;active:bool
 class SupplierTermList(Strict): items:list[SupplierTermOut];page:int;page_size:int;total:int
 class InventoryConstraintOut(Strict):
     constraint_id:str;ingredient_id:str|None;ingredient_name:str|None
     constraint_type:str=Field(description="Registered business constraint type; determines scope, dimension, units, and value rules.")
     value:Decimal=Field(description="Canonical value for the constraint type (for example days or a 0..1 ratio).")
     unit:str|None=Field(description="Type-dependent canonical unit: physical quantity unit, day, ratio, or VND.")
+    currency:str|None=None
     effective_date:date;end_date:date|None;version:int;active:bool
 class InventoryConstraintList(Strict): store_id:str;as_of_date:date|None;items:list[InventoryConstraintOut]
+class InventoryConstraintCreateIn(Strict):
+    ingredient_id:str|None=None;constraint_type:str;value:Decimal=Field(allow_inf_nan=False);unit:str|None=None
+    currency:str|None=None;effective_date:date;note:str|None=Field(default=None,max_length=500)
+class InventoryConstraintPatchIn(Strict):
+    expected_version:int=Field(ge=1);value:Decimal=Field(allow_inf_nan=False);unit:str|None=None;currency:str|None=None
+    effective_date:date|None=None;note:str|None=Field(default=None,max_length=500)
+    correction_mode:Literal["replace_same_effective_date"]|None=None
+class InventoryConstraintDeactivateIn(Strict):expected_version:int=Field(ge=1);end_date:date;note:str|None=Field(default=None,max_length=500)
+class InventoryConstraintWriteItem(Strict):
+    constraint_id:str;store_id:str;ingredient_id:str|None;constraint_type:str;value:Decimal;unit:str|None;currency:str|None
+    effective_date:date;end_date:date|None;version:int;active:bool;note:str|None;superseded_by_constraint_id:str|None
+class InventoryConstraintHistoryItem(Strict):
+    constraint_id:str;version:int;effective_date:date;end_date:date|None;active:bool;superseded_by_constraint_id:str|None
+class InventoryConstraintWriteOut(Strict):constraint:InventoryConstraintWriteItem;history:list[InventoryConstraintHistoryItem]
 class POCreateLine(Strict): recommendation_id:str;order_quantity_override:Decimal|None=Field(default=None,ge=0,allow_inf_nan=False)
 class POCreateIn(Strict): plan_run_id:str;lines:list[POCreateLine]=Field(min_length=1)
 class POLineUpdate(Strict): po_line_id:str;order_quantity:Decimal=Field(gt=0,allow_inf_nan=False)
@@ -63,6 +78,15 @@ def supplier_get(store_id:str,s=Depends(get_completion_service)):return s.suppli
 @router.get("/stores/{store_id}/inventory-constraints",response_model=InventoryConstraintList)
 def inventory_constraints_get(store_id:str,ingredient_id:str|None=None,constraint_type:str|None=None,as_of_date:date|None=None,s=Depends(get_completion_service)):
  return s.inventory_constraints(store_id,ingredient_id,constraint_type,as_of_date)
+@router.post("/stores/{store_id}/inventory-constraints",status_code=201,response_model=InventoryConstraintWriteOut)
+def inventory_constraints_post(store_id:str,b:InventoryConstraintCreateIn,k=Depends(idem),s=Depends(get_completion_service)):
+ return s.inventory_constraint_write("create",store_id,b,k)
+@router.patch("/stores/{store_id}/inventory-constraints/{constraint_id}",response_model=InventoryConstraintWriteOut)
+def inventory_constraints_patch(store_id:str,constraint_id:str,b:InventoryConstraintPatchIn,k=Depends(idem),s=Depends(get_completion_service)):
+ return s.inventory_constraint_write("update",store_id,b,k,constraint_id)
+@router.post("/stores/{store_id}/inventory-constraints/{constraint_id}/deactivate",response_model=InventoryConstraintWriteOut)
+def inventory_constraints_deactivate(store_id:str,constraint_id:str,b:InventoryConstraintDeactivateIn,k=Depends(idem),s=Depends(get_completion_service)):
+ return s.inventory_constraint_write("deactivate",store_id,b,k,constraint_id)
 @router.post("/stores/{store_id}/supplier-constraints",status_code=201)
 def supplier_post(store_id:str,b:SupplierTermIn,k=Depends(idem),s=Depends(get_completion_service)):return s.write("supplier_create",store_id,b,k)
 @router.put("/stores/{store_id}/supplier-constraints/{constraint_id}")

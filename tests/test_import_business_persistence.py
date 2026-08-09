@@ -20,6 +20,7 @@ from app.models.business import (
 from app.models.import_normalized import ImportIssueModel, ImportJobModel
 from app.models.audit_log import AuditLogModel
 from app.services.business_persistence import ImportBusinessPersistenceService
+from app.services.business_persistence import normalize_delivery_days
 
 
 def upload_confirm_process(client, csv: bytes, mapping: dict[str, str], sheet_type: str, *, name="data.csv"):
@@ -141,7 +142,7 @@ def test_sales_aggregate_correction_and_completed_replay(client):
         assert session.scalar(select(func.count()).select_from(ProductModel)) == 1
         job = session.get(ImportJobModel, body["import_id"])
         assert job.business_persisted_at is not None
-        assert job.business_schema_version == "20260728_0004"
+        assert job.business_schema_version == "20260804_0018"
         assert json.loads(job.business_write_summary_json)["sales_records_created"] == 1
     replay = client.post(f"/api/v1/imports/{body['import_id']}/process")
     assert replay.status_code == 200
@@ -297,13 +298,13 @@ def test_recipe_without_sku_rejects_ambiguous_product_name(client):
 
 
 def test_supplier_term_versioning_and_conversion(client):
-    mapping = {"supplier": "supplier_name", "ingredient": "ingredient_name", "moq": "minimum_order_quantity", "unit": "order_unit", "pack": "package_size", "base": "package_base_unit", "lead": "lead_time_days", "cost": "unit_price"}
-    first = b"supplier,ingredient,moq,unit,pack,base,lead,cost\nABC,Flour,1000,pack,500,g,2,20000\n"
+    mapping = {"supplier": "supplier_name", "ingredient": "ingredient_name", "moq": "minimum_order_quantity", "unit": "order_unit", "pack": "package_size", "base": "package_base_unit", "lead": "lead_time_days", "cost": "unit_price", "days": "available_delivery_days"}
+    first = b"supplier,ingredient,moq,unit,pack,base,lead,cost,days\nABC,Flour,1000,pack,500,g,2,20000,Monday;Wednesday\n"
     _, response = upload_confirm_process(client, first, mapping, "supplier_constraints")
     assert response.status_code == 200, response.text
     _, response = upload_confirm_process(client, first, mapping, "supplier_constraints", name="same-term.csv")
     assert response.status_code == 200
-    changed = b"supplier,ingredient,moq,unit,pack,base,lead,cost\nABC,Flour,2,bag,1,kg,3,21000\n"
+    changed = b"supplier,ingredient,moq,unit,pack,base,lead,cost,days\nABC,Flour,2,bag,1,kg,3,21000,Friday\n"
     _, response = upload_confirm_process(client, changed, mapping, "supplier_constraints", name="changed-term.csv")
     assert response.status_code == 200
     with client.app.state.session_factory() as session:
@@ -313,6 +314,8 @@ def test_supplier_term_versioning_and_conversion(client):
         assert terms[1].moq == Decimal("2000.000000")
         assert terms[0].order_unit == "pack"
         assert terms[1].order_unit == "bag"
+        assert json.loads(terms[0].available_delivery_days) == [0, 2]
+        assert json.loads(terms[1].available_delivery_days) == [4]
         assert not terms[0].active and terms[1].active
 
 
@@ -358,6 +361,68 @@ def test_supplier_persistence_handles_missing_ingredient_base_unit(session_facto
         with pytest.raises(ValidationError) as caught:
             service._persist_supplier_constraints(job, sheet)
         assert caught.value.details["field"] == "package_base_unit"
+
+
+def test_row_issue_policies_atomic_partial_and_preview(client):
+    mapping = {"day": "date", "ingredient": "ingredient_name", "qty": "quantity_used", "unit": "unit"}
+    invalid = b"day,ingredient,qty,unit\n2026-01-01,Milk,,l\n2026-01-02,,2,l\n"
+    body, response = upload_confirm_process(client, invalid, mapping, "usage_history", name="invalid-rows.csv")
+    assert response.status_code == 422
+    issues = response.json()["details"]["issues"]
+    assert {item["field"] for item in issues} == {"quantity_used", "ingredient_name"}
+    assert all({"sheet", "row_number", "code", "raw_value", "remediation"} <= item.keys() for item in issues)
+    with client.app.state.session_factory() as session:
+        assert session.scalar(select(func.count()).select_from(UsageDailyModel)) == 0
+        assert session.scalar(select(func.count()).select_from(ImportIssueModel).where(
+            ImportIssueModel.import_id == body["import_id"],
+            ImportIssueModel.issue_source == "row_validation")) == 2
+
+    mixed = b"day,ingredient,qty,unit\n2026-01-01,Milk,1,l\n2026-01-02,,2,l\n"
+    created = client.post("/api/v1/imports", data={"store_id": "STORE_001", "forecast_date": "2026-01-01"},
+        files={"files": ("partial.csv", mixed, "text/csv")}).json()
+    assert client.post(f"/api/v1/imports/{created['import_id']}/confirm", json={"mappings": [{
+        "sheet_id": created["sheets"][0]["sheet_id"], "sheet_type": "usage_history", "column_mapping": mapping}]}).status_code == 200
+    partial = client.post(f"/api/v1/imports/{created['import_id']}/process?policy=partial_success")
+    assert partial.status_code == 200 and partial.json()["processing_policy"] == "partial_success"
+    assert len(partial.json()["issues"]) == 1
+
+    preview_csv = b"day,ingredient,qty,unit\n2026-01-03,Sugar,1,kg\n"
+    created = client.post("/api/v1/imports", data={"store_id": "STORE_001", "forecast_date": "2026-01-01"},
+        files={"files": ("preview.csv", preview_csv, "text/csv")}).json()
+    assert client.post(f"/api/v1/imports/{created['import_id']}/confirm", json={"mappings": [{
+        "sheet_id": created["sheets"][0]["sheet_id"], "sheet_type": "usage_history", "column_mapping": mapping}]}).status_code == 200
+    preview = client.post(f"/api/v1/imports/{created['import_id']}/process?policy=preview_only")
+    assert preview.status_code == 200 and preview.json()["status"] in {"confirmed", "mapped"}
+    with client.app.state.session_factory() as session:
+        assert session.scalar(select(UsageDailyModel).where(UsageDailyModel.ingredient_id != None)) is not None
+        assert session.scalar(select(IngredientModel).where(IngredientModel.normalized_name == "sugar")) is None
+
+
+def test_remaining_canonical_fields_are_persisted(client):
+    inventory = b"day,ingredient,qty,unit,warehouse\n2026-01-01,Milk,10,l,Cold Room\n"
+    assert upload_confirm_process(client, inventory, {"day":"snapshot_date","ingredient":"ingredient_name","qty":"on_hand","unit":"unit","warehouse":"warehouse_name"}, "inventory")[1].status_code == 200
+    usage = b"day,ingredient,qty,unit,source,waste\n2026-01-02,Milk,2,l,pos,0.25\n"
+    assert upload_confirm_process(client, usage, {"day":"date","ingredient":"ingredient_name","qty":"quantity_used","unit":"unit","source":"source","waste":"waste_quantity"}, "usage_history")[1].status_code == 200
+    recipe = b"product,ingredient,qty,unit,yield_qty,yield_unit,version,effective\nLatte,Milk,1,l,2,cup,1,2026-01-01\n"
+    assert upload_confirm_process(client, recipe, {"product":"product_name","ingredient":"ingredient_name","qty":"ingredient_quantity","unit":"ingredient_unit","yield_qty":"yield_quantity","yield_unit":"yield_unit","version":"recipe_version","effective":"effective_date"}, "recipes")[1].status_code == 200
+    purchase = b"day,ingredient,qty,unit,total,po\n2026-01-03,Milk,2,l,40000,PO-42\n"
+    assert upload_confirm_process(client, purchase, {"day":"purchase_date","ingredient":"ingredient_name","qty":"quantity_received","unit":"unit","total":"total_cost","po":"purchase_order_id"}, "purchase_history")[1].status_code == 200
+    with client.app.state.session_factory() as session:
+        lot = session.scalar(select(InventoryLotModel)); usage_row = session.scalar(select(UsageDailyModel))
+        recipe_row = session.scalar(select(RecipeVersionModel)); receipt = session.scalar(select(PurchaseReceiptModel))
+        assert lot.warehouse_name == "Cold Room"
+        assert usage_row.usage_source == "pos" and usage_row.waste_quantity == Decimal("0.250000")
+        assert recipe_row.yield_quantity == Decimal("2.000000") and recipe_row.yield_unit == "cup" and recipe_row.version == 1
+        assert receipt.total_cost == Decimal("40000.000000") and receipt.purchase_order_id == "PO-42"
+
+
+def test_delivery_schedule_normalization_and_arrival_adjustment():
+    assert normalize_delivery_days("Monday, Wednesday, 6") == [0, 2, 6]
+    service = __import__("app.services.procurement_planning_service", fromlist=["ProcurementPlanningService"]).ProcurementPlanningService(SimpleNamespace())
+    term = SimpleNamespace(lead_time_days=0, available_delivery_days=json.dumps([2]))
+    assert service._delivery_date(term, date(2026, 8, 3)) == (date(2026, 8, 5), True)
+    unavailable = SimpleNamespace(lead_time_days=0, available_delivery_days="[]")
+    assert service._delivery_date(unavailable, date(2026, 8, 3))[0] is None
 
 
 @pytest.mark.parametrize("raw,expected", [
