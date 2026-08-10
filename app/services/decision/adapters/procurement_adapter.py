@@ -3,16 +3,22 @@
 from __future__ import annotations
 
 from collections import defaultdict
+import pandas as pd
+from sqlalchemy import select
 
 from app.services.budget_resolver import BudgetResolver
 from app.services.procurement_planning_service import ProcurementPlanningService
+from app.models.operations import ForecastResidualModel
+from app.services.decision.adapters.bom_adapter import CoreBomAdapter
 from shelfcash_core.inventory.contracts import (
     InboundDelivery, InventoryDemandLine, InventoryDemandScenario, InventoryLot,
     InventorySimulationPolicy,
 )
 from shelfcash_core.inventory.stress import StressScenarioDefinition
+from shelfcash_core.inventory.simulator import simulate_inventory_scenarios
 from shelfcash_core.optimization.contracts import OptimizationRequest, SupplierOffer
 from shelfcash_core.optimization.optimizer import optimize_procurement
+from shelfcash_core.scenario.composer import generate_product_demand_scenarios
 
 
 class CoreProcurementAdapter:
@@ -27,7 +33,8 @@ class CoreProcurementAdapter:
         self.session = session
         self.legacy_state = ProcurementPlanningService(session)
 
-    def optimize(self, store_id, forecast, demand_rows, budget_override=None, use_open_purchase_orders=True):
+    def optimize(self, store_id, forecast, demand_rows, budget_override=None, use_open_purchase_orders=True, *,
+                 predictions=None, engine_mode="deterministic", scenario_count=100, seed=42, scenario_method="residual_bootstrap"):
         rows_by_ingredient = defaultdict(list)
         for row in demand_rows:
             rows_by_ingredient[row.ingredient_id].append(row)
@@ -62,7 +69,28 @@ class CoreProcurementAdapter:
                     lead_time_days=term.lead_time_days, available=True,
                 ))
         scenarios = []
-        for scenario_id, quantile in (("p25_design", "p25"), ("p50_design", "p50"), ("p75_design", "p75")):
+        scenario_metadata = {"method": "quantile_design_fallback", "stochastic_enabled": False, "warnings": ["SCENARIO_HISTORY_INSUFFICIENT"]}
+        if engine_mode == "stochastic" and predictions:
+            residuals = list(self.session.scalars(select(ForecastResidualModel).where(ForecastResidualModel.store_id == store_id)))
+            if residuals:
+                frame = pd.DataFrame([{"forecast_origin": r.forecast_origin, "target_date": r.target_date, "horizon": r.horizon,
+                    "store_id": r.store_id, "product_id": r.product_id, "actual": float(r.actual_value), "p25": float(r.predicted_p25),
+                    "p50": float(r.predicted_p50), "p75": float(r.predicted_p75), "raw_residual": float(r.residual),
+                    "scaled_residual": float(r.residual) / max(float(r.predicted_p75-r.predicted_p25), 1e-6),
+                    "target_train_eligible": True, "residual_source": "walk_forward_oos"} for r in residuals])
+                try:
+                    bundle = generate_product_demand_scenarios(CoreBomAdapter(self.session).forecast_package(store_id, forecast, predictions), frame, n_scenarios=scenario_count, seed=seed, method=scenario_method)
+                    ingredient_bundle = CoreBomAdapter(self.session).expand_scenarios(store_id, forecast, predictions, bundle)
+                    scenarios = [InventoryDemandScenario(scenario_id=x.scenario_id, probability_weight=x.probability_weight,
+                        simulation_start_date=decision_date, simulation_end_date=horizon_end,
+                        lines=[InventoryDemandLine(scenario_id=x.scenario_id, store_id=store_id, ingredient_id=line.ingredient_id, target_date=line.target_date, quantity=line.quantity, unit=line.unit) for line in x.lines],
+                        provenance={"scenario_kind": bundle.scenario_method, **bundle.diagnostics}, warnings=x.warnings) for x in ingredient_bundle.scenarios]
+                    scenario_metadata = {"method": bundle.scenario_method, "stochastic_enabled": True, "warnings": bundle.warnings, "diagnostics": bundle.diagnostics}
+                except Exception:
+                    # Data insufficiency is an expected business fallback; preserve only the explicit warning.
+                    scenario_metadata = {"method": "quantile_design_fallback", "stochastic_enabled": False, "warnings": ["SCENARIO_HISTORY_INSUFFICIENT"]}
+        if not scenarios:
+          for scenario_id, quantile in (("p25_design", "p25"), ("p50_design", "p50"), ("p75_design", "p75")):
             scenarios.append(InventoryDemandScenario(
                 scenario_id=scenario_id, probability_weight=None,
                 simulation_start_date=decision_date, simulation_end_date=horizon_end,
@@ -87,6 +115,13 @@ class CoreProcurementAdapter:
                 StressScenarioDefinition(stress_id="supplier_delay_2d", supplier_delay_days=2),
                 StressScenarioDefinition(stress_id="demand_plus_20_delay_2d", demand_multiplier=1.2, supplier_delay_days=2),
             ],
-            stochastic=False, seed=42,
+            stochastic=scenario_metadata["stochastic_enabled"], seed=seed,
         )
-        return optimize_procurement(request), request
+        self.scenario_metadata = scenario_metadata
+        # Baseline is deliberately exact FEFO and happens before optimization.
+        baseline = simulate_inventory_scenarios(
+            request.initial_inventory, request.demand_scenarios, request.existing_inbound,
+            policy=request.inventory_policy, simulation_start_date=decision_date,
+            simulation_end_date=horizon_end,
+        )
+        return optimize_procurement(request), request, baseline, scenario_metadata

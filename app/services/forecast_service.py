@@ -9,10 +9,12 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from uuid import uuid4
 
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
 from app.core.exceptions import ForecastError, InsufficientTrainingDataError, ModelNotReadyError
-from app.models.operations import ForecastModelVersionModel, ForecastPredictionModel, ForecastRunModel
+from app.models.operations import ForecastModelVersionModel, ForecastPredictionModel, ForecastRunModel, ForecastResidualModel
+from app.models.business import SalesDailyModel
 from app.repositories.audit_logs import AuditLogRepository
 from app.repositories.forecast_data import ForecastDataRepository
 from app.repositories.forecasts import ForecastRepository
@@ -168,6 +170,7 @@ class ForecastService:
                         target_date=p.target_date, horizon=p.horizon, p25=p.p25, p50=p.p50, p75=p.p75,
                         interval_lower=p.interval_lower, interval_upper=p.interval_upper, baseline_p50=p.baseline_p50,
                         calibration_source=p.calibration_source, warnings_json=_json(p.warnings), created_at=_now()))
+                self._persist_realized_residuals(session, body.store_id, body.cutoff_date)
                 run.status="completed"; run.engine_status="forecast_core"; run.warnings_json=_json(package.warnings); run.completed_at=_now()
                 AuditService(AuditLogRepository(session)).record(store_id=body.store_id, action="forecast_generated",
                     resource_type="forecast_run", resource_id=run_id, after={"model_version": version, "predictions": len(package.predictions)}, source="forecast_service")
@@ -180,6 +183,31 @@ class ForecastService:
                 if run: run.status="failed"; run.failure_code=self._code(exc); run.failure_message=str(exc)[:500]; run.completed_at=_now(); session.commit()
             logger.exception("forecast_inference_failed request_id=%s store_id=%s model_version=%s forecast_run_id=%s duration=%.3f", request_id, body.store_id, version, run_id, time.monotonic()-started)
             self._raise_core(exc, training=False)
+
+    @staticmethod
+    def _persist_realized_residuals(session, store_id, as_of_date):
+        """Persist only forecast/actual pairs that are already observable.
+
+        This is intentionally invoked during normal forecast operation instead
+        of fabricating history at decision time.
+        """
+        existing = select(ForecastResidualModel.forecast_run_id, ForecastResidualModel.product_id,
+                          ForecastResidualModel.target_date, ForecastResidualModel.horizon)
+        known = set(session.execute(existing).all())
+        rows = session.execute(select(ForecastPredictionModel, ForecastRunModel, SalesDailyModel)
+            .join(ForecastRunModel, ForecastRunModel.forecast_run_id == ForecastPredictionModel.forecast_run_id)
+            .join(SalesDailyModel, (SalesDailyModel.store_id == ForecastPredictionModel.store_id) &
+                  (SalesDailyModel.product_id == ForecastPredictionModel.product_id) &
+                  (SalesDailyModel.date == ForecastPredictionModel.target_date))
+            .where(ForecastPredictionModel.store_id == store_id, ForecastPredictionModel.target_date <= as_of_date,
+                   ForecastRunModel.status == "completed")).all()
+        for prediction, run, sale in rows:
+            key=(prediction.forecast_run_id,prediction.product_id,prediction.target_date,prediction.horizon)
+            if key not in known:
+                session.add(ForecastResidualModel(residual_id=str(uuid4()), store_id=store_id, forecast_run_id=prediction.forecast_run_id,
+                    product_id=prediction.product_id, target_date=prediction.target_date, horizon=prediction.horizon,
+                    actual_value=sale.quantity, predicted_p25=prediction.p25, predicted_p50=prediction.p50, predicted_p75=prediction.p75,
+                    residual=sale.quantity-prediction.p50, forecast_origin=run.cutoff_date, model_version=run.model_version, created_at=_now()))
 
     def create_legacy_run(self, store_id, body, idempotency_key=None, request_id=None):
         """Adapter for the canonical store-scoped frontend contract."""

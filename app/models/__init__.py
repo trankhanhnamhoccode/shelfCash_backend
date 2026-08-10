@@ -33,6 +33,7 @@ __all__ = [
 ]
 from app.models.operations import (BudgetPeriodModel, ForecastModelVersionModel,
     ForecastPredictionModel, ForecastRunModel, PlanRunModel, PurchaseOrderLineModel,
-    PurchaseOrderModel, RecommendationModel)
+    PurchaseOrderModel, RecommendationModel, ForecastResidualModel)
 from app.models.planning import (IngredientDemandPredictionModel, IngredientDemandRunModel,
     ProcurementPlanLineModel, ProcurementPlanModel, ProcurementPlanRunModel)
+from app.models.decision import DecisionRunModel

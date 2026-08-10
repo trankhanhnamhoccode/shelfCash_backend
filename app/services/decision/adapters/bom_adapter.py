@@ -11,6 +11,7 @@ from app.models.business import IngredientModel
 from app.repositories.recipes import RecipeRepository
 from shelfcash_core.bom.engine import propagate_ingredient_demand
 from shelfcash_core.contracts import ForecastPackage, ForecastPrediction
+from shelfcash_core.scenario.bom import propagate_ingredient_demand_scenarios
 from shelfcash_core.exceptions import BOMError
 
 
@@ -22,7 +23,33 @@ class CoreBomAdapter:
         self.recipes = RecipeRepository(session)
 
     def expand(self, store_id, forecast_run, predictions, ingredient_scope=None):
-        forecast = ForecastPackage(
+        forecast = self.forecast_package(store_id, forecast_run, predictions)
+        recipe_rows = self.recipe_frame(store_id, predictions)
+        resolved_ingredient_ids = {row["ingredient_id"] for row in recipe_rows}
+        # Preserve the established scoped-demand contract.  A valid forecast
+        # may deliberately ask for ingredients outside its active BOM.
+        if ingredient_scope and not (set(ingredient_scope) & resolved_ingredient_ids):
+            return []
+        try:
+            package = propagate_ingredient_demand(forecast, pd.DataFrame(recipe_rows))
+        except BOMError as exc:
+            raise PlanningError(exc.code, str(exc), exc.details) from exc
+        fatal_issues = [issue for issue in package.issues if not issue.recoverable]
+        if fatal_issues:
+            issue = fatal_issues[0]
+            raise PlanningError(issue.code, issue.message, issue.details)
+        package_warnings = [*package.warnings, *(issue.code for issue in package.issues)]
+        scope = set(ingredient_scope or [])
+        return [{"ingredient_id": item.ingredient_id, "ingredient_name": item.ingredient_name or item.ingredient_id,
+                 "target_date": item.target_date, "horizon": next(row.horizon for row in predictions if row.target_date == item.target_date),
+                 "unit": item.unit, "p25": item.p25, "p50": item.p50, "p75": item.p75,
+                 "source_product_count": len({source.product_id for source in item.sources}),
+                 "contributions": [self._legacy_contribution(source) for source in item.sources],
+                 "warnings": sorted(set([*item.warnings, *package_warnings]))}
+                for item in package.predictions if not scope or item.ingredient_id in scope]
+
+    def forecast_package(self, store_id, forecast_run, predictions):
+        return ForecastPackage(
             forecast_date=forecast_run.cutoff_date,
             forecast_horizon=forecast_run.horizon_days,
             model_version=forecast_run.model_version or "unknown",
@@ -46,8 +73,8 @@ class CoreBomAdapter:
                 for row in predictions
             ],
         )
+    def recipe_frame(self, store_id, predictions):
         recipe_rows = []
-        resolved_ingredient_ids = set()
         for row in predictions:
             active = self.recipes.get_active(store_id, row.product_id, row.target_date)
             if active is None:
@@ -80,36 +107,14 @@ class CoreBomAdapter:
                     "effective_from": active.effective_from,
                     "effective_to": active.effective_to,
                 })
-                resolved_ingredient_ids.add(line.ingredient_id)
-        # Preserve the established scoped-demand contract.  A valid forecast
-        # may deliberately ask for ingredients outside its active BOM.
-        if ingredient_scope and not (set(ingredient_scope) & resolved_ingredient_ids):
-            return []
+        return recipe_rows
+
+    def expand_scenarios(self, store_id, forecast_run, predictions, product_scenarios):
+        """Batch scenario BOM propagation; recipes are resolved once from ORM."""
         try:
-            package = propagate_ingredient_demand(forecast, pd.DataFrame(recipe_rows))
+            return propagate_ingredient_demand_scenarios(product_scenarios, pd.DataFrame(self.recipe_frame(store_id, predictions)))
         except BOMError as exc:
             raise PlanningError(exc.code, str(exc), exc.details) from exc
-        fatal_issues = [issue for issue in package.issues if not issue.recoverable]
-        if fatal_issues:
-            issue = fatal_issues[0]
-            raise PlanningError(issue.code, issue.message, issue.details)
-        package_warnings = [*package.warnings, *(issue.code for issue in package.issues)]
-        scope = set(ingredient_scope or [])
-        return [
-            {
-                "ingredient_id": item.ingredient_id,
-                "ingredient_name": item.ingredient_name or item.ingredient_id,
-                "target_date": item.target_date,
-                "horizon": next(row.horizon for row in predictions if row.target_date == item.target_date),
-                "unit": item.unit,
-                "p25": item.p25, "p50": item.p50, "p75": item.p75,
-                "source_product_count": len({source.product_id for source in item.sources}),
-                "contributions": [self._legacy_contribution(source) for source in item.sources],
-                "warnings": sorted(set([*item.warnings, *package_warnings])),
-            }
-            for item in package.predictions
-            if not scope or item.ingredient_id in scope
-        ]
 
     @staticmethod
     def _legacy_contribution(source):

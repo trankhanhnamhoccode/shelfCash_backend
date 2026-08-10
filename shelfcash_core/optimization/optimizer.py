@@ -59,14 +59,9 @@ def optimize_procurement(
             shelf_life_model=shelf_life_model,
         )
 
-    recommended = next(
-        (
-            name
-            for name in ("BALANCED", "PROTECTED", "LEAN")
-            if evaluations[name].critic.passed
-        ),
-        None,
-    )
+    # The profile is a policy preference, not a hard-coded recommendation.
+    valid = [(name, item) for name, item in evaluations.items() if item.critic.passed]
+    recommended = min(valid, key=lambda item: (item[1].plan.purchase_cost, item[0]))[0] if valid else None
     return OptimizationResult(
         request_id=request.request_id,
         evaluations=evaluations,
@@ -77,7 +72,7 @@ def optimize_procurement(
         provenance={
             "candidate_engine": "stochastic_saa" if use_stochastic else "deterministic_mip",
             "validation_engine": "m4_lot_level_fefo_v1",
-            "recommendation_rule": "BALANCED_then_PROTECTED_then_LEAN_if_valid",
+            "recommendation_rule": "lowest_exact_valid_candidate_cost_then_strategy_name",
             "no_valid_plan_reason": (
                 None if recommended is not None else "NO_VALID_PROCUREMENT_PLAN"
             ),

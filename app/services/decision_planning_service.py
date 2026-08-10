@@ -12,6 +12,7 @@ from app.models.operations import ForecastPredictionModel,ForecastRunModel,PlanR
 from app.models.business import IngredientModel,SupplierModel
 from app.models.planning import (IngredientDemandPredictionModel,IngredientDemandRunModel,
     ProcurementPlanLineModel,ProcurementPlanModel,ProcurementPlanRunModel)
+from app.models.decision import DecisionRunModel
 from app.repositories.audit_logs import AuditLogRepository
 from app.repositories.idempotency import IdempotencyRepository
 from app.repositories.planning import PlanningRepository
@@ -20,6 +21,7 @@ from app.services.audit_service import AuditService
 from app.services.idempotency_service import IdempotencyService
 from app.services.procurement_planning_service import ProcurementPlanningService
 from app.services.decision.adapters.bom_adapter import CoreBomAdapter
+from app.services.decision.adapters.procurement_adapter import CoreProcurementAdapter
 from app.schemas.planning import ProcurementPlansRequest
 
 def now():return datetime.now(timezone.utc)
@@ -28,7 +30,7 @@ logger=logging.getLogger("shelfcash.planning")
 LEGACY_STRATEGIES={"economy":"lean","balanced":"balanced","safe":"protected","lean":"lean","protected":"protected"}
 
 class DecisionPlanningService:
- def __init__(self,factory):self.factory=factory
+ def __init__(self,factory,settings=None):self.factory=factory;self.settings=settings
  def _forecast(self,s,store,run_id):
   StoreRepository(s).get_required(store);run=s.get(ForecastRunModel,run_id)
   if not run or run.store_id!=store:raise PlanningError("FORECAST_RUN_NOT_FOUND","Không tìm thấy forecast run.",{"forecast_run_id":run_id},http_status=404)
@@ -195,3 +197,87 @@ class DecisionPlanningService:
    "warnings":sorted(set(metadata["warnings"]+selected["warnings"])),"storage_capacity_trace":metrics.get("storage_capacity_trace",{}),
    "shelf_life_trace":metrics.get("shelf_life_trace",{}),
    "plan_lines":lines,"simulation_summary":selected["daily_projections"]}
+
+ def generate_decision(self,store,body,key=None):
+  """Run the core path and persist one self-contained Decision Package."""
+  mode=body.engine_mode or getattr(self.settings,"decision_engine_mode","legacy")
+  if mode=="legacy":
+   raise PlanningError("DECISION_ENGINE_LEGACY", "Use existing procurement-plan endpoints while DECISION_ENGINE_MODE=legacy.",http_status=409)
+  if body.as_of_date is None:raise PlanningError("FORECAST_INPUT_INVALID","as_of_date is required.")
+  endpoint=f"/api/v1/stores/{store}/decision-runs";payload=body.model_dump(mode="json");request_hash=canonical_hash(payload)
+  with self.factory() as s:
+   forecast,_=self._forecast(s,store,body.forecast_run_id)
+   if forecast.cutoff_date!=body.as_of_date:raise PlanningError("FORECAST_INPUT_INVALID","as_of_date must equal forecast cutoff_date.",{"as_of_date":body.as_of_date,"cutoff_date":forecast.cutoff_date})
+   if body.horizon_days!=forecast.horizon_days:raise PlanningError("FORECAST_INPUT_INVALID","horizon_days must equal forecast horizon.",{"horizon_days":body.horizon_days,"forecast_horizon":forecast.horizon_days})
+   if key:
+    replay=IdempotencyService(IdempotencyRepository(s)).register(store_id=store,endpoint=endpoint,http_method="POST",idempotency_key=key,request_hash=request_hash)
+    if replay.is_replay:
+     rid=replay.record.resource_id;s.rollback();return self.get_decision(rid)
+   demand_run=PlanningRepository(s).demand_run_for_forecast(forecast.forecast_run_id)
+  if not demand_run or demand_run.status!="completed":self.generate_demand(store,body.forecast_run_id)
+  with self.factory() as s:
+   forecast,predictions=self._forecast(s,store,body.forecast_run_id);demands=PlanningRepository(s).demand_predictions(PlanningRepository(s).demand_run_for_forecast(forecast.forecast_run_id).ingredient_demand_run_id)
+   if not demands:raise PlanningError("INGREDIENT_DEMAND_INCOMPLETE","No ingredient demand is available for decision.",http_status=409)
+   rid=str(uuid4());started=time.monotonic()
+   logger.info("decision_stage_started decision_run_id=%s store_id=%s stage=core_runner engine_mode=%s",rid,store,mode)
+   try:
+    result,request,baseline,scenario_metadata=CoreProcurementAdapter(s).optimize(store,forecast,demands,body.budget_override,body.include_open_purchase_orders,
+     predictions=predictions,engine_mode=mode,scenario_count=body.scenario_count or getattr(self.settings,"decision_scenario_count",100),seed=body.random_seed if body.random_seed is not None else getattr(self.settings,"decision_random_seed",42),scenario_method=getattr(self.settings,"decision_scenario_method","residual_bootstrap"))
+   except Exception as exc:
+    raise PlanningError("OPTIMIZATION_INFEASIBLE","Core decision execution failed.",{"reason":str(exc)[:500]},http_status=422) from exc
+   package=self._decision_package(rid,store,forecast,mode,result,request,baseline,demands,scenario_metadata)
+   run=DecisionRunModel(decision_run_id=rid,store_id=store,forecast_run_id=forecast.forecast_run_id,as_of_date=forecast.cutoff_date,horizon_days=forecast.horizon_days,engine_mode=mode,status=package["status"],scenario_method=package["technical_metrics"]["scenario_method"],scenario_count=package["technical_metrics"]["scenario_count"],random_seed=request.seed,recommended_strategy=package["recommended_strategy"],request_json=dump(payload),package_json=dump(package),warnings_json=dump(package["warnings"]),created_at=now(),completed_at=now())
+   s.add(run)
+   if key:
+    rec=IdempotencyRepository(s).get(store_id=store,endpoint=endpoint,http_method="POST",idempotency_key=key);rec.resource_type="decision_run";rec.resource_id=rid;rec.response_status=200
+   s.commit()
+   logger.info("decision_stage_completed decision_run_id=%s store_id=%s stage=core_runner duration_ms=%d scenario_count=%s optimizer_type=%s warning_count=%d",rid,store,int((time.monotonic()-started)*1000),package["technical_metrics"]["scenario_count"],package["technical_metrics"]["optimizer_type"],len(package["warnings"]))
+  return package
+
+ def get_decision(self,rid):
+  with self.factory() as s:
+   run=s.get(DecisionRunModel,rid)
+   if not run:raise PlanningError("DECISION_RUN_NOT_FOUND","Decision run not found.",{"decision_run_id":rid},http_status=404)
+   return json.loads(run.package_json)
+
+ def explain_decision(self,rid,body):
+  """Evidence-only deterministic explanation; an unavailable LLM never blocks it."""
+  package=self.get_decision(rid); reasons=package.get("reason_codes",[]); messages=[]
+  mapping={"PACK_SIZE_ROUNDING":"Số lượng đặt được làm tròn theo quy cách đóng gói của nhà cung cấp.",
+           "MOQ_ROUNDING":"Số lượng đặt được nâng lên để đáp ứng mức đặt tối thiểu.",
+           "STOCKOUT_RISK_HIGH":"Kế hoạch ưu tiên giảm nguy cơ thiếu hàng trong kỳ kế hoạch.",
+           "SUPPLIER_DELAY_SENSITIVITY":"Độ trễ giao hàng làm kế hoạch nhạy cảm hơn với thiếu hàng."}
+  for reason in reasons:
+   if reason.get("code") in mapping: messages.append(mapping[reason["code"]])
+  if not messages: messages.append("Kế hoạch dựa trên forecast, BOM, tồn kho theo lô và các ràng buộc nhà cung cấp hiện có.")
+  return {"source":"template","language":body.language,"detail_level":body.detail_level,"summary":" ".join(messages),"why_this_plan":messages,"main_risks":package.get("warnings",[]),"tradeoffs":[],"important_assumptions":["Forecast is uncertain and does not guarantee demand."]}
+
+ def what_if_decision(self,rid,body):
+  # The persisted package is immutable.  Demand/delay-only requests expose the
+  # stress-equivalent comparison without changing canonical lots or POs.
+  baseline=self.get_decision(rid); selected=(body.strategy or baseline.get("recommended_strategy") or "balanced").lower()
+  candidate=baseline.get("strategies",{}).get(selected,{})
+  scenario_metrics=dict(candidate.get("business_metrics",baseline.get("business_metrics",{})))
+  scenario_metrics["projected_purchase_cost"]=candidate.get("purchase_cost")
+  scenario={"strategy":selected,"business_metrics":scenario_metrics}
+  warnings=["WHAT_IF_READ_ONLY", "WHAT_IF_REQUIRES_RERUN_FOR_REOPTIMIZATION"]
+  if body.demand_multiplier != 1 or body.supplier_delay_days:
+   stress=next((x for x in baseline.get("stress_tests",[]) if isinstance(x,dict)),None)
+   if stress: scenario["stress_equivalent"] = stress
+   warnings.append("WHAT_IF_USES_PERSISTED_EXACT_STRESS_WHEN_AVAILABLE")
+  return {"baseline":{"decision_run_id":rid,"business_metrics":baseline.get("business_metrics",{})},"scenario":scenario,"delta":{},"warnings":warnings}
+
+ @staticmethod
+ def _decision_package(rid,store,forecast,mode,result,request,baseline,demands,scenario_metadata=None):
+  def metric(sim):
+   risk=sim.risk_metrics
+   return {"stockout_probability":risk.any_stockout_probability if risk else None,"expected_fill_rate":risk.mean_key_fill_rate if risk else None,"expected_shortage":sum(x.expected_shortage for x in risk.by_key) if risk else None,"expected_waste_quantity":sum(x.expected_expired_quantity+x.expected_explicit_waste for x in risk.by_key) if risk else None,"days_of_supply":None if not risk else next((x.expected_days_of_supply for x in risk.by_key if x.expected_days_of_supply is not None),None)}
+  scenario_metadata=scenario_metadata or {};strategies={};warnings=set(scenario_metadata.get("warnings",[]));recommended=result.recommended_strategy.lower() if result.recommended_strategy else None
+  for name,evaluation in result.evaluations.items():
+   sim=evaluation.simulation;critic=evaluation.critic;warnings.update(evaluation.plan.warnings);warnings.update(critic.warnings)
+   strategies[name.lower()]={"strategy":name.lower(),"is_feasible":critic.passed,"purchase_cost":evaluation.plan.purchase_cost,"expected_recourse_cost":evaluation.plan.expected_recourse_cost,"business_metrics":metric(sim) if sim else {},"items":[x.model_dump(mode="json") for x in evaluation.plan.orders],"critic":{"status":"pass" if critic.passed else "fail","findings":[{"code":x,"severity":"error","evidence":{}} for x in critic.hard_violations],"warnings":critic.warnings,"checks":critic.checks,"details":critic.details},"stress_tests":evaluation.stress_simulation.model_dump(mode="json") if evaluation.stress_simulation else None,"technical_metrics":evaluation.plan.provenance}
+  selected=strategies.get(recommended or "",{});status="completed" if recommended else "completed_with_no_feasible_recommendation"
+  reasons=[]
+  for item in selected.get("items",[]):
+   if item.get("pack_count",0) and item.get("order_quantity",0) > 0: reasons.append({"code":"PACK_SIZE_ROUNDING","entity_id":item.get("ingredient_id"),"evidence":{"pack_size":item.get("pack_size"),"final_order_quantity":item.get("order_quantity")}})
+  return {"decision_run_id":rid,"store_id":store,"as_of_date":forecast.cutoff_date.isoformat(),"horizon_days":forecast.horizon_days,"status":status,"engine_mode":mode,"recommended_strategy":recommended,"business_metrics":{"projected_purchase_cost":selected.get("purchase_cost"),**selected.get("business_metrics",{})},"recommended_plan":{"items":selected.get("items",[])},"ingredient_demand":[{"ingredient_id":x.ingredient_id,"target_date":x.target_date.isoformat(),"unit":x.unit,"p25":float(x.p25),"p50":float(x.p50),"p75":float(x.p75),"contributions":json.loads(x.contributions_json)} for x in demands],"inventory_risk":baseline.model_dump(mode="json"),"strategies":strategies,"stress_tests":selected.get("stress_tests") or [],"critic":selected.get("critic",{}),"reason_codes":reasons,"warnings":sorted(warnings),"technical_metrics":{"scenario_count":len(request.demand_scenarios),"scenario_method":scenario_metadata.get("method","quantile_design_fallback"),"random_seed":request.seed,"optimizer_type":result.provenance["candidate_engine"],"cvar_alpha":None,"core_version":"local","stochastic_saa_enabled":scenario_metadata.get("stochastic_enabled",False),"baseline_engine":"lot_level_fefo_v1","scenario_diagnostics":scenario_metadata.get("diagnostics",{})}}

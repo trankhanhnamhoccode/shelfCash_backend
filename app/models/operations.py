@@ -63,6 +63,25 @@ class ForecastPredictionModel(Base):
     warnings_json: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
+class ForecastResidualModel(Base):
+    """Only realized, out-of-sample forecast errors are eligible for SAA."""
+    __tablename__ = "forecast_residuals"
+    __table_args__ = (UniqueConstraint("forecast_run_id", "product_id", "target_date", "horizon", name="uq_forecast_residual_target"),)
+    residual_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    store_id: Mapped[str] = mapped_column(ForeignKey("stores.store_id"), nullable=False, index=True)
+    forecast_run_id: Mapped[str] = mapped_column(ForeignKey("forecast_runs.forecast_run_id", ondelete="CASCADE"), nullable=False, index=True)
+    product_id: Mapped[str] = mapped_column(ForeignKey("products.product_id"), nullable=False, index=True)
+    target_date: Mapped[date] = mapped_column(Date, nullable=False)
+    horizon: Mapped[int] = mapped_column(Integer, nullable=False)
+    actual_value: Mapped[Decimal] = mapped_column(Numeric(20, 6), nullable=False)
+    predicted_p25: Mapped[Decimal] = mapped_column(Numeric(20, 6), nullable=False)
+    predicted_p50: Mapped[Decimal] = mapped_column(Numeric(20, 6), nullable=False)
+    predicted_p75: Mapped[Decimal] = mapped_column(Numeric(20, 6), nullable=False)
+    residual: Mapped[Decimal] = mapped_column(Numeric(20, 6), nullable=False)
+    forecast_origin: Mapped[date] = mapped_column(Date, nullable=False)
+    model_version: Mapped[str | None] = mapped_column(String(128))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
 class PlanRunModel(Base):
     __tablename__="plan_runs"
     plan_run_id:Mapped[str]=mapped_column(String(36),primary_key=True);store_id:Mapped[str]=mapped_column(ForeignKey("stores.store_id"),index=True);forecast_run_id:Mapped[str]=mapped_column(ForeignKey("forecast_runs.forecast_run_id"))
