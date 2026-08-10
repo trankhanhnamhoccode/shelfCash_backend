@@ -6,7 +6,7 @@ from app.models.business import (CalendarFeatureModel,IngredientModel,InventoryL
     InventoryConstraintModel,InventoryMovementModel,ProductModel,RecipeLineModel,RecipeVersionModel,SalesDailyModel,
     SupplierIngredientTermModel,SupplierModel)
 from app.schemas.forecast import ForecastPredictRequest, ForecastTrainRequest
-from shelfcash_forecast import ForecastConfig
+from shelfcash_core import ForecastConfig
 
 
 def test_db_to_real_core_to_persisted_predictions(client, monkeypatch):

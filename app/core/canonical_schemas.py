@@ -14,6 +14,13 @@ CANONICAL_SCHEMAS = {
     "recipes": {
         "fields": ["product_sku", "product_name", "ingredient_name", "ingredient_quantity", "ingredient_unit", "yield_quantity", "yield_unit", "recipe_version", "effective_date"],
         "core_fields": ["product_name", "ingredient_name", "ingredient_quantity"],
+        "field_metadata": {
+            "recipe_version": {
+                "required": False,
+                "type": "positive_integer",
+                "description": "Optional internal sequential version. Leave blank to let the backend assign the next version.",
+            },
+        },
     },
     "purchase_history": {
         "fields": ["purchase_date", "ingredient_name", "quantity_received", "unit", "unit_price", "total_cost", "supplier_name", "expiry_date", "batch_id", "purchase_order_id"],

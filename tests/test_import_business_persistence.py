@@ -416,6 +416,38 @@ def test_remaining_canonical_fields_are_persisted(client):
         assert receipt.total_cost == Decimal("40000.000000") and receipt.purchase_order_id == "PO-42"
 
 
+def test_recipe_import_blank_version_auto_versions(client):
+    mapping = {"product":"product_name", "ingredient":"ingredient_name", "qty":"ingredient_quantity", "unit":"ingredient_unit", "version":"recipe_version", "effective":"effective_date"}
+    first = b"product,ingredient,qty,unit,version,effective\nAuto Tea,Sugar,1,kg,,2026-01-01\n"
+    assert upload_confirm_process(client, first, mapping, "recipes", name="recipe-auto-1.csv")[1].status_code == 200
+    second = b"product,ingredient,qty,unit,version,effective\nAuto Tea,Sugar,2,kg,,2026-02-01\n"
+    assert upload_confirm_process(client, second, mapping, "recipes", name="recipe-auto-2.csv")[1].status_code == 200
+    with client.app.state.session_factory() as session:
+        product = session.scalar(select(ProductModel).where(ProductModel.normalized_name == "auto tea"))
+        versions = list(session.scalars(select(RecipeVersionModel).where(RecipeVersionModel.product_id == product.product_id).order_by(RecipeVersionModel.version)))
+        assert [item.version for item in versions] == [1, 2]
+
+
+def test_recipe_import_semver_returns_structured_issue_not_500(client):
+    mapping = {"product":"product_name", "ingredient":"ingredient_name", "qty":"ingredient_quantity", "unit":"ingredient_unit", "version":"recipe_version", "effective":"effective_date"}
+    invalid = b"product,ingredient,qty,unit,version,effective\nSemver Tea,Sugar,1,kg,v1.2,2026-01-01\n"
+    body, response = upload_confirm_process(client, invalid, mapping, "recipes", name="recipe-semver.csv")
+    assert response.status_code == 422, response.text
+    issue = response.json()["details"]["issues"][0]
+    assert issue["code"] == "INVALID_RECIPE_VERSION"
+    assert issue["field"] == "recipe_version"
+    assert issue["raw_value"] == "v1.2"
+    assert issue["sheet"] == "recipe-semver"
+    assert issue["row_number"] == 2
+    with client.app.state.session_factory() as session:
+        stored = session.scalar(select(ImportIssueModel).where(
+            ImportIssueModel.import_id == body["import_id"],
+            ImportIssueModel.code == "INVALID_RECIPE_VERSION",
+        ))
+        assert stored is not None
+        assert json.loads(stored.details_json)["raw_value"] == "v1.2"
+
+
 def test_delivery_schedule_normalization_and_arrival_adjustment():
     assert normalize_delivery_days("Monday, Wednesday, 6") == [0, 2, 6]
     service = __import__("app.services.procurement_planning_service", fromlist=["ProcurementPlanningService"]).ProcurementPlanningService(SimpleNamespace())

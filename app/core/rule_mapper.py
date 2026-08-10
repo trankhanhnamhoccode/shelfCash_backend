@@ -46,6 +46,7 @@ ALIASES = {
     "ingredient_quantity": ["dinh luong", "ingredient quantity"],
     "ingredient_unit": ["don vi nguyen lieu", "ingredient unit"],
     "yield_quantity": ["san luong", "yield quantity"],
+    "recipe_version": ["phien ban cong thuc", "recipe version", "version cong thuc"],
     "purchase_date": ["ngay nhap", "purchase date"],
     "quantity_received": ["so luong nhap", "sl nhap", "quantity received"],
     "unit_price": ["don gia", "gia mua", "unit price"],

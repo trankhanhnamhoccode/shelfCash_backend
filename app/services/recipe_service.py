@@ -4,7 +4,8 @@ from datetime import date, timedelta
 from decimal import Decimal
 from uuid import uuid4
 
-from app.core.exceptions import ValidationError
+from app.core.exceptions import ValidationError, VersionConflictError
+from app.core.recipe_versions import normalize_recipe_version
 from app.core.units import normalize_unit, validate_compatible
 from app.models.business import RecipeLineModel, RecipeVersionModel
 from app.repositories.business import CatalogRepository
@@ -55,8 +56,12 @@ class RecipeVersionService:
                 raise ValidationError("Effective date gây overlapping hoặc backdated recipe.")
         previous = versions[-1] if versions else None
         next_version=previous.version+1 if previous else 1
-        if requested_version is not None and int(requested_version)!=next_version:
-            raise ValidationError("recipe_version does not match the next canonical version.",{"requested_version":requested_version,"next_version":next_version})
+        normalized_requested_version = normalize_recipe_version(requested_version)
+        if normalized_requested_version is not None and normalized_requested_version != next_version:
+            raise VersionConflictError(
+                "recipe_version does not match the next canonical version.",
+                {"requested_version": normalized_requested_version, "next_version": next_version},
+            )
         if previous and previous.effective_to is None:
             previous.effective_to = effective_from - timedelta(days=1)
         model = RecipeVersionModel(

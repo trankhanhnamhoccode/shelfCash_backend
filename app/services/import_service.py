@@ -500,7 +500,7 @@ class ImportService:
                         import_id=import_id,
                         profile_id=profile.profile_id,
                         issue_source="row_validation",
-                        row_errors=validation["errors"],
+                        row_errors=validation_for_report,
                     )
 
                 canonical = CanonicalResult(

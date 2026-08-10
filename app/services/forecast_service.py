@@ -21,8 +21,8 @@ from app.repositories.stores import StoreRepository
 from app.services.audit_service import AuditService
 from app.services.idempotency_service import IdempotencyService
 from app.core.provenance import canonical_hash
-from shelfcash_forecast import ForecastConfig, predict_demand, train_forecast_core
-from shelfcash_forecast.exceptions import ArtifactError, DataValidationError, FeatureSchemaError, FeatureTypeError, InsufficientDataError
+from shelfcash_core import ForecastConfig, predict_demand, train_forecast_core
+from shelfcash_core.exceptions import ArtifactError, DataValidationError, FeatureSchemaError, FeatureTypeError, InsufficientDataError
 
 logger = logging.getLogger("shelfcash.forecast")
 REQUIRED_ARTIFACTS = {"model_q25.txt", "model_q50.txt", "model_q75.txt", "calibrator.json",
@@ -52,6 +52,15 @@ class ForecastService:
 
     def _config(self): return ForecastConfig(horizons=tuple(range(1, self.settings.forecast_max_horizon + 1)))
 
+    def _core_config(self):
+        """Accept a temporarily monkey-patched legacy config during migration."""
+        config = self._config()
+        if isinstance(config, ForecastConfig):
+            return config
+        if hasattr(config, "to_dict"):
+            return ForecastConfig.from_dict(config.to_dict())
+        raise TypeError("Forecast configuration must be a ShelfCash Core contract.")
+
     def train(self, body, request_id=None):
         started = time.monotonic(); version = body.model_version or self.settings.forecast_default_model_version
         history_days = body.history_days or self.settings.forecast_history_days
@@ -77,7 +86,7 @@ class ForecastService:
             self._raise_core(exc, training=True)
         try:
             result = train_forecast_core({"sales_history": sales, "calendar_features": calendar}, staging,
-                                         config=self._config(), model_version=version)
+                                         config=self._core_config(), model_version=version)
             missing = REQUIRED_ARTIFACTS - {p.name for p in staging.iterdir()}
             if missing: raise ArtifactError(f"Thiếu artifacts: {sorted(missing)}")
             final.parent.mkdir(parents=True, exist_ok=True)

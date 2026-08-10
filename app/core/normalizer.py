@@ -56,6 +56,15 @@ def normalize_number(value: Any) -> int | float | None:
 
 
 def normalize_value(field: str, value: Any) -> Any:
+    if field == "recipe_version":
+        from app.core.exceptions import ValidationError
+        from app.core.recipe_versions import normalize_recipe_version
+        try:
+            return normalize_recipe_version(value)
+        except ValidationError:
+            # Preserve invalid input so row validation can report its exact value
+            # together with sheet and Excel row context.
+            return value
     if field == "order_unit":
         if value is None or str(value).strip() == "":
             return None

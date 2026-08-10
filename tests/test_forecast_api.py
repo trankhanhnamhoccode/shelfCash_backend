@@ -89,7 +89,7 @@ def test_legacy_artifact_missing_ownership_and_empty_completed_result(client):
 
 
 def test_predict_persists_and_get_does_not_infer(client, monkeypatch):
-    from shelfcash_forecast.contracts import ForecastPackage, ForecastPrediction
+    from shelfcash_core.contracts import ForecastPackage, ForecastPrediction
     sf=client.app.state.session_factory; root=client.app.state.settings.forecast_artifact_root
     artifact=root/"STORE_001"/"v1"; artifact.mkdir(parents=True, exist_ok=True)
     with sf() as s:

@@ -8,7 +8,7 @@ from alembic.config import Config
 from sqlalchemy import create_engine, inspect, select
 from sqlalchemy.exc import IntegrityError
 
-from app.core.exceptions import ResourceNotFoundError, ValidationError
+from app.core.exceptions import ResourceNotFoundError, ValidationError, VersionConflictError
 from app.core.names import display_name, normalize_name
 from app.core.units import convert_quantity, normalize_unit, unit_dimension
 from app.models.business import (
@@ -165,6 +165,22 @@ def test_recipe_hash_versions_and_previous_effective_to(seeded):
         v2 = service.create_version("STORE_001", product.product_id, date(2026, 2, 1), [{"ingredient_id": ingredient.ingredient_id, "quantity": "0.2", "unit": "kg"}])
         assert v2.version == 2
         assert v1.effective_to == date(2026, 1, 31)
+
+
+def test_recipe_requested_version_contract_and_auto_increment(seeded):
+    with seeded() as session:
+        _, ingredient, product, _ = _catalog(session)
+        service = RecipeVersionService(RecipeRepository(session))
+        line = {"ingredient_id": ingredient.ingredient_id, "quantity": "0.1", "unit": "kg"}
+        first = service.create_version("STORE_001", product.product_id, date(2026, 1, 1), [line], requested_version=None)
+        second = service.create_version("STORE_001", product.product_id, date(2026, 2, 1), [{**line, "quantity": "0.2"}], requested_version=None)
+        third = service.create_version("STORE_001", product.product_id, date(2026, 3, 1), [{**line, "quantity": "0.3"}], requested_version="3")
+        fourth = service.create_version("STORE_001", product.product_id, date(2026, 4, 1), [{**line, "quantity": "0.4"}], requested_version="v4")
+        assert [first.version, second.version, third.version, fourth.version] == [1, 2, 3, 4]
+        with pytest.raises(VersionConflictError):
+            service.create_version("STORE_001", product.product_id, date(2026, 5, 1), [{**line, "quantity": "0.5"}], requested_version="8")
+        with pytest.raises(ValidationError):
+            service.create_version("STORE_001", product.product_id, date(2026, 5, 1), [{**line, "quantity": "0.5"}], requested_version="v1.2")
 
 
 def test_recipe_rejects_duplicate_cross_store_dimension_and_backdate(seeded):

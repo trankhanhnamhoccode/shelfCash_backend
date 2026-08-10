@@ -40,6 +40,7 @@ def import_schemas():
                 "label": "Danh mục Menu" if key == "menu" else key.replace("_", " ").title(),
                 "fields": value["fields"],
                 "core_fields": value["core_fields"],
+                "field_metadata": value.get("field_metadata", {}),
             }
             for key, value in CANONICAL_SCHEMAS.items()
             if key != "unknown"

@@ -1,6 +1,8 @@
 from typing import Any
 
 from app.core.canonical_schemas import CANONICAL_SCHEMAS
+from app.core.exceptions import ValidationError
+from app.core.recipe_versions import normalize_recipe_version
 
 
 def validate_records(sheet_type: str, records: list[dict[str, Any]]) -> dict[str, Any]:
@@ -8,6 +10,22 @@ def validate_records(sheet_type: str, records: list[dict[str, Any]]) -> dict[str
     errors = []
     for index, record in enumerate(records):
         missing = [field for field in core if record.get(field) is None or record.get(field) == ""]
+        if sheet_type == "recipes":
+            try:
+                record["recipe_version"] = normalize_recipe_version(record.get("recipe_version"))
+            except ValidationError:
+                value = record.get("recipe_version")
+                errors.append({
+                    "sheet": record.get("_source_sheet"),
+                    "row": index + 1,
+                    "row_number": record.get("_source_excel_row", index + 1),
+                    "field": "recipe_version",
+                    "code": "INVALID_RECIPE_VERSION",
+                    "message": "recipe_version must be a positive integer such as 1, 2, 3",
+                    "raw_value": value,
+                    "value": value,
+                    "remediation": "Use a positive integer, optionally prefixed with 'v', or leave blank for automatic versioning.",
+                })
         if sheet_type == "menu":
             from app.core.menu import components_empty
             item_type = record.get("item_type")

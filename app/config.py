@@ -32,6 +32,9 @@ class Settings(BaseSettings):
     forecast_default_model_version: str = "forecast-core-v0.1.0"
     forecast_history_days: int = 365
     forecast_max_horizon: int = 7
+    decision_engine_mode: str = "legacy"
+    decision_scenario_count: int = 100
+    decision_random_seed: int = 42
     database_url: str = "sqlite:///runtime/shelfcash.db"
     shelfcash_api_key: str = ""
     cors_origins: list[str] = ["http://localhost:5173", "http://localhost:3000"]

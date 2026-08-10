@@ -19,7 +19,7 @@ from app.repositories.stores import StoreRepository
 from app.services.audit_service import AuditService
 from app.services.idempotency_service import IdempotencyService
 from app.services.procurement_planning_service import ProcurementPlanningService
-from app.services.recipe_bom_service import RecipeBomService
+from app.services.decision.adapters.bom_adapter import CoreBomAdapter
 from app.schemas.planning import ProcurementPlansRequest
 
 def now():return datetime.now(timezone.utc)
@@ -48,7 +48,7 @@ class DecisionPlanningService:
    if not existing:s.add(demand_run);s.flush()
    try:
     scope=json.loads(run.scope_json or "{}").get("ingredient_ids",[])
-    rows=RecipeBomService(s).expand(store,predictions,scope)
+    rows=CoreBomAdapter(s).expand(store,run,predictions,scope)
     warnings=sorted({w for row in rows for w in row["warnings"]})
     if scope and not rows:warnings.append("INGREDIENT_SCOPE_NO_MATCH")
     for row in rows:s.add(IngredientDemandPredictionModel(ingredient_demand_prediction_id=str(uuid4()),ingredient_demand_run_id=demand_run.ingredient_demand_run_id,
