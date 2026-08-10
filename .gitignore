@@ -26,7 +26,7 @@ runtime/*.db
 runtime/*.xlsx
 *.db
 debug_inputs/
-models/
+
 artifacts/
 *.joblib
 *.pkl
