@@ -10,6 +10,7 @@ from shelfcash_core.optimization.contracts import (
     SupplierConstraint,
     SupplierOffer,
 )
+from shelfcash_core.optimization.model_data import supplier_arrival_date
 
 
 def validate_plan_constraints(
@@ -19,8 +20,9 @@ def validate_plan_constraints(
     *,
     budget: float | None = None,
     tolerance: float = 1e-8,
-) -> tuple[list[str], dict[str, bool]]:
+) -> tuple[list[str], dict[str, bool], dict[str, dict[str, object]]]:
     violations: list[str] = []
+    finding_evidence: dict[str, dict[str, object]] = {}
     offer_map = {offer.offer_id: offer for offer in offers}
     all_lines = [*plan.orders]
     for lines in plan.scenario_recourse_orders.values():
@@ -39,8 +41,34 @@ def validate_plan_constraints(
             violations.append(f"OFFER_IDENTITY:{line.offer_id}")
         if line.order_date != offer.order_date:
             violations.append(f"ORDER_DATE:{line.offer_id}")
-        if line.arrival_date != line.order_date + timedelta(days=offer.lead_time_days):
-            violations.append(f"LEAD_TIME:{line.offer_id}")
+        nominal_arrival = line.order_date + timedelta(days=offer.lead_time_days)
+        expected_arrival = supplier_arrival_date(offer)
+        if expected_arrival is None:
+            code = f"LEAD_TIME:{line.offer_id}"
+            violations.append(code)
+            finding_evidence[code] = {
+                "offer_id": offer.offer_id,
+                "order_date": line.order_date.isoformat(),
+                "lead_time_days": offer.lead_time_days,
+                "nominal_arrival_date": nominal_arrival.isoformat(),
+                "available_delivery_days": offer.available_delivery_days,
+                "expected_calendar_adjusted_arrival_date": None,
+                "actual_arrival_date": line.arrival_date.isoformat(),
+                "reason": "delivery_calendar_has_no_available_day",
+            }
+        elif line.arrival_date != expected_arrival:
+            code = f"LEAD_TIME:{line.offer_id}"
+            violations.append(code)
+            finding_evidence[code] = {
+                "offer_id": offer.offer_id,
+                "order_date": line.order_date.isoformat(),
+                "lead_time_days": offer.lead_time_days,
+                "nominal_arrival_date": nominal_arrival.isoformat(),
+                "available_delivery_days": offer.available_delivery_days,
+                "expected_calendar_adjusted_arrival_date": expected_arrival.isoformat(),
+                "actual_arrival_date": line.arrival_date.isoformat(),
+                "reason": "arrival_date_does_not_match_supplier_calendar",
+            }
         if not math.isclose(line.pack_size, offer.pack_size):
             violations.append(f"PACK_SIZE:{line.offer_id}")
         if not math.isclose(line.unit_price, offer.unit_price):
@@ -128,4 +156,5 @@ def validate_plan_constraints(
         "unit_compatibility": not any(
             item.startswith("UNIT_COMPATIBILITY") for item in unique
         ),
-    }
+        "lead_time": not any(item.startswith("LEAD_TIME") for item in unique),
+    }, finding_evidence

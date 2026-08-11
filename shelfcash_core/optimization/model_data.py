@@ -80,14 +80,19 @@ def _date_range(start: date, end: date) -> list[date]:
 
 
 def supplier_arrival_date(offer: SupplierOffer) -> date | None:
-    """Match the canonical supplier-term delivery-calendar semantics."""
+    """Return the canonical calendar-adjusted arrival used by solver and Critic.
+
+    An unrestricted offer arrives at its nominal lead-time date.  A configured
+    weekday calendar shifts that nominal date to its first allowed weekday;
+    an empty calendar has no valid arrival.
+    """
     nominal = offer.order_date + timedelta(days=offer.lead_time_days)
     if offer.available_delivery_days is None:
         return nominal
     allowed = set(offer.available_delivery_days)
     if not allowed:
         return None
-    for offset in range(14):
+    for offset in range(7):
         candidate = nominal + timedelta(days=offset)
         if candidate.weekday() in allowed:
             return candidate

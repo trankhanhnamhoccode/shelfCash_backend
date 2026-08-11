@@ -110,7 +110,7 @@ def critique_procurement_plan(
     stress_simulation: InventorySimulationPackage | None = None,
     simulation_error: str | None = None,
 ) -> CriticResult:
-    violations, checks = validate_plan_constraints(
+    violations, checks, constraint_evidence = validate_plan_constraints(
         plan,
         request.supplier_offers,
         request.supplier_constraints,
@@ -118,6 +118,8 @@ def critique_procurement_plan(
     )
     warnings = list(plan.warnings)
     details: dict[str, Any] = {}
+    if constraint_evidence:
+        details["finding_evidence"] = constraint_evidence
     if plan.solver_status != "OPTIMAL":
         violations.append(f"SOLVER_STATUS:{plan.solver_status}")
     if request.unknown_constraints:
@@ -173,6 +175,7 @@ def critique_procurement_plan(
         )
         details["exact_simulation"] = {
             "minimum_key_scenario_fill_rate": minimum_exact_fill,
+            "metric_source": "exact_fefo.minimum_key_scenario_fill_rate",
             "any_stockout_probability": exact_stockout,
             "unweighted_design_scenario_stockout_observed": design_stockout,
         }
@@ -191,17 +194,38 @@ def critique_procurement_plan(
             details.setdefault("finding_evidence", {})["EXACT_SIMULATION_SAFETY_FLOOR"] = {
                 "minimum_key_scenario_fill_rate": minimum_exact_fill,
                 "required_minimum_fill_rate": profile.minimum_acceptable_fill_rate,
+                "metric_source": "exact_fefo.minimum_key_scenario_fill_rate",
                 "any_stockout_probability": exact_stockout,
                 "maximum_stockout_probability": profile.maximum_acceptable_stockout_probability,
             }
 
+        # Service contracts have three distinct metric sources.  The exact
+        # FEFO scenario floor is the deterministic fallback when probability
+        # weights do not exist; weighted risk metrics are used only for truly
+        # probabilistic requirements.
         service_valid = True
+        service_evidence: dict[str, Any] = {
+            "minimum_expected_fill_rate": profile.minimum_expected_fill_rate,
+            "minimum_fill_rate": profile.minimum_fill_rate,
+            "required_fill_rate_probability": profile.required_fill_rate_probability,
+        }
         if profile.minimum_expected_fill_rate is not None:
-            service_valid = metrics is not None and all(
-                item.expected_fill_rate + 1e-9
-                >= profile.minimum_expected_fill_rate
-                for item in metrics.by_key
-            )
+            if metrics is not None:
+                observed_fill = min(
+                    (item.expected_fill_rate for item in metrics.by_key), default=1.0
+                )
+                metric_source = "weighted_exact_fefo.expected_fill_rate_by_key"
+            else:
+                observed_fill = minimum_exact_fill
+                metric_source = "exact_fefo.minimum_key_scenario_fill_rate"
+            expected_valid = observed_fill + 1e-9 >= profile.minimum_expected_fill_rate
+            service_valid = service_valid and expected_valid
+            service_evidence.update({
+                "required_fill_rate": profile.minimum_expected_fill_rate,
+                "observed_fill_rate": observed_fill,
+                "metric_source": metric_source,
+                "evaluation_status": "pass" if expected_valid else "fail",
+            })
         if (
             profile.minimum_fill_rate is not None
             and profile.required_fill_rate_probability is not None
@@ -209,6 +233,10 @@ def critique_procurement_plan(
             if metrics is None:
                 service_valid = False
                 warnings.append("UNWEIGHTED_SERVICE_PROBABILITY_NOT_EVALUATED")
+                service_evidence.update({
+                    "probability_evaluation_status": "not_evaluated",
+                    "probability_evaluation_reason": "probability_weights_unavailable",
+                })
             else:
                 weights = [float(result.probability_weight) for result in simulation.results]
                 probabilities_by_key: dict[str, float] = {}
@@ -241,14 +269,18 @@ def critique_procurement_plan(
                 details["fill_rate_threshold_probability_by_key"] = (
                     probabilities_by_key
                 )
+                service_evidence.update({
+                    "probability_evaluation_status": "pass" if all(
+                        probability + 1e-9 >= profile.required_fill_rate_probability
+                        for probability in probabilities_by_key.values()
+                    ) else "fail",
+                    "probability_metric_source": "weighted_exact_fefo.scenario_fill_rate",
+                })
         checks["service_level"] = service_valid
+        details["service_level_evaluation"] = service_evidence
         if not service_valid:
             violations.append("SERVICE_LEVEL_REQUIREMENT")
-            details.setdefault("finding_evidence", {})["SERVICE_LEVEL_REQUIREMENT"] = {
-                "minimum_expected_fill_rate": profile.minimum_expected_fill_rate,
-                "minimum_fill_rate": profile.minimum_fill_rate,
-                "required_fill_rate_probability": profile.required_fill_rate_probability,
-            }
+            details.setdefault("finding_evidence", {})["SERVICE_LEVEL_REQUIREMENT"] = service_evidence
 
         risk_valid = True
         if profile.maximum_stockout_probability is not None:
