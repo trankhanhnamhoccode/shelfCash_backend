@@ -154,20 +154,51 @@ def critique_procurement_plan(
         if not accounting_valid:
             violations.append("M4_ACCOUNTING_INVALID")
 
-        capacity_evaluated = all(
-            result.provenance.get("capacity_evaluated", False)
+        capacity_statuses = {
+            result.provenance.get("capacity_evaluation_status", "not_configured")
             for result in simulation.results
-        )
+        }
+        capacity_evaluated = capacity_statuses == {"evaluated"}
         capacity_valid = all(
             (item.capacity_violation_quantity or 0) <= 1e-9
             for result in simulation.results
             for item in result.summary.by_key
         )
         checks["capacity"] = capacity_valid and capacity_evaluated
-        if not capacity_evaluated:
+        details["capacity"] = {
+            "status": (
+                "pass" if capacity_valid and capacity_evaluated
+                else "fail" if not capacity_valid
+                else "partially_evaluated" if (
+                    "not_evaluated" in capacity_statuses
+                    and any(result.provenance.get("capacity_evaluated", False) for result in simulation.results)
+                )
+                else "not_evaluated" if "not_evaluated" in capacity_statuses
+                else "not_configured"
+            ),
+            "checkpoint": "post_receipt_pre_expiry_pre_consumption",
+            "contexts": [
+                result.provenance.get("capacity_context", {})
+                for result in simulation.results
+                if result.provenance.get("capacity_context")
+            ],
+        }
+        if "not_evaluated" in capacity_statuses:
             warnings.append("CAPACITY_NOT_EVALUATED")
         if not capacity_valid:
             violations.append("CAPACITY_CONSEQUENCE")
+            violating = [
+                ledger for result in simulation.results for ledger in result.daily_ledgers
+                if (ledger.capacity_violation_quantity or 0) > 1e-9
+            ]
+            details.setdefault("finding_evidence", {})["CAPACITY_CONSEQUENCE"] = [
+                {"constraint": "maximum_stock", "ingredient_id": item.ingredient_id,
+                 "date": item.simulation_date.isoformat(), "limit": (
+                     item.maximum_quantity - item.capacity_violation_quantity),
+                 "observed": item.maximum_quantity, "unit": item.unit,
+                 "excess": item.capacity_violation_quantity, "metric_source": "exact_fefo"}
+                for item in violating
+            ]
 
         metrics = simulation.risk_metrics
         minimum_exact_fill, exact_stockout, design_stockout = _exact_service_floors(

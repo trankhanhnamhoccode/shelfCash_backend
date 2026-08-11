@@ -108,6 +108,7 @@ class ProcurementDecisionLine(StrictOptimizationContract):
             "zero means usable on arrival_date only."
         ),
     )
+    projected_expiry_date: date | None = None
     emergency: bool = False
 
     @model_validator(mode="after")
@@ -179,6 +180,10 @@ class CriticResult(StrictOptimizationContract):
 class CandidateEvaluation(StrictOptimizationContract):
     plan: ProcurementPlan
     simulation: InventorySimulationPackage | None = None
+    # A fixed-plan, probability-weighted Exact FEFO evaluation.  It is kept
+    # separate from the deterministic design simulation so it can never alter
+    # the optimization model or the strategy selector.
+    risk_simulation: InventorySimulationPackage | None = None
     stress_simulation: InventorySimulationPackage | None = None
     critic: CriticResult
 
@@ -202,6 +207,16 @@ class OptimizationRequest(StrictOptimizationContract):
     stress_base_scenario_id: str | None = None
     strategy_profiles: list[StrategyProfile] = Field(default_factory=list)
     unknown_constraints: list[str] = Field(default_factory=list)
+    # Canonical, normalized capacity configuration and evaluation context.
+    # It is descriptive for constraints that cannot be represented in the
+    # ingredient-unit MILP (for example warehouse volume without conversion
+    # metadata), while ingredient maximum-stock limits live in
+    # ``cost_assumptions.capacity_quantity``.
+    capacity_context: dict[str, Any] = Field(default_factory=dict)
+    # These scenarios are evaluation-only.  ``demand_scenarios`` remains the
+    # deterministic optimizer design set.
+    risk_demand_scenarios: list[InventoryDemandScenario] = Field(default_factory=list)
+    risk_evaluation_metadata: dict[str, Any] = Field(default_factory=dict)
     stochastic: bool = True
     seed: int = 0
 
@@ -242,6 +257,16 @@ class OptimizationRequest(StrictOptimizationContract):
             total = sum(float(weight) for weight in weights if weight is not None)
             if not math.isclose(total, 1, rel_tol=1e-9, abs_tol=1e-9):
                 raise ValueError("Probabilistic demand weights must sum to one.")
+        risk_ids = [scenario.scenario_id for scenario in self.risk_demand_scenarios]
+        if len(risk_ids) != len(set(risk_ids)):
+            raise ValueError("Risk demand scenario identifiers must be unique.")
+        risk_weights = [scenario.probability_weight for scenario in self.risk_demand_scenarios]
+        if risk_weights and not all(weight is not None for weight in risk_weights):
+            raise ValueError("Risk demand scenarios require explicit probability weights.")
+        if risk_weights:
+            total = sum(float(weight) for weight in risk_weights if weight is not None)
+            if not math.isclose(total, 1, rel_tol=1e-9, abs_tol=1e-9):
+                raise ValueError("Risk demand probability weights must sum to one.")
         return self
 
 

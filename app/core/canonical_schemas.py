@@ -27,7 +27,7 @@ CANONICAL_SCHEMAS = {
         "core_fields": ["purchase_date", "ingredient_name", "quantity_received"],
     },
     "supplier_constraints": {
-        "fields": ["supplier_name", "ingredient_name", "minimum_order_quantity", "order_unit", "package_size", "package_base_unit", "lead_time_days", "unit_price", "available_delivery_days"],
+        "fields": ["supplier_name", "ingredient_name", "minimum_order_quantity", "order_unit", "package_size", "package_base_unit", "lead_time_days", "shelf_life_days", "unit_price", "available_delivery_days"],
         "core_fields": ["supplier_name", "ingredient_name", "minimum_order_quantity", "order_unit", "package_size", "package_base_unit"],
     },
     "calendar_features": {

@@ -21,6 +21,28 @@ from shelfcash_core.scenario.lead_time import LeadTimeModel
 from shelfcash_core.scenario.shelf_life import ShelfLifeModel
 
 
+def _with_capacity_context(simulation, request: OptimizationRequest):
+    """Attach non-MILP capacity diagnostics to durable Exact FEFO output."""
+    if simulation is None or not request.capacity_context:
+        return simulation
+    store_storage = request.capacity_context.get("store_storage", {})
+    results = [
+        result.model_copy(update={"provenance": {
+            **result.provenance, "capacity_context": request.capacity_context,
+            "capacity_evaluation_status": (
+                "not_evaluated"
+                if store_storage.get("status") == "not_evaluated"
+                else result.provenance.get("capacity_evaluation_status", "not_configured")
+            ),
+        }, "warnings": sorted(set(result.warnings) | (
+            {"CAPACITY_NOT_EVALUATED"}
+            if store_storage.get("status") == "not_evaluated" else set()
+        ))})
+        for result in simulation.results
+    ]
+    return simulation.model_copy(update={"results": results})
+
+
 def evaluate_candidate_plan(
     plan: ProcurementPlan,
     request: OptimizationRequest,
@@ -61,6 +83,7 @@ def evaluate_candidate_plan(
     if conversion_frame.empty:
         conversion_frame = None
     simulation = None
+    risk_simulation = None
     stress_simulation = None
     simulation_error = None
     try:
@@ -93,8 +116,38 @@ def evaluate_candidate_plan(
                 simulation_start_date=request.decision_date,
                 simulation_end_date=request.planning_end_date,
             )
+        simulation = _with_capacity_context(simulation, request)
+        # In risk-aware optimization the canonical optimization scenarios are
+        # already weighted and therefore this normal Exact FEFO run is also
+        # the risk evaluation.  Do not run it twice.
+        if all(s.probability_weight is not None for s in request.demand_scenarios):
+            risk_simulation = simulation
     except InventoryError as exc:
         simulation_error = f"{exc.code}: {exc}"
+    # Risk evaluation reuses the selected fixed plan and the exact same FEFO
+    # transition engine.  It deliberately has no recourse orders and never
+    # feeds a relaxed/scenario plan back to the optimizer.
+    if simulation is not None and risk_simulation is None and request.risk_demand_scenarios:
+        try:
+            risk_simulation = MonteCarloInventoryRunner().run(
+                request.initial_inventory,
+                request.risk_demand_scenarios,
+                request.existing_inbound,
+                base_inbound,
+                policy=request.inventory_policy,
+                unit_conversions=conversion_frame,
+                cost_assumptions=request.cost_assumptions,
+                simulation_start_date=request.decision_date,
+                simulation_end_date=request.planning_end_date,
+                seed=request.seed,
+            )
+            risk_simulation = _with_capacity_context(risk_simulation, request)
+        except (InventoryError, ValueError) as exc:
+            # A failed stochastic evaluation must not silently drop samples or
+            # change deterministic candidate feasibility.
+            request.risk_evaluation_metadata["status"] = "not_evaluated"
+            request.risk_evaluation_metadata["reason"] = "SCENARIO_EVALUATION_FAILED"
+            request.risk_evaluation_metadata["error"] = str(exc)
     if simulation is not None and request.stress_scenarios:
         source_id = request.stress_base_scenario_id
         baseline = next(
@@ -140,6 +193,7 @@ def evaluate_candidate_plan(
     return CandidateEvaluation(
         plan=completed_plan,
         simulation=simulation,
+        risk_simulation=risk_simulation,
         stress_simulation=stress_simulation,
         critic=critic,
     )

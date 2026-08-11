@@ -8,11 +8,11 @@ import pytest
 
 from app.models.business import (
     IngredientModel, InventoryLotModel, InventoryMovementModel, ProductModel,
-    PurchaseReceiptModel, SalesDailyModel, SupplierModel, UsageDailyModel,
+    PurchaseReceiptModel, SalesDailyModel, SupplierModel, SupplierIngredientTermModel, UsageDailyModel,
 )
 from app.models.operations import (
     BudgetPeriodModel, ForecastRunModel, PlanRunModel, RecommendationModel,
-    PurchaseOrderModel,
+    PurchaseOrderModel, PurchaseOrderLineModel,
 )
 
 
@@ -137,9 +137,13 @@ def test_supplier_settings_and_calendar_production_behavior(client, session_fact
     _ingredient(session_factory)
     _supplier(session_factory)
     term = {"ingredient_id": "ing-1", "supplier_id": "sup-1", "unit_cost": 100,
-            "moq": "1", "pack_size": "1", "lead_time_days": 2, "unit": "kg"}
+            "moq": "1", "pack_size": "1", "lead_time_days": 2, "shelf_life_days": 0, "unit": "kg"}
     created = client.post("/api/v1/stores/STORE_001/supplier-constraints", json=term)
     assert created.status_code == 201
+    assert created.json()["shelf_life_days"] == 0
+    assert client.get("/api/v1/stores/STORE_001/supplier-constraints").json()["items"][0]["shelf_life_days"] == 0
+    invalid = client.post("/api/v1/stores/STORE_001/supplier-constraints", json={**term, "shelf_life_days": -1})
+    assert invalid.status_code == 422
     updated = client.put(
         f"/api/v1/stores/STORE_001/supplier-constraints/{created.json()['constraint_id']}",
         json={**term, "unit_cost": 120, "version": 1})
@@ -179,6 +183,7 @@ def test_purchase_order_budget_and_inventory_state_machine(client, session_facto
     now = datetime.now(timezone.utc)
     with session_factory() as s:
         forecast_id, plan_id, rec_id = str(uuid4()), str(uuid4()), str(uuid4())
+        s.add(SupplierIngredientTermModel(constraint_id="po-shelf-term", store_id="STORE_001", supplier_id="sup-1", ingredient_id="ing-1", unit_cost=100, moq=Decimal("1"), pack_size=Decimal("1"), lead_time_days=1, shelf_life_days=5, unit="kg", version=1, active=True, source="test"))
         s.add(ForecastRunModel(forecast_run_id=forecast_id, store_id="STORE_001",
             cutoff_date=date.today(), horizon_days=7, quantiles_json="[0.25,0.5,0.75]",
             scope_json="{}", use_latest_calendar=True, status="completed",
@@ -225,6 +230,10 @@ def test_purchase_order_budget_and_inventory_state_machine(client, session_facto
         assert s.scalar(select(func.count()).select_from(InventoryLotModel)) == 1
         assert s.scalar(select(func.sum(InventoryMovementModel.quantity_delta))) == Decimal("10")
         assert s.scalar(select(func.count()).select_from(PurchaseOrderModel)) == 1
+        po_line = s.get(PurchaseOrderLineModel, line["po_line_id"])
+        lot = s.scalar(select(InventoryLotModel))
+        assert po_line.shelf_life_days == 5
+        assert lot.expiry_date == date.today() + timedelta(days=2)
 
 
 def test_inventory_count_adjustment_atomic_version_and_replay(client, session_factory):

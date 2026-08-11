@@ -11,6 +11,7 @@ from shelfcash_core.optimization.contracts import (
     SupplierOffer,
 )
 from shelfcash_core.optimization.model_data import supplier_arrival_date
+from shelfcash_core.optimization.expiry import resolve_inbound_expiry
 
 
 def validate_plan_constraints(
@@ -76,6 +77,11 @@ def validate_plan_constraints(
         if not math.isclose(line.delivery_cost, offer.delivery_cost):
             violations.append(f"DELIVERY_COST:{line.offer_id}")
         if line.shelf_life_days != offer.shelf_life_days:
+            violations.append(f"SHELF_LIFE:{line.offer_id}")
+        expected_expiry = resolve_inbound_expiry(
+            arrival_date=line.arrival_date, shelf_life_days=offer.shelf_life_days
+        )
+        if line.projected_expiry_date != expected_expiry:
             violations.append(f"SHELF_LIFE:{line.offer_id}")
         if line.pack_count != int(line.pack_count):
             violations.append(f"PACK_SIZE_INTEGRALITY:{line.offer_id}")

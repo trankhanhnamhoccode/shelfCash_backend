@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import date, timedelta
+from datetime import date
 
 import numpy as np
 
@@ -9,24 +9,7 @@ from shelfcash_core.inventory.contracts import PlannedInboundDelivery
 from shelfcash_core.optimization.contracts import ProcurementDecisionLine
 from shelfcash_core.scenario.lead_time import LeadTimeModel
 from shelfcash_core.scenario.shelf_life import ShelfLifeModel
-
-
-def _inclusive_expiry_date(
-    arrival_date: date,
-    shelf_life_days: int | None,
-) -> date | None:
-    """Convert an offset to an inclusive expiry boundary.
-
-    A value of zero means the lot is usable on arrival_date and expires before
-    the next day. A value of N means expiry_date == arrival_date + N and M4's
-    default policy permits consumption through that expiry date.
-    """
-
-    return (
-        None
-        if shelf_life_days is None
-        else arrival_date + timedelta(days=shelf_life_days)
-    )
+from shelfcash_core.optimization.expiry import resolve_inbound_expiry
 
 
 def decisions_to_planned_inbound(
@@ -38,7 +21,9 @@ def decisions_to_planned_inbound(
     deliveries: list[PlannedInboundDelivery] = []
     suffix = f"-{scenario_id}" if scenario_id else ""
     for index, line in enumerate(decisions):
-        expiry = _inclusive_expiry_date(line.arrival_date, line.shelf_life_days)
+        expiry = resolve_inbound_expiry(
+            arrival_date=line.arrival_date, shelf_life_days=line.shelf_life_days
+        )
         deliveries.append(
             PlannedInboundDelivery(
                 delivery_id=f"{plan_id}{suffix}-delivery-{index:04d}",
@@ -53,7 +38,11 @@ def decisions_to_planned_inbound(
                 arrival_date=line.arrival_date,
                 expiry_date=expiry,
                 unit_cost=line.unit_price,
-                provenance={"realization_type": "optimizer_fixed_lead_time"},
+                provenance={
+                    "realization_type": "optimizer_fixed_lead_time",
+                    "expiry_status": "exact" if expiry is not None else "unknown",
+                    "expiry_source": "supplier_offer.shelf_life_days" if expiry is not None else "not_configured",
+                },
             )
         )
     return deliveries
@@ -81,8 +70,8 @@ def decisions_to_scenario_planned_inbound(
                 ingredient_id=line.ingredient_id,
                 rng=rng,
             )
-            official_expiry = _inclusive_expiry_date(
-                lead_time.arrival_date, line.shelf_life_days
+            official_expiry = resolve_inbound_expiry(
+                arrival_date=lead_time.arrival_date, shelf_life_days=line.shelf_life_days
             )
             shelf_life = shelf_life_model.realize(
                 official_expiry_date=official_expiry,

@@ -250,14 +250,15 @@ def simulate_inventory(
         warnings.add("INBOUND_AFTER_HORIZON_NOT_REALIZED")
     if any(event.event_date > end_date for event in waste):
         warnings.add("WASTE_EVENT_AFTER_HORIZON_NOT_REALIZED")
-    capacity_evaluated = all(
-        key in assumption_map
-        and assumption_map[key].capacity_quantity is not None
-        for key in all_keys
-    )
+    # Capacity is optional and scoped per ingredient.  Absence of a maximum
+    # stock constraint for one ingredient must not make another configured
+    # ingredient limit look unevaluated.
+    capacity_evaluated_keys = {
+        key for key, assumption in assumption_map.items()
+        if assumption.capacity_quantity is not None
+    }
+    capacity_evaluated = bool(capacity_evaluated_keys)
     consequence_cost_evaluated = all(key in assumption_map for key in all_keys)
-    if not capacity_evaluated:
-        warnings.add("CAPACITY_NOT_EVALUATED")
     if not consequence_cost_evaluated:
         warnings.add("CONSEQUENCE_COST_NOT_EVALUATED")
     stockout_dates: set[date] = set()
@@ -284,6 +285,8 @@ def simulate_inventory(
                 )
                 if arrived_expired:
                     warnings.add("ARRIVED_EXPIRED")
+                if isinstance(delivery, PlannedInboundDelivery) and delivery.expiry_date is None:
+                    warnings.add("PLANNED_PURCHASE_SHELF_LIFE_NOT_CONFIGURED")
                 current_lots.append(
                     InventoryLot(
                         lot_id=delivery.lot_id,
@@ -434,11 +437,6 @@ def simulate_inventory(
         consumption_traces = []
         waste_traces = []
         expiry_traces = []
-    capacity_evaluated_keys = {
-        key
-        for key, assumption in assumption_map.items()
-        if assumption.capacity_quantity is not None
-    }
     summary = summarize_simulation(
         ledgers,
         ending_lots,
@@ -464,6 +462,14 @@ def simulate_inventory(
             "unknown_expiry_policy": policy.unknown_expiry,
             "planned_inbound_is_supplied_action": bool(planned_inbound),
             "capacity_evaluated": capacity_evaluated,
+            "capacity_evaluated_keys": [
+                {"store_id": key[0], "ingredient_id": key[1]}
+                for key in sorted(capacity_evaluated_keys)
+            ],
+            "capacity_evaluation_status": (
+                "evaluated" if capacity_evaluated else "not_configured"
+            ),
+            "capacity_checkpoint": "post_receipt_pre_expiry_pre_consumption",
             "consequence_cost_evaluated": consequence_cost_evaluated,
             "simulation_window_source": (
                 "explicit"

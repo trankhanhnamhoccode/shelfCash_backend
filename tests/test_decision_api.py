@@ -18,7 +18,7 @@ def test_core_decision_package_is_persisted_and_reloaded(client):
         s.add(RecipeVersionModel(recipe_version_id="decision-recipe", store_id="STORE_001", product_id=product.product_id, version=1, effective_from=date(2026, 1, 1), content_hash="x", source="test", yield_quantity=Decimal("1"), process_loss_rate=Decimal("0")))
         s.add(RecipeLineModel(recipe_line_id="decision-line", recipe_version_id="decision-recipe", ingredient_id=ingredient.ingredient_id, quantity=Decimal("1"), unit="kg"))
         s.add(SupplierModel(supplier_id="decision-supplier", store_id="STORE_001", supplier="Supplier", normalized_name="decision-supplier", active=True, source="test"))
-        s.add(SupplierIngredientTermModel(constraint_id="decision-term", store_id="STORE_001", supplier_id="decision-supplier", ingredient_id=ingredient.ingredient_id, unit_cost=100, moq=Decimal("1"), pack_size=Decimal("1"), lead_time_days=0, unit="kg", version=1, active=True, source="test"))
+        s.add(SupplierIngredientTermModel(constraint_id="decision-term", store_id="STORE_001", supplier_id="decision-supplier", ingredient_id=ingredient.ingredient_id, unit_cost=100, moq=Decimal("1"), pack_size=Decimal("1"), lead_time_days=0, shelf_life_days=5, unit="kg", version=1, active=True, source="test"))
         s.add(InventoryLotModel(lot_id="decision-lot", store_id="STORE_001", ingredient_id=ingredient.ingredient_id, received_date=date(2026, 8, 3), initial_quantity=Decimal("0"), unit="kg", source="test", version=1))
         s.add(InventoryMovementModel(movement_id=str(uuid4()), store_id="STORE_001", lot_id="decision-lot", movement_type="opening_balance", quantity_delta=Decimal("0"), unit="kg", occurred_at=datetime(2026, 8, 3, tzinfo=timezone.utc), source="test"))
         s.commit()

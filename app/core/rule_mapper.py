@@ -59,6 +59,7 @@ ALIASES = {
     "package_size": ["pack size", "package size", "quy cach dong goi"],
     "package_base_unit": ["base uom", "base unit", "don vi co so"],
     "lead_time_days": ["thoi gian giao", "lead time", "lead time days", "lead time (days)"],
+    "shelf_life_days": ["shelf life days", "exact shelf life days", "so ngay han su dung"],
     "available_delivery_days": ["lich giao", "delivery schedule", "available delivery days"],
     "is_weekend": ["cuoi tuan", "is weekend"],
     "is_holiday": ["ngay le", "is holiday"],

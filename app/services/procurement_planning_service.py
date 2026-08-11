@@ -153,7 +153,7 @@ class ProcurementPlanningService:
             if remaining>0 and ingredient:
                 try:quantity=convert_quantity(remaining,line.unit,ingredient.base_unit)
                 except ValidationError as exc:raise PlanningError("INVENTORY_LOT_UNIT_INVALID","Open PO unit không tương thích.",exc.details) from exc
-                result[line.ingredient_id].append({"date":po.delivery_date,"quantity":quantity,"lot_id":f"po:{po.po_id}:{line.po_line_id}"})
+                result[line.ingredient_id].append({"date":po.delivery_date,"quantity":quantity,"lot_id":f"po:{po.po_id}:{line.po_line_id}","shelf_life_days":line.shelf_life_days})
         return result
 
     def _terms(self,store,ingredient):return list(self.session.scalars(select(SupplierIngredientTermModel).join(SupplierModel).where(

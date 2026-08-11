@@ -176,7 +176,7 @@ class SupplierIngredientTermModel(Base):
     __tablename__ = "supplier_ingredient_terms"
     __table_args__ = (
         UniqueConstraint("supplier_id", "ingredient_id", "version", name="uq_supplier_term_version"),
-        CheckConstraint("unit_cost >= 0 AND moq >= 0 AND pack_size > 0 AND lead_time_days >= 0", name="ck_supplier_term_values"),
+        CheckConstraint("unit_cost >= 0 AND moq >= 0 AND pack_size > 0 AND lead_time_days >= 0 AND (shelf_life_days IS NULL OR shelf_life_days >= 0)", name="ck_supplier_term_values"),
         CheckConstraint("version >= 1", name="ck_supplier_term_version"),
         CheckConstraint(UNIT_CHECK, name="ck_supplier_term_unit"),
         Index("ix_supplier_terms_store_ingredient", "store_id", "ingredient_id"),
@@ -191,6 +191,7 @@ class SupplierIngredientTermModel(Base):
     order_unit: Mapped[str | None] = mapped_column(String(64))
     available_delivery_days: Mapped[str | None] = mapped_column(Text)
     lead_time_days: Mapped[int] = mapped_column(Integer, nullable=False)
+    shelf_life_days: Mapped[int | None] = mapped_column(Integer)
     unit: Mapped[str] = mapped_column(String(16), nullable=False)
     version: Mapped[int] = mapped_column(Integer, nullable=False)
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)

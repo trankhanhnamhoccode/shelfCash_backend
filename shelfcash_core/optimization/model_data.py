@@ -14,6 +14,7 @@ from shelfcash_core.optimization.contracts import (
     OptimizationRequest,
     SupplierOffer,
 )
+from shelfcash_core.optimization.expiry import resolve_inbound_expiry
 
 InventoryKey = tuple[str, str]
 
@@ -24,11 +25,20 @@ class EligibleOffer:
     arrival_date: date
     factor_to_target: float
     pack_quantity_target: float
+    expiry_date: date | None
 
 
 @dataclass(frozen=True)
 class InitialExpiryBucket:
     key: InventoryKey
+    expiry_date: date
+    quantity: float
+
+
+@dataclass(frozen=True)
+class ExistingInboundExpiryBucket:
+    key: InventoryKey
+    arrival_date: date
     expiry_date: date
     quantity: float
 
@@ -45,6 +55,7 @@ class OptimizationProblemData:
     initial_quantity: dict[InventoryKey, float]
     initial_expiry_buckets: list[InitialExpiryBucket]
     existing_inbound: dict[tuple[InventoryKey, date], float]
+    existing_inbound_expiry_buckets: list[ExistingInboundExpiryBucket]
     regular_offers: list[EligibleOffer]
     emergency_offers: list[EligibleOffer]
     assumptions: dict[InventoryKey, ConsequenceCostAssumption]
@@ -163,12 +174,19 @@ def build_problem_data(request: OptimizationRequest) -> OptimizationProblemData:
             expiry_bucket_quantities[(key, lot.expiry_date)] += quantity
 
     existing_inbound: defaultdict[tuple[InventoryKey, date], float] = defaultdict(float)
+    existing_inbound_expiry_buckets: list[ExistingInboundExpiryBucket] = []
     for delivery in request.existing_inbound:
         key = (delivery.store_id, delivery.ingredient_id)
         if key in target_units and request.decision_date <= delivery.arrival_date <= request.planning_end_date:
-            existing_inbound[(key, delivery.arrival_date)] += delivery.quantity * factor(
-                key, delivery.unit
-            )
+            quantity = delivery.quantity * factor(key, delivery.unit)
+            existing_inbound[(key, delivery.arrival_date)] += quantity
+            if delivery.expiry_date is None:
+                warnings.add("INBOUND_EXPIRY_NOT_EVALUATED")
+            else:
+                existing_inbound_expiry_buckets.append(ExistingInboundExpiryBucket(
+                    key=key, arrival_date=delivery.arrival_date,
+                    expiry_date=delivery.expiry_date, quantity=quantity,
+                ))
 
     eligible: list[EligibleOffer] = []
     for offer in request.supplier_offers:
@@ -195,8 +213,13 @@ def build_problem_data(request: OptimizationRequest) -> OptimizationProblemData:
                 arrival_date=arrival,
                 factor_to_target=conversion,
                 pack_quantity_target=offer.pack_size * conversion,
+                expiry_date=resolve_inbound_expiry(
+                    arrival_date=arrival, shelf_life_days=offer.shelf_life_days
+                ),
             )
         )
+        if offer.shelf_life_days is None:
+            warnings.add("PLANNED_PURCHASE_SHELF_LIFE_NOT_CONFIGURED")
 
     raw_weights = [scenario.probability_weight for scenario in request.demand_scenarios]
     probabilistic = all(weight is not None for weight in raw_weights)
@@ -244,6 +267,7 @@ def build_problem_data(request: OptimizationRequest) -> OptimizationProblemData:
             for (key, expiry_date), quantity in sorted(expiry_bucket_quantities.items())
         ],
         existing_inbound=dict(existing_inbound),
+        existing_inbound_expiry_buckets=existing_inbound_expiry_buckets,
         regular_offers=[item for item in eligible if not item.offer.emergency],
         emergency_offers=[item for item in eligible if item.offer.emergency],
         assumptions=assumptions,

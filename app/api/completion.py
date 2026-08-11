@@ -24,9 +24,9 @@ class PurchaseRecordIn(Strict):
     external_record_id:str|None=None;date:date;ingredient_id:str;supplier_id:str;quantity:Decimal=Field(gt=0,allow_inf_nan=False);unit:str;unit_cost:int=Field(ge=0);expiry_date:date|None=None;supplier_lot_code:str|None=None
 class PurchaseBatchIn(Strict): source:str;inventory_effect:str;records:list[PurchaseRecordIn]=Field(min_length=1)
 class SupplierTermIn(Strict):
-    ingredient_id:str;supplier_id:str;unit_cost:int=Field(ge=0);moq:Decimal=Field(ge=0);pack_size:Decimal=Field(gt=0);lead_time_days:int=Field(ge=0);unit:str;version:int|None=Field(default=None,ge=1)
+    ingredient_id:str;supplier_id:str;unit_cost:int=Field(ge=0);moq:Decimal=Field(ge=0);pack_size:Decimal=Field(gt=0);lead_time_days:int=Field(ge=0);shelf_life_days:int|None=Field(default=None,ge=0);unit:str;version:int|None=Field(default=None,ge=1)
 class SupplierTermOut(Strict):
-    constraint_id:str;ingredient_id:str;supplier_id:str;supplier:str;unit_cost:int;moq:Decimal;pack_size:Decimal;order_unit:str|None;available_delivery_days:list[int]|None;lead_time_days:int;unit:str;version:int;active:bool
+    constraint_id:str;ingredient_id:str;supplier_id:str;supplier:str;unit_cost:int;moq:Decimal;pack_size:Decimal;order_unit:str|None;available_delivery_days:list[int]|None;lead_time_days:int;shelf_life_days:int|None;unit:str;version:int;active:bool
 class SupplierTermList(Strict): items:list[SupplierTermOut];page:int;page_size:int;total:int
 class InventoryConstraintOut(Strict):
     constraint_id:str;ingredient_id:str|None;ingredient_name:str|None

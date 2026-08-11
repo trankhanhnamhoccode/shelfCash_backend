@@ -414,12 +414,18 @@ class ImportBusinessPersistenceService:
             lead = int(self._decimal(
                 row.get("lead_time_days") or 0, "lead_time_days"
             ))
+            shelf_life_raw = row.get("shelf_life_days")
+            shelf_life_value = None if shelf_life_raw in (None, "") else self._decimal(shelf_life_raw, "shelf_life_days")
+            if shelf_life_value is not None and (shelf_life_value < 0 or shelf_life_value != shelf_life_value.to_integral_value()):
+                raise ValidationError("shelf_life_days must be a non-negative integer.")
+            shelf_life = None if shelf_life_value is None else int(shelf_life_value)
             delivery_days=normalize_delivery_days(row.get("available_delivery_days"))
             content = canonical_hash({
                 "unit_cost": cost,
                 "moq": minimum_base_quantity,
                 "pack_size": package_size_in_base_unit,
                 "lead_time_days": lead,
+                "shelf_life_days": shelf_life,
                 "unit": target_base_unit,
                 "order_unit": order_unit,
                 "available_delivery_days":delivery_days,
@@ -449,6 +455,7 @@ class ImportBusinessPersistenceService:
                 order_unit=order_unit,
                 available_delivery_days=None if delivery_days is None else json.dumps(delivery_days),
                 lead_time_days=lead,
+                shelf_life_days=shelf_life,
                 unit=target_base_unit,
                 version=(latest.version + 1 if latest else 1),
                 active=True,
@@ -490,14 +497,19 @@ class ImportBusinessPersistenceService:
                 continue
             cost = int(self._decimal(row.get("unit_price") or 0, "unit_price"))
             lead = int(self._decimal(row.get("lead_time_days") or 0, "lead_time_days"))
-            content = canonical_hash({"unit_cost": cost, "moq": moq, "pack_size": pack, "lead_time_days": lead, "unit": ingredient.base_unit})
+            shelf_life_raw = row.get("shelf_life_days")
+            shelf_life_value = None if shelf_life_raw in (None, "") else self._decimal(shelf_life_raw, "shelf_life_days")
+            if shelf_life_value is not None and (shelf_life_value < 0 or shelf_life_value != shelf_life_value.to_integral_value()):
+                raise ValidationError("shelf_life_days must be a non-negative integer.")
+            shelf_life = None if shelf_life_value is None else int(shelf_life_value)
+            content = canonical_hash({"unit_cost": cost, "moq": moq, "pack_size": pack, "lead_time_days": lead, "shelf_life_days": shelf_life, "unit": ingredient.base_unit})
             latest = self.session.scalar(select(SupplierIngredientTermModel).where(SupplierIngredientTermModel.store_id == job.store_id, SupplierIngredientTermModel.supplier_id == supplier.supplier_id, SupplierIngredientTermModel.ingredient_id == ingredient.ingredient_id).order_by(SupplierIngredientTermModel.version.desc()))
             if latest and latest.source_row_hash == content:
                 self.summary.rows_skipped += 1
                 continue
             if latest:
                 latest.active = False
-            self.session.add(SupplierIngredientTermModel(constraint_id=str(uuid4()), store_id=job.store_id, supplier_id=supplier.supplier_id, ingredient_id=ingredient.ingredient_id, unit_cost=cost, moq=moq, pack_size=pack, lead_time_days=lead, unit=ingredient.base_unit, version=(latest.version + 1 if latest else 1), active=True, source="import", source_import_id=job.import_id, source_profile_id=sheet["profile_id"], source_row_hash=content))
+            self.session.add(SupplierIngredientTermModel(constraint_id=str(uuid4()), store_id=job.store_id, supplier_id=supplier.supplier_id, ingredient_id=ingredient.ingredient_id, unit_cost=cost, moq=moq, pack_size=pack, lead_time_days=lead, shelf_life_days=shelf_life, unit=ingredient.base_unit, version=(latest.version + 1 if latest else 1), active=True, source="import", source_import_id=job.import_id, source_profile_id=sheet["profile_id"], source_row_hash=content))
             self.summary.supplier_terms_created += 1
 
     def _persist_calendar_features(self, job, sheet):

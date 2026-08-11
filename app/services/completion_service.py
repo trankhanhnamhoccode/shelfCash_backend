@@ -12,6 +12,7 @@ from app.core.provenance import canonical_hash, normalized_optional_identifier, 
 from app.services.sales_usage_reconciliation import reconcile_usage_from_sales
 from app.core.business_constraints import constraint_definition
 from app.core.units import convert_quantity
+from shelfcash_core.optimization.expiry import resolve_inbound_expiry
 from app.models.business import (
  CalendarFeatureModel, IngredientAliasModel, IngredientModel, InventoryLotModel, InventoryMovementModel,
  ProductBundleLineModel, ProductModel, PurchaseReceiptModel, SalesDailyModel, StoreSettingsModel, SupplierModel,
@@ -99,7 +100,7 @@ class CompletionService:
   with self.factory() as s:
    StoreRepository(s).get_required(store)
    rows=s.execute(select(SupplierIngredientTermModel,SupplierModel).join(SupplierModel,SupplierModel.supplier_id==SupplierIngredientTermModel.supplier_id).where(SupplierIngredientTermModel.store_id==store,SupplierIngredientTermModel.active.is_(True)).order_by(SupplierModel.normalized_name,SupplierIngredientTermModel.ingredient_id))
-   items=[{"constraint_id":x.constraint_id,"ingredient_id":x.ingredient_id,"supplier_id":x.supplier_id,"supplier":sup.supplier,"unit_cost":x.unit_cost,"moq":str(x.moq),"pack_size":str(x.pack_size),"order_unit":x.order_unit,"available_delivery_days":None if x.available_delivery_days is None else json.loads(x.available_delivery_days),"lead_time_days":x.lead_time_days,"unit":x.unit,"version":x.version,"active":x.active} for x,sup in rows]
+   items=[{"constraint_id":x.constraint_id,"ingredient_id":x.ingredient_id,"supplier_id":x.supplier_id,"supplier":sup.supplier,"unit_cost":x.unit_cost,"moq":str(x.moq),"pack_size":str(x.pack_size),"order_unit":x.order_unit,"available_delivery_days":None if x.available_delivery_days is None else json.loads(x.available_delivery_days),"lead_time_days":x.lead_time_days,"shelf_life_days":x.shelf_life_days,"unit":x.unit,"version":x.version,"active":x.active} for x,sup in rows]
    return {"items":items,"page":1,"page_size":50,"total":len(items)}
  def inventory_constraints(self,store,ingredient_id=None,constraint_type=None,as_of_date=None):
   with self.factory() as s:
@@ -210,12 +211,12 @@ class CompletionService:
      raise VersionConflictError(details={"expected_version":b.version,"current_version":latest.version if latest else current.version})
     if b.version!=current.version:raise VersionConflictError(details={"expected_version":b.version,"current_version":current.version})
    elif current:raise DuplicateRequestError("Active supplier constraint đã tồn tại.")
-   same=current and all(getattr(current,n)==v for n,v in values.items()) and current.unit_cost==b.unit_cost and current.lead_time_days==b.lead_time_days
+   same=current and all(getattr(current,n)==v for n,v in values.items()) and current.unit_cost==b.unit_cost and current.lead_time_days==b.lead_time_days and current.shelf_life_days==b.shelf_life_days
    if same:model=current
    else:
     if current:current.active=False
-    model=SupplierIngredientTermModel(constraint_id=str(uuid4()),store_id=store,supplier_id=b.supplier_id,ingredient_id=b.ingredient_id,unit_cost=b.unit_cost,moq=values["moq"],pack_size=values["pack_size"],order_unit=None,lead_time_days=b.lead_time_days,unit=ingredient.base_unit,version=max([x.version for x in versions] or [0])+1,active=True,source="api");s.add(model)
-   s.flush();result={"constraint_id":model.constraint_id,"ingredient_id":model.ingredient_id,"supplier_id":model.supplier_id,"supplier":supplier.supplier,"unit_cost":model.unit_cost,"moq":str(model.moq),"pack_size":str(model.pack_size),"order_unit":model.order_unit,"lead_time_days":model.lead_time_days,"unit":model.unit,"version":model.version,"active":model.active}
+    model=SupplierIngredientTermModel(constraint_id=str(uuid4()),store_id=store,supplier_id=b.supplier_id,ingredient_id=b.ingredient_id,unit_cost=b.unit_cost,moq=values["moq"],pack_size=values["pack_size"],order_unit=None,lead_time_days=b.lead_time_days,shelf_life_days=b.shelf_life_days,unit=ingredient.base_unit,version=max([x.version for x in versions] or [0])+1,active=True,source="api");s.add(model)
+   s.flush();result={"constraint_id":model.constraint_id,"ingredient_id":model.ingredient_id,"supplier_id":model.supplier_id,"supplier":supplier.supplier,"unit_cost":model.unit_cost,"moq":str(model.moq),"pack_size":str(model.pack_size),"order_unit":model.order_unit,"lead_time_days":model.lead_time_days,"shelf_life_days":model.shelf_life_days,"unit":model.unit,"version":model.version,"active":model.active}
    AuditService(AuditLogRepository(s)).record(store_id=store,action=kind,resource_type="supplier_constraint",resource_id=model.constraint_id,after={"version":model.version},source="api")
    if key:
     rec=IdempotencyRepository(s).get(store_id=store,endpoint=path,http_method="POST" if kind=="supplier_create" else "PUT",idempotency_key=key);rec.resource_type="supplier_constraint";rec.resource_id=model.constraint_id;rec.response_status=201 if kind=="supplier_create" else 200;rec.response_body_json=json.dumps(result,default=str,ensure_ascii=False)
@@ -289,7 +290,8 @@ class CompletionService:
   return {"po_id":po.po_id,"supplier_id":po.supplier_id,"supplier":supplier.supplier if supplier else None,"plan_run_id":po.plan_run_id,
    "order_date":po.order_date,"delivery_date":po.delivery_date,"strategy":po.strategy,"status":po.status,
    "lines":[{"po_line_id":x.po_line_id,"ingredient_id":x.ingredient_id,"order_quantity":str(x.ordered_quantity),
-   "received_quantity":str(x.received_quantity),"unit":x.unit,"unit_cost":x.unit_cost,"line_total":x.cost} for x in lines],
+   "received_quantity":str(x.received_quantity),"unit":x.unit,"unit_cost":x.unit_cost,"line_total":x.cost,"shelf_life_days":x.shelf_life_days,
+   "projected_expiry_date":resolve_inbound_expiry(arrival_date=po.delivery_date,shelf_life_days=x.shelf_life_days)} for x in lines],
    "total":po.total,"budget_after":po.budget_after,"version":po.version,"confirmed_at":po.confirmed_at,"received_at":po.received_at}
  def _budget(self,s,store,period):
   bp=s.scalar(select(BudgetPeriodModel).where(BudgetPeriodModel.store_id==store,BudgetPeriodModel.period==period))
@@ -329,7 +331,9 @@ class CompletionService:
      total=sum(int(q*Decimal(x.unit_cost)) for x,q in lines)
      po=PurchaseOrderModel(po_id=str(uuid4()),store_id=store,plan_run_id=plan.plan_run_id,supplier_id=supplier_id,order_date=date.today(),delivery_date=date.today()+timedelta(days=max(x.lead_time_days for x,_ in lines)),strategy=plan.strategy,status="draft",total=total,budget_after=remaining-total,version=1)
      s.add(po);s.flush()
-     for rec,qty in lines:s.add(PurchaseOrderLineModel(po_line_id=str(uuid4()),po_id=po.po_id,recommendation_id=rec.recommendation_id,ingredient_id=rec.ingredient_id,ordered_quantity=qty,received_quantity=0,unit=rec.unit,unit_cost=rec.unit_cost,cost=int(qty*Decimal(rec.unit_cost)),moq=rec.moq,pack_size=rec.pack_size,version=1))
+     for rec,qty in lines:
+      term=s.scalar(select(SupplierIngredientTermModel).where(SupplierIngredientTermModel.store_id==store,SupplierIngredientTermModel.supplier_id==rec.supplier_id,SupplierIngredientTermModel.ingredient_id==rec.ingredient_id,SupplierIngredientTermModel.active.is_(True)))
+      s.add(PurchaseOrderLineModel(po_line_id=str(uuid4()),po_id=po.po_id,recommendation_id=rec.recommendation_id,ingredient_id=rec.ingredient_id,ordered_quantity=qty,received_quantity=0,unit=rec.unit,unit_cost=rec.unit_cost,cost=int(qty*Decimal(rec.unit_cost)),moq=rec.moq,pack_size=rec.pack_size,shelf_life_days=term.shelf_life_days if term else None,version=1))
      s.flush();orders.append(self._po_public(s,po))
     result={"orders":orders}
    else:

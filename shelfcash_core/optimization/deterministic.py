@@ -20,6 +20,8 @@ from shelfcash_core.optimization.model_data import (
     expected_daily_demand,
     shortage_cost_per_target_unit,
 )
+from shelfcash_core.optimization.expiry import resolve_inbound_expiry
+from shelfcash_core.optimization.infeasibility import diagnose_infeasibility
 
 
 class _Variables:
@@ -72,6 +74,9 @@ def _decision(item: EligibleOffer, packs: int) -> ProcurementDecisionLine:
         purchase_cost=quantity * offer.unit_price,
         delivery_cost=offer.delivery_cost,
         shelf_life_days=offer.shelf_life_days,
+        projected_expiry_date=resolve_inbound_expiry(
+            arrival_date=item.arrival_date, shelf_life_days=offer.shelf_life_days
+        ),
         emergency=offer.emergency,
     )
 
@@ -222,6 +227,8 @@ def _no_order_diagnostics(
 def solve_deterministic_procurement(
     request: OptimizationRequest,
     profile: StrategyProfile,
+    *,
+    collect_infeasibility_diagnostics: bool = True,
 ) -> ProcurementPlan:
     """Generate a candidate with a chronological aggregate-inventory MILP."""
 
@@ -250,8 +257,8 @@ def solve_deterministic_procurement(
         )
 
     # Initial stock is split by expiry date.  The ``None`` bucket is the
-    # unbounded bucket for stock without an expiry contract, existing inbound,
-    # and planned supplier arrivals without an explicit shelf-life contract.
+    # unbounded bucket for stock and inbound arrivals without an expiry
+    # contract. Known inbound and planned expiry dates receive finite buckets.
     bucket_ids: dict[tuple[str, str], list[object | None]] = {
         key: [None] for key in data.keys
     }
@@ -263,6 +270,18 @@ def solve_deterministic_procurement(
     for item in data.initial_expiry_buckets:
         bucket_ids[item.key].append(item.expiry_date)
         bucket_initial[(item.key, item.expiry_date)] = item.quantity
+    for item in data.existing_inbound_expiry_buckets:
+        if item.expiry_date not in bucket_ids[item.key]:
+            bucket_ids[item.key].append(item.expiry_date)
+            bucket_initial[(item.key, item.expiry_date)] = 0.0
+    # Exact known supplier shelf life creates a real future expiry bucket.
+    # Unknown shelf life stays in the mathematical unbounded fallback bucket,
+    # accompanied by an explicit plan warning from model_data.
+    for item in data.regular_offers:
+        key = (item.offer.store_id, item.offer.ingredient_id)
+        if item.expiry_date is not None and item.expiry_date not in bucket_ids[key]:
+            bucket_ids[key].append(item.expiry_date)
+            bucket_initial[(key, item.expiry_date)] = 0.0
 
     inventory_index: dict[tuple[tuple[str, str], object | None, object], int] = {}
     consumption_index: dict[tuple[tuple[str, str], object | None, object], int] = {}
@@ -334,16 +353,54 @@ def solve_deterministic_procurement(
                     starting = 0.0
                 else:
                     starting = bucket_initial[(key, bucket)]
+                for offer_index, item in enumerate(data.regular_offers):
+                    if (
+                        (item.offer.store_id, item.offer.ingredient_id) == key
+                        and item.arrival_date == day
+                        and item.expiry_date == bucket
+                    ):
+                        coefficients[x_index[offer_index]] = -item.pack_quantity_target
+                known_inbound = sum(
+                    inbound.quantity
+                    for inbound in data.existing_inbound_expiry_buckets
+                    if inbound.key == key and inbound.arrival_date == day
+                )
                 if bucket is None:
-                    for offer_index, item in enumerate(data.regular_offers):
-                        if (
-                            (item.offer.store_id, item.offer.ingredient_id) == key
-                            and item.arrival_date == day
-                        ):
-                            coefficients[x_index[offer_index]] = -item.pack_quantity_target
-                    starting += data.existing_inbound.get((key, day), 0)
+                    starting += data.existing_inbound.get((key, day), 0) - known_inbound
+                else:
+                    starting += sum(
+                        inbound.quantity
+                        for inbound in data.existing_inbound_expiry_buckets
+                        if inbound.key == key and inbound.arrival_date == day
+                        and inbound.expiry_date == bucket
+                    )
                 add_constraint(coefficients, starting, starting)
                 previous = inventory_index[(key, bucket, day)]
+        # ``capacity_quantity`` is an ingredient maximum-stock limit.  The
+        # operational checkpoint is immediately after all receipts on a day,
+        # before expiry/consumption: this is the largest physical footprint
+        # that must fit when a delivery is put away.  Per-bucket bounds alone
+        # are insufficient because several expiry buckets can coexist.
+        assumption = data.assumptions.get(key)
+        if assumption is not None and assumption.capacity_quantity is not None:
+            for offset, day in enumerate(data.dates):
+                coefficients: dict[int, float] = {}
+                if offset:
+                    for bucket in bucket_ids[key]:
+                        coefficients[inventory_index[(key, bucket, data.dates[offset - 1])]] = 1
+                    constant = data.existing_inbound.get((key, day), 0.0)
+                else:
+                    constant = (
+                        sum(bucket_initial[(key, bucket)] for bucket in bucket_ids[key])
+                        + data.existing_inbound.get((key, day), 0.0)
+                    )
+                for offer_index, item in enumerate(data.regular_offers):
+                    if (
+                        (item.offer.store_id, item.offer.ingredient_id) == key
+                        and item.arrival_date == day
+                    ):
+                        coefficients[x_index[offer_index]] = item.pack_quantity_target
+                add_constraint(coefficients, -np.inf, assumption.capacity_quantity - constant)
         for day in data.dates:
             coefficients = {shortage_index[(key, day)]: 1}
             for bucket in bucket_ids[key]:
@@ -485,6 +542,27 @@ def solve_deterministic_procurement(
                         for bucket in bucket_ids[key]
                     ),
                 })
+    infeasibility_diagnostics = []
+    infeasibility_probe_count = 0
+    if status == "INFEASIBLE" and collect_infeasibility_diagnostics:
+        def probe(family):
+            probe_request = request
+            probe_profile = profile
+            if family == "budget":
+                probe_request = request.model_copy(update={"budget": None})
+            elif family == "service":
+                probe_profile = profile.model_copy(update={"minimum_expected_fill_rate": None})
+            else:
+                probe_request = request.model_copy(update={"cost_assumptions": [
+                    item.model_copy(update={"capacity_quantity": None}) for item in request.cost_assumptions
+                ]})
+            return solve_deterministic_procurement(
+                probe_request, probe_profile, collect_infeasibility_diagnostics=False
+            ).solver_status
+        infeasibility_diagnostics, probes = diagnose_infeasibility(
+            data=data, request=request, probe=probe
+        )
+        infeasibility_probe_count = len(probes)
     return ProcurementPlan(
         plan_id=f"{request.request_id}-{profile.name.lower()}",
         strategy=profile.name,
@@ -514,6 +592,8 @@ def solve_deterministic_procurement(
             "no_order_diagnostics": _no_order_diagnostics(
                 data, request, daily_demand, orders, profile
             ),
+            "infeasibility_diagnostics": infeasibility_diagnostics,
+            "infeasibility_diagnostic_probe_count": infeasibility_probe_count,
         },
         warnings=data.warnings,
     )
