@@ -20,7 +20,7 @@ from shelfcash_core.optimization.deterministic import (
     _offer_upper_packs,
     _Variables,
 )
-from shelfcash_core.optimization.model_data import build_problem_data
+from shelfcash_core.optimization.model_data import build_problem_data, shortage_cost_per_target_unit
 
 
 def solve_stochastic_procurement(
@@ -89,19 +89,14 @@ def solve_stochastic_procurement(
     ):
         for key in data.keys:
             assumption = data.assumptions.get(key)
-            shortage_cost = profile.shortage_penalty + (
-                assumption.shortage_cost_per_unit if assumption else 0
-            )
-            holding_cost = profile.holding_penalty + (
+            shortage_cost = profile.shortage_penalty * shortage_cost_per_target_unit(data, key)[0]
+            holding_cost = profile.holding_penalty * (
                 assumption.holding_cost_per_unit_day if assumption else 0
             )
             for day in data.dates:
                 inventory[(scenario_id, key, day)] = variables.add(
                     float(weight)
-                    * (
-                        holding_cost
-                        + (profile.waste_penalty if day == data.dates[-1] else 0)
-                    ),
+                    * holding_cost,
                     0,
                     assumption.capacity_quantity
                     if assumption and assumption.capacity_quantity is not None
@@ -388,22 +383,13 @@ def solve_stochastic_procurement(
                 )
             for key in data.keys:
                 assumption = data.assumptions.get(key)
-                shortage_cost = profile.shortage_penalty + (
-                    assumption.shortage_cost_per_unit if assumption else 0
-                )
-                holding_cost = profile.holding_penalty + (
+                shortage_cost = profile.shortage_penalty * shortage_cost_per_target_unit(data, key)[0]
+                holding_cost = profile.holding_penalty * (
                     assumption.holding_cost_per_unit_day if assumption else 0
                 )
                 for day in data.dates:
                     coefficients[shortage[(scenario_id, key, day)]] -= shortage_cost
-                    coefficients[inventory[(scenario_id, key, day)]] -= (
-                        holding_cost
-                        + (
-                            profile.waste_penalty
-                            if day == data.dates[-1]
-                            else 0
-                        )
-                    )
+                    coefficients[inventory[(scenario_id, key, day)]] -= holding_cost
             for index, item in enumerate(data.emergency_offers):
                 coefficients[emergency_x[(scenario_id, index)]] -= (
                     item.offer.pack_size * item.offer.unit_price
@@ -456,10 +442,8 @@ def solve_stochastic_procurement(
             per_key: dict[str, dict[str, float | bool]] = {}
             for key in data.keys:
                 assumption = data.assumptions.get(key)
-                shortage_cost = profile.shortage_penalty + (
-                    assumption.shortage_cost_per_unit if assumption else 0
-                )
-                holding_cost = profile.holding_penalty + (
+                shortage_cost = profile.shortage_penalty * shortage_cost_per_target_unit(data, key)[0]
+                holding_cost = profile.holding_penalty * (
                     assumption.holding_cost_per_unit_day if assumption else 0
                 )
                 key_shortage = 0.0
@@ -472,14 +456,7 @@ def solve_stochastic_procurement(
                     key_shortage += shortage_quantity
                     key_demand += data.demand.get((scenario_id, key, day), 0)
                     recourse_cost += shortage_quantity * shortage_cost
-                    recourse_cost += ending_quantity * (
-                        holding_cost
-                        + (
-                            profile.waste_penalty
-                            if day == data.dates[-1]
-                            else 0
-                        )
-                    )
+                    recourse_cost += ending_quantity * holding_cost
                 label = f"{key[0]}|{key[1]}|{data.target_units[key]}"
                 per_key[label] = {
                     "demand": float(key_demand),
@@ -555,6 +532,33 @@ def solve_stochastic_procurement(
         if scenario_costs
         else None
     )
+    objective_value = float(result.fun) if result.fun is not None else None
+    shortage_term = (
+        sum(float(result.x[index]) * variables.cost[index] for index in shortage.values())
+        if result.x is not None else None
+    )
+    holding_term = (
+        sum(float(result.x[index]) * variables.cost[index] for index in inventory.values())
+        if result.x is not None else None
+    )
+    emergency_term = (
+        sum(
+            float(result.x[index]) * variables.cost[index]
+            for index in [*emergency_x.values(), *emergency_y.values()]
+        )
+        if result.x is not None else None
+    )
+    known_terms = first_stage_objective_cost + (shortage_term or 0) + (holding_term or 0) + (emergency_term or 0)
+    objective_breakdown = {
+        "cost_unit": "supplier_offer_unit_price_currency_or_cost_unit",
+        "purchase_term": first_stage_objective_cost,
+        "shortage_term": shortage_term,
+        "holding_term": holding_term,
+        "waste_term": 0.0,
+        "emergency_purchase_term": emergency_term,
+        "risk_cvar_term": (objective_value - known_terms if objective_value is not None else None),
+        "total_objective": objective_value,
+    }
     return ProcurementPlan(
         plan_id=f"{request.request_id}-{profile.name.lower()}",
         strategy=profile.name,
@@ -562,7 +566,7 @@ def solve_stochastic_procurement(
         scenario_recourse_orders=recourse,
         purchase_cost=purchase_cost,
         expected_recourse_cost=expected_recourse_cost,
-        objective_value=(float(result.fun) if result.fun is not None else None),
+        objective_value=objective_value,
         solver_status=status,
         completed=False,
         provenance={
@@ -588,6 +592,7 @@ def solve_stochastic_procurement(
             "chance_big_m": "scenario_key_daily_demand",
             "exact_inventory_physics": False,
             "requires_m4_resimulation": True,
+            "objective_breakdown": objective_breakdown,
         },
         warnings=data.warnings,
     )

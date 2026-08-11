@@ -18,6 +18,7 @@ from shelfcash_core.optimization.model_data import (
     EligibleOffer,
     build_problem_data,
     expected_daily_demand,
+    shortage_cost_per_target_unit,
 )
 
 
@@ -80,6 +81,7 @@ def _no_order_diagnostics(
     request: OptimizationRequest,
     daily_demand: dict,
     orders: list[ProcurementDecisionLine],
+    profile: StrategyProfile,
 ) -> list[dict]:
     """Return compact, deterministic explanations for demand keys with no buy."""
 
@@ -131,8 +133,42 @@ def _no_order_diagnostics(
             for item in eligible
         ):
             reason = "NO_PURCHASE_BUDGET_BLOCKED"
+        elif shortage_cost_per_target_unit(data, key)[0] <= 0:
+            reason = "NO_PURCHASE_SHORTAGE_CONSEQUENCE_NOT_CONFIGURED"
         else:
             reason = "NO_PURCHASE_OBJECTIVE_PREFERS_SHORTAGE"
+        base_shortage_cost, shortage_cost_source = shortage_cost_per_target_unit(data, key)
+        shortage_unit_cost = base_shortage_cost * profile.shortage_penalty
+        baseline_balance = data.initial_quantity.get(key, 0.0)
+        baseline_shortage = 0.0
+        for day in data.dates:
+            baseline_balance += data.existing_inbound.get((key, day), 0.0)
+            baseline_balance -= daily_demand[(key, day)]
+            if baseline_balance < 0:
+                baseline_shortage += -baseline_balance
+                baseline_balance = 0.0
+        candidate = None
+        if eligible:
+            item = min(
+                eligible,
+                key=lambda value: (
+                    max(value.offer.minimum_order_quantity, value.offer.pack_size)
+                    * value.offer.unit_price + value.offer.delivery_cost,
+                    value.arrival_date,
+                    value.offer.offer_id,
+                ),
+            )
+            packs = math.ceil(
+                max(item.offer.minimum_order_quantity, item.offer.pack_size)
+                / item.offer.pack_size - 1e-12
+            )
+            candidate = {
+                "quantity": packs * item.pack_quantity_target,
+                "quantity_unit": data.target_units[key],
+                "arrival_date": item.arrival_date.isoformat(),
+                "cost": packs * item.offer.pack_size * item.offer.unit_price + item.offer.delivery_cost,
+                "objective_purchase_cost": (packs * item.offer.pack_size * item.offer.unit_price + item.offer.delivery_cost) * (1 + profile.cash_penalty),
+            }
         diagnostics.append(
             {
                 "ingredient_id": key[1],
@@ -147,6 +183,20 @@ def _no_order_diagnostics(
                 "first_shortage_date_without_purchase": first_shortage_date,
                 "budget_limit": request.budget,
                 "no_order_reason": reason,
+                "no_purchase_consequence": {
+                    "shortage_quantity": baseline_shortage,
+                    "quantity_unit": data.target_units[key],
+                    "shortage_cost_per_unit": shortage_unit_cost,
+                    "base_cost_source": shortage_cost_source,
+                    "shortage_cost": baseline_shortage * shortage_unit_cost,
+                },
+                "purchase_candidate": candidate,
+                "strategy_multiplier": profile.shortage_penalty,
+                "comparison": (
+                    "configured_shortage_consequence_missing"
+                    if shortage_unit_cost <= 0
+                    else "minimum_feasible_pack_vs_chronological_no_purchase_shortage"
+                ),
                 "offers": [
                     {
                         "supplier_id": item.offer.supplier_id,
@@ -203,16 +253,13 @@ def solve_deterministic_procurement(
     shortage_index: dict[tuple[tuple[str, str], object], int] = {}
     for key in data.keys:
         assumption = data.assumptions.get(key)
-        holding_cost = profile.holding_penalty + (
+        holding_cost = profile.holding_penalty * (
             assumption.holding_cost_per_unit_day if assumption else 0
         )
-        shortage_cost = profile.shortage_penalty + (
-            assumption.shortage_cost_per_unit if assumption else 0
-        )
+        shortage_cost = profile.shortage_penalty * shortage_cost_per_target_unit(data, key)[0]
         for day in data.dates:
             inventory_index[(key, day)] = variables.add(
-                holding_cost
-                + (profile.waste_penalty if day == data.dates[-1] else 0),
+                holding_cost,
                 0,
                 assumption.capacity_quantity
                 if assumption and assumption.capacity_quantity is not None
@@ -264,6 +311,20 @@ def solve_deterministic_procurement(
             )
             add_constraint(coefficients, rhs, rhs)
             previous = inventory_index[(key, day)]
+
+    # ``minimum_expected_fill_rate`` is an explicit strategy contract.  In
+    # deterministic mode daily demand is already the design-weighted demand,
+    # so the corresponding aggregate fill floor can be enforced directly.
+    # This intentionally does not turn critic-only safety floors into MILP
+    # constraints.
+    if profile.minimum_expected_fill_rate is not None:
+        for key in data.keys:
+            total_demand = sum(daily_demand[(key, day)] for day in data.dates)
+            add_constraint(
+                {shortage_index[(key, day)]: 1 for day in data.dates},
+                -np.inf,
+                total_demand * (1 - profile.minimum_expected_fill_rate),
+            )
 
     if request.budget is not None:
         coefficients: dict[int, float] = {}
@@ -333,7 +394,12 @@ def solve_deterministic_procurement(
         for line in orders
     )
     objective_value = float(result.fun) if result.fun is not None else None
+    holding_term = (
+        sum(float(result.x[index]) * variables.cost[index] for index in inventory_index.values())
+        if result.x is not None else None
+    )
     objective_breakdown = {
+        "cost_unit": "supplier_offer_unit_price_currency_or_cost_unit",
         "purchase_term": weighted_first_stage_cost,
         "shortage_term": (
             sum(
@@ -343,14 +409,8 @@ def solve_deterministic_procurement(
             if result.x is not None
             else None
         ),
-        "holding_and_terminal_waste_term": (
-            sum(
-                float(result.x[index]) * variables.cost[index]
-                for index in inventory_index.values()
-            )
-            if result.x is not None
-            else None
-        ),
+        "holding_term": holding_term,
+        "waste_term": 0.0,
         "total_objective": objective_value,
     }
     return ProcurementPlan(
@@ -371,9 +431,14 @@ def solve_deterministic_procurement(
             "formulation": "chronological_aggregate_inventory_mip_v1",
             "exact_inventory_physics": False,
             "requires_m4_resimulation": True,
+            "deterministic_service_constraint": (
+                "aggregate_design_fill_rate"
+                if profile.minimum_expected_fill_rate is not None
+                else None
+            ),
             "objective_breakdown": objective_breakdown,
             "no_order_diagnostics": _no_order_diagnostics(
-                data, request, daily_demand, orders
+                data, request, daily_demand, orders, profile
             ),
         },
         warnings=data.warnings,

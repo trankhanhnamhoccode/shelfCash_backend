@@ -119,9 +119,12 @@ class ProcurementDecisionLine(StrictOptimizationContract):
 
 class StrategyProfile(StrictOptimizationContract):
     name: StrategyName
-    shortage_penalty: float = Field(ge=0)
-    holding_penalty: float = Field(ge=0)
-    waste_penalty: float = Field(ge=0)
+    # These are dimensionless preference multipliers.  The monetary base
+    # costs live in ConsequenceCostAssumption and must use the same currency
+    # / cost unit as SupplierOffer.unit_price.
+    shortage_penalty: float = Field(ge=0, description="Dimensionless shortage-cost multiplier.")
+    holding_penalty: float = Field(ge=0, description="Dimensionless holding-cost multiplier.")
+    waste_penalty: float = Field(ge=0, description="Dimensionless waste-cost multiplier.")
     cash_penalty: float = Field(ge=0)
     cvar_weight: float = Field(default=0, ge=0)
     cvar_alpha: float = Field(default=0.95, gt=0, lt=1)

@@ -43,6 +43,30 @@ class OptimizationProblemData:
     warnings: list[str]
 
 
+def shortage_cost_per_target_unit(
+    data: OptimizationProblemData, key: InventoryKey
+) -> tuple[float, str]:
+    """Return the base shortage consequence in the target-unit cost currency.
+
+    A configured consequence is authoritative.  In its absence, a timely
+    supplier's unit price is an explicit, conservative replacement-cost
+    fallback: it is monetary, conversion-aware, and does not fabricate a
+    product margin or charge a lost sale once per ingredient.  Delivery cost
+    intentionally remains pack-level in the purchase term.
+    """
+    assumption = data.assumptions.get(key)
+    if assumption is not None and assumption.shortage_cost_per_unit > 0:
+        return assumption.shortage_cost_per_unit, "configured_shortage_consequence"
+    prices = [
+        item.offer.unit_price / item.factor_to_target
+        for item in data.regular_offers
+        if (item.offer.store_id, item.offer.ingredient_id) == key
+    ]
+    if prices:
+        return min(prices), "supplier_replacement_cost_fallback"
+    return 0.0, "not_configured"
+
+
 def _date_range(start: date, end: date) -> list[date]:
     return [start + timedelta(days=offset) for offset in range((end - start).days + 1)]
 
@@ -162,6 +186,13 @@ def build_problem_data(request: OptimizationRequest) -> OptimizationProblemData:
     }
     if len(assumptions) != len(normalized_assumptions):
         raise OptimizationError("Duplicate consequence cost assumptions.")
+    for key in target_units:
+        assumption = assumptions.get(key)
+        if assumption is None or assumption.shortage_cost_per_unit <= 0:
+            if any((item.offer.store_id, item.offer.ingredient_id) == key for item in eligible):
+                warnings.add("SHORTAGE_COST_FALLBACK_USED")
+            else:
+                warnings.add("SHORTAGE_CONSEQUENCE_NOT_CONFIGURED")
 
     return OptimizationProblemData(
         keys=sorted(target_units),

@@ -2,7 +2,11 @@ from shelfcash_core.optimization.contracts import StrategyProfile
 
 
 def default_strategy_profiles() -> list[StrategyProfile]:
-    """Explicit product defaults; callers may replace every coefficient."""
+    """Explicit dimensionless preference defaults.
+
+    Monetary base costs are deliberately not embedded here: they come from
+    ``ConsequenceCostAssumption`` in the supplier-price currency/cost unit.
+    """
 
     return [
         StrategyProfile(
