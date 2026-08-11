@@ -9,6 +9,8 @@ from shelfcash_core.inventory.contracts import (
 )
 from shelfcash_core.optimization.contracts import OptimizationRequest, StrategyProfile, SupplierOffer
 from shelfcash_core.optimization.optimizer import optimize_procurement
+from shelfcash_core.optimization.model_data import supplier_arrival_date
+from shelfcash_core.inventory.simulator import simulate_inventory_scenarios
 
 
 def _request(*, demand_days, probability_weight=None, unit_price=1000, lead_time_days=0,
@@ -153,6 +155,65 @@ def test_infeasible_protected_service_target_does_not_create_fake_purchase():
     plan = optimize_procurement(request).evaluations["PROTECTED"].plan
     assert plan.solver_status == "INFEASIBLE"
     assert plan.orders == []
+
+
+def test_expiry_bucket_allows_demand_through_expiry_date_but_not_after():
+    inventory = [InventoryLot(
+        lot_id="expiring", store_id="store", ingredient_id="ingredient",
+        quantity_remaining=10, unit="kg", received_date=date(2026, 8, 1),
+        expiry_date=date(2026, 8, 13), source_type="initial_inventory",
+    )]
+    plan = optimize_procurement(_request(
+        demand_days=[(date(2026, 8, 12), 4), (date(2026, 8, 13), 3), (date(2026, 8, 14), 3)],
+        unit_price=10_000, initial_inventory=inventory,
+    )).evaluations["LEAN"].plan
+    ledger = plan.provenance["chronology_ledger"]
+    assert [item["shortage"] for item in ledger] == [0, 0, 3, 0]
+    assert ledger[2]["expiry_loss"] == 3
+
+
+def test_two_expiry_buckets_preserve_later_lot_after_early_lot_expires():
+    inventory = [
+        InventoryLot(lot_id="early", store_id="store", ingredient_id="ingredient", quantity_remaining=5, unit="kg", received_date=date(2026, 8, 1), expiry_date=date(2026, 8, 12), source_type="initial_inventory"),
+        InventoryLot(lot_id="late", store_id="store", ingredient_id="ingredient", quantity_remaining=10, unit="kg", received_date=date(2026, 8, 1), expiry_date=date(2026, 8, 17), source_type="initial_inventory"),
+    ]
+    plan = optimize_procurement(_request(
+        demand_days=[(date(2026, 8, 12), 5), (date(2026, 8, 14), 10)], unit_price=10_000,
+        initial_inventory=inventory,
+    )).evaluations["LEAN"].plan
+    assert sum(item["shortage"] for item in plan.provenance["chronology_ledger"]) == 0
+
+
+def test_supplier_delivery_calendar_shifts_arrival_after_nominal_lead_time():
+    offer = SupplierOffer(
+        offer_id="calendar", supplier_id="supplier", store_id="store", ingredient_id="ingredient",
+        unit="kg", order_date=date(2026, 8, 12), pack_size=1, unit_price=1,
+        lead_time_days=1, available_delivery_days=[4],  # Friday; nominal Thursday.
+    )
+    assert supplier_arrival_date(offer) == date(2026, 8, 14)
+
+
+def test_expiry_bucket_preserves_exact_total_service_but_not_fefo_daily_allocation():
+    inventory = [
+        InventoryLot(lot_id="early", store_id="store", ingredient_id="ingredient", quantity_remaining=5, unit="kg", received_date=date(2026, 8, 1), expiry_date=date(2026, 8, 12), source_type="initial_inventory"),
+        InventoryLot(lot_id="late", store_id="store", ingredient_id="ingredient", quantity_remaining=5, unit="kg", received_date=date(2026, 8, 1), expiry_date=date(2026, 8, 14), source_type="initial_inventory"),
+    ]
+    request = _request(
+        demand_days=[(date(2026, 8, 12), 4), (date(2026, 8, 13), 3), (date(2026, 8, 14), 3)],
+        unit_price=10_000, initial_inventory=inventory,
+    )
+    plan = optimize_procurement(request).evaluations["LEAN"].plan
+    exact = simulate_inventory_scenarios(
+        request.initial_inventory, request.demand_scenarios, request.existing_inbound,
+        policy=request.inventory_policy, simulation_start_date=request.decision_date,
+        simulation_end_date=request.planning_end_date,
+    ).results[0].daily_ledgers
+    predicted = plan.provenance["chronology_ledger"]
+    assert sum(row["served"] for row in predicted) == sum(row.fulfilled_quantity for row in exact)
+    assert sum(row["shortage"] for row in predicted) == sum(row.shortage_quantity for row in exact)
+    # Buckets prevent expired supply from crossing its expiry boundary, but do
+    # not impose FEFO selection between simultaneously usable buckets.
+    assert predicted[1]["shortage"] != exact[1].shortage_quantity
 
 
 def test_purchase_with_lead_time_can_cover_later_horizon_demand():

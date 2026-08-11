@@ -249,7 +249,24 @@ def solve_deterministic_procurement(
             item.offer.delivery_cost * (1 + profile.cash_penalty), 0, 1, True
         )
 
-    inventory_index: dict[tuple[tuple[str, str], object], int] = {}
+    # Initial stock is split by expiry date.  The ``None`` bucket is the
+    # unbounded bucket for stock without an expiry contract, existing inbound,
+    # and planned supplier arrivals without an explicit shelf-life contract.
+    bucket_ids: dict[tuple[str, str], list[object | None]] = {
+        key: [None] for key in data.keys
+    }
+    bucket_initial: dict[tuple[tuple[str, str], object | None], float] = {}
+    for key in data.keys:
+        bucket_initial[(key, None)] = data.initial_quantity.get(key, 0.0) - sum(
+            item.quantity for item in data.initial_expiry_buckets if item.key == key
+        )
+    for item in data.initial_expiry_buckets:
+        bucket_ids[item.key].append(item.expiry_date)
+        bucket_initial[(item.key, item.expiry_date)] = item.quantity
+
+    inventory_index: dict[tuple[tuple[str, str], object | None, object], int] = {}
+    consumption_index: dict[tuple[tuple[str, str], object | None, object], int] = {}
+    expiry_loss_index: dict[tuple[tuple[str, str], object | None, object], int] = {}
     shortage_index: dict[tuple[tuple[str, str], object], int] = {}
     for key in data.keys:
         assumption = data.assumptions.get(key)
@@ -257,14 +274,31 @@ def solve_deterministic_procurement(
             assumption.holding_cost_per_unit_day if assumption else 0
         )
         shortage_cost = profile.shortage_penalty * shortage_cost_per_target_unit(data, key)[0]
+        for bucket in bucket_ids[key]:
+            for day in data.dates:
+                usable = bucket is None or (
+                    day <= bucket if request.inventory_policy.expiry_inclusive else day < bucket
+                )
+                inventory_index[(key, bucket, day)] = variables.add(
+                    holding_cost,
+                    0,
+                    (
+                        assumption.capacity_quantity
+                        if usable and assumption and assumption.capacity_quantity is not None
+                        else (np.inf if usable else 0)
+                    ),
+                )
+                consumption_index[(key, bucket, day)] = variables.add(
+                    0, 0, np.inf if usable else 0
+                )
+                # Any remaining finite-expiry stock is discarded only on the
+                # first day on which Exact FEFO considers it expired.
+                expiry_loss_index[(key, bucket, day)] = variables.add(
+                    0,
+                    0,
+                    np.inf if bucket is not None and not usable else 0,
+                )
         for day in data.dates:
-            inventory_index[(key, day)] = variables.add(
-                holding_cost,
-                0,
-                assumption.capacity_quantity
-                if assumption and assumption.capacity_quantity is not None
-                else np.inf,
-            )
             shortage_index[(key, day)] = variables.add(shortage_cost, 0, np.inf)
 
     rows: list[dict[int, float]] = []
@@ -287,30 +321,34 @@ def solve_deterministic_procurement(
         add_constraint({x: -1, y: minimum}, -np.inf, 0)
 
     for key in data.keys:
-        previous: int | None = None
+        for bucket in bucket_ids[key]:
+            previous: int | None = None
+            for day in data.dates:
+                coefficients = {
+                    inventory_index[(key, bucket, day)]: 1,
+                    consumption_index[(key, bucket, day)]: 1,
+                    expiry_loss_index[(key, bucket, day)]: 1,
+                }
+                if previous is not None:
+                    coefficients[previous] = -1
+                    starting = 0.0
+                else:
+                    starting = bucket_initial[(key, bucket)]
+                if bucket is None:
+                    for offer_index, item in enumerate(data.regular_offers):
+                        if (
+                            (item.offer.store_id, item.offer.ingredient_id) == key
+                            and item.arrival_date == day
+                        ):
+                            coefficients[x_index[offer_index]] = -item.pack_quantity_target
+                    starting += data.existing_inbound.get((key, day), 0)
+                add_constraint(coefficients, starting, starting)
+                previous = inventory_index[(key, bucket, day)]
         for day in data.dates:
-            coefficients = {
-                inventory_index[(key, day)]: 1,
-                shortage_index[(key, day)]: -1,
-            }
-            if previous is not None:
-                coefficients[previous] = -1
-                starting = 0.0
-            else:
-                starting = data.initial_quantity.get(key, 0)
-            for offer_index, item in enumerate(data.regular_offers):
-                if (
-                    (item.offer.store_id, item.offer.ingredient_id) == key
-                    and item.arrival_date == day
-                ):
-                    coefficients[x_index[offer_index]] = -item.pack_quantity_target
-            rhs = (
-                starting
-                + data.existing_inbound.get((key, day), 0)
-                - daily_demand[(key, day)]
-            )
-            add_constraint(coefficients, rhs, rhs)
-            previous = inventory_index[(key, day)]
+            coefficients = {shortage_index[(key, day)]: 1}
+            for bucket in bucket_ids[key]:
+                coefficients[consumption_index[(key, bucket, day)]] = 1
+            add_constraint(coefficients, daily_demand[(key, day)], daily_demand[(key, day)])
 
     # ``minimum_expected_fill_rate`` is an explicit strategy contract.  In
     # deterministic mode daily demand is already the design-weighted demand,
@@ -413,6 +451,40 @@ def solve_deterministic_procurement(
         "waste_term": 0.0,
         "total_objective": objective_value,
     }
+    chronology_ledger = []
+    if result.x is not None:
+        for key in data.keys:
+            for offset, day in enumerate(data.dates):
+                beginning = sum(
+                    float(result.x[inventory_index[(key, bucket, data.dates[offset - 1])]])
+                    for bucket in bucket_ids[key]
+                ) if offset else sum(bucket_initial[(key, bucket)] for bucket in bucket_ids[key])
+                planned_arrivals = sum(
+                    round(result.x[x_index[index]]) * item.pack_quantity_target
+                    for index, item in enumerate(data.regular_offers)
+                    if (item.offer.store_id, item.offer.ingredient_id) == key
+                    and item.arrival_date == day
+                )
+                expiry_loss = sum(
+                    float(result.x[expiry_loss_index[(key, bucket, day)]])
+                    for bucket in bucket_ids[key]
+                )
+                served = sum(
+                    float(result.x[consumption_index[(key, bucket, day)]])
+                    for bucket in bucket_ids[key]
+                )
+                chronology_ledger.append({
+                    "ingredient_id": key[1], "date": day.isoformat(),
+                    "unit": data.target_units[key], "beginning_usable_inventory": beginning,
+                    "existing_inbound": data.existing_inbound.get((key, day), 0.0),
+                    "planned_arrivals": planned_arrivals, "expiry_loss": expiry_loss,
+                    "demand": daily_demand[(key, day)], "served": served,
+                    "shortage": float(result.x[shortage_index[(key, day)]]),
+                    "ending_usable_inventory": sum(
+                        float(result.x[inventory_index[(key, bucket, day)]])
+                        for bucket in bucket_ids[key]
+                    ),
+                })
     return ProcurementPlan(
         plan_id=f"{request.request_id}-{profile.name.lower()}",
         strategy=profile.name,
@@ -437,6 +509,8 @@ def solve_deterministic_procurement(
                 else None
             ),
             "objective_breakdown": objective_breakdown,
+            "chronology_ledger": chronology_ledger,
+            "expiry_model": "initial_inventory_expiry_buckets_v1",
             "no_order_diagnostics": _no_order_diagnostics(
                 data, request, daily_demand, orders, profile
             ),

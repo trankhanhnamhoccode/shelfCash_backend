@@ -26,6 +26,13 @@ class EligibleOffer:
     pack_quantity_target: float
 
 
+@dataclass(frozen=True)
+class InitialExpiryBucket:
+    key: InventoryKey
+    expiry_date: date
+    quantity: float
+
+
 @dataclass
 class OptimizationProblemData:
     keys: list[InventoryKey]
@@ -36,6 +43,7 @@ class OptimizationProblemData:
     probabilistic_weights: bool
     demand: dict[tuple[str, InventoryKey, date], float]
     initial_quantity: dict[InventoryKey, float]
+    initial_expiry_buckets: list[InitialExpiryBucket]
     existing_inbound: dict[tuple[InventoryKey, date], float]
     regular_offers: list[EligibleOffer]
     emergency_offers: list[EligibleOffer]
@@ -69,6 +77,21 @@ def shortage_cost_per_target_unit(
 
 def _date_range(start: date, end: date) -> list[date]:
     return [start + timedelta(days=offset) for offset in range((end - start).days + 1)]
+
+
+def supplier_arrival_date(offer: SupplierOffer) -> date | None:
+    """Match the canonical supplier-term delivery-calendar semantics."""
+    nominal = offer.order_date + timedelta(days=offer.lead_time_days)
+    if offer.available_delivery_days is None:
+        return nominal
+    allowed = set(offer.available_delivery_days)
+    if not allowed:
+        return None
+    for offset in range(14):
+        candidate = nominal + timedelta(days=offset)
+        if candidate.weekday() in allowed:
+            return candidate
+    return None
 
 
 def build_problem_data(request: OptimizationRequest) -> OptimizationProblemData:
@@ -114,18 +137,25 @@ def build_problem_data(request: OptimizationRequest) -> OptimizationProblemData:
             ) from exc
 
     initial_quantity: defaultdict[InventoryKey, float] = defaultdict(float)
+    expiry_bucket_quantities: defaultdict[tuple[InventoryKey, date], float] = defaultdict(float)
     for lot in request.initial_inventory:
         key = (lot.store_id, lot.ingredient_id)
         if key not in target_units:
             continue
-        if lot.expiry_date is not None and lot.expiry_date < request.decision_date:
+        expired_at_start = lot.expiry_date is not None and (
+            lot.expiry_date < request.decision_date
+            if request.inventory_policy.expiry_inclusive
+            else lot.expiry_date <= request.decision_date
+        )
+        if expired_at_start:
             warnings.add("AGGREGATE_MODEL_EXCLUDED_PRESTART_EXPIRED_LOT")
             continue
         if lot.expiry_date is None:
             warnings.add("AGGREGATE_MODEL_COUNTS_UNKNOWN_EXPIRY_LOT")
-        elif lot.expiry_date < request.planning_end_date:
-            warnings.add("AGGREGATE_MODEL_IGNORES_WITHIN_HORIZON_EXPIRY")
-        initial_quantity[key] += lot.quantity_remaining * factor(key, lot.unit)
+        quantity = lot.quantity_remaining * factor(key, lot.unit)
+        initial_quantity[key] += quantity
+        if lot.expiry_date is not None:
+            expiry_bucket_quantities[(key, lot.expiry_date)] += quantity
 
     existing_inbound: defaultdict[tuple[InventoryKey, date], float] = defaultdict(float)
     for delivery in request.existing_inbound:
@@ -138,13 +168,14 @@ def build_problem_data(request: OptimizationRequest) -> OptimizationProblemData:
     eligible: list[EligibleOffer] = []
     for offer in request.supplier_offers:
         key = (offer.store_id, offer.ingredient_id)
-        arrival = offer.order_date + timedelta(days=offer.lead_time_days)
+        arrival = supplier_arrival_date(offer)
         if key not in target_units:
             continue
         if (
             not offer.available
             or offer.order_date < request.decision_date
             or offer.order_date > request.planning_end_date
+            or arrival is None
             or arrival > request.planning_end_date
             or (
                 offer.order_cutoff_date is not None
@@ -203,6 +234,10 @@ def build_problem_data(request: OptimizationRequest) -> OptimizationProblemData:
         probabilistic_weights=probabilistic,
         demand=dict(demand),
         initial_quantity=dict(initial_quantity),
+        initial_expiry_buckets=[
+            InitialExpiryBucket(key=key, expiry_date=expiry_date, quantity=quantity)
+            for (key, expiry_date), quantity in sorted(expiry_bucket_quantities.items())
+        ],
         existing_inbound=dict(existing_inbound),
         regular_offers=[item for item in eligible if not item.offer.emergency],
         emergency_offers=[item for item in eligible if item.offer.emergency],

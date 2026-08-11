@@ -37,6 +37,10 @@ class SupplierOffer(StrictOptimizationContract):
     minimum_order_quantity: float = Field(default=0, ge=0)
     maximum_order_quantity: float | None = Field(default=None, gt=0)
     lead_time_days: int = Field(ge=0)
+    available_delivery_days: list[int] | None = Field(
+        default=None,
+        description="Optional allowed weekday numbers (Monday=0); null means unrestricted.",
+    )
     shelf_life_days: int | None = Field(
         default=None,
         ge=0,
@@ -56,6 +60,10 @@ class SupplierOffer(StrictOptimizationContract):
             and self.maximum_order_quantity < self.minimum_order_quantity
         ):
             raise ValueError("maximum_order_quantity cannot be below MOQ.")
+        if self.available_delivery_days is not None and any(
+            day < 0 or day > 6 for day in self.available_delivery_days
+        ):
+            raise ValueError("available_delivery_days must contain weekday values 0..6.")
         return self
 
 

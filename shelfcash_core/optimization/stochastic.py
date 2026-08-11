@@ -594,5 +594,7 @@ def solve_stochastic_procurement(
             "requires_m4_resimulation": True,
             "objective_breakdown": objective_breakdown,
         },
-        warnings=data.warnings,
+        warnings=sorted(set(data.warnings) | ({
+            "STOCHASTIC_AGGREGATE_MODEL_IGNORES_WITHIN_HORIZON_EXPIRY"
+        } if data.initial_expiry_buckets else set())),
     )

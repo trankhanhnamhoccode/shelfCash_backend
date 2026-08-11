@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+import json
 import pandas as pd
 from sqlalchemy import select
 
@@ -67,6 +68,10 @@ class CoreProcurementAdapter:
                     order_date=decision_date, pack_size=float(term.pack_size),
                     unit_price=float(term.unit_cost), minimum_order_quantity=float(term.moq),
                     lead_time_days=term.lead_time_days, available=True,
+                    available_delivery_days=(
+                        None if term.available_delivery_days is None
+                        else json.loads(term.available_delivery_days)
+                    ),
                 ))
         scenarios = []
         scenario_metadata = {"method": "quantile_design_fallback", "stochastic_enabled": False, "warnings": ["SCENARIO_HISTORY_INSUFFICIENT"]}
