@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date
+from math import isclose
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -13,6 +14,7 @@ class StrictBOMContract(BaseModel):
 
 
 class RecipeRecord(StrictBOMContract):
+    recipe_line_id: str | None = None
     recipe_id: str = Field(min_length=1)
     product_id: str = Field(min_length=1)
     ingredient_id: str = Field(min_length=1)
@@ -68,6 +70,7 @@ class IngredientDemandSource(StrictBOMContract):
     product_unit: str | None = None
     recipe_id: str
     recipe_version: str
+    recipe_line_id: str | None = None
     forecast_p25: float = Field(ge=0)
     forecast_p50: float = Field(ge=0)
     forecast_p75: float = Field(ge=0)
@@ -117,6 +120,36 @@ class IngredientDemandPrediction(StrictBOMContract):
     def validate_ordering(self) -> IngredientDemandPrediction:
         if not self.p25 <= self.p50 <= self.p75:
             raise ValueError("Ingredient quantiles phải thỏa P25 <= P50 <= P75.")
+        totals = (
+            sum(source.contribution_p25 for source in self.sources),
+            sum(source.contribution_p50 for source in self.sources),
+            sum(source.contribution_p75 for source in self.sources),
+        )
+        if not all(
+            isclose(actual, expected, rel_tol=1e-9, abs_tol=1e-9)
+            for actual, expected in zip((self.p25, self.p50, self.p75), totals, strict=True)
+        ):
+            raise ValueError("Ingredient demand quantiles must equal source contributions.")
+        identities = [
+            (
+                source.product_id,
+                source.recipe_id,
+                source.recipe_version,
+                self.ingredient_id,
+                source.recipe_line_id
+                or (
+                    source.recipe_quantity,
+                    source.recipe_unit,
+                    source.yield_quantity,
+                    source.yield_unit,
+                    source.process_loss_rate,
+                    source.waste_allowance_rate,
+                ),
+            )
+            for source in self.sources
+        ]
+        if len(identities) != len(set(identities)):
+            raise ValueError("Duplicate semantic BOM contribution detected.")
         return self
 
 

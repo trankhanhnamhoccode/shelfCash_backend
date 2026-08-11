@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from datetime import timedelta
 
 import numpy as np
 from scipy.optimize import Bounds, LinearConstraint, milp
@@ -72,6 +73,100 @@ def _decision(item: EligibleOffer, packs: int) -> ProcurementDecisionLine:
         shelf_life_days=offer.shelf_life_days,
         emergency=offer.emergency,
     )
+
+
+def _no_order_diagnostics(
+    data,
+    request: OptimizationRequest,
+    daily_demand: dict,
+    orders: list[ProcurementDecisionLine],
+) -> list[dict]:
+    """Return compact, deterministic explanations for demand keys with no buy."""
+
+    selected_by_key: dict[tuple[str, str], float] = {}
+    for line in orders:
+        key = (line.store_id, line.ingredient_id)
+        selected_by_key[key] = selected_by_key.get(key, 0.0) + line.order_quantity
+    diagnostics = []
+    for key in data.keys:
+        demand_by_date = {
+            day.isoformat(): daily_demand[(key, day)]
+            for day in data.dates
+            if daily_demand[(key, day)] > 0
+        }
+        if not demand_by_date or selected_by_key.get(key, 0.0) > 1e-9:
+            continue
+        balance = data.initial_quantity.get(key, 0.0)
+        first_shortage_date = None
+        for day in data.dates:
+            balance += data.existing_inbound.get((key, day), 0.0)
+            balance -= daily_demand[(key, day)]
+            if balance < -1e-9 and first_shortage_date is None:
+                first_shortage_date = day.isoformat()
+        eligible = [
+            item for item in data.regular_offers
+            if (item.offer.store_id, item.offer.ingredient_id) == key
+        ]
+        matching = [
+            offer for offer in request.supplier_offers
+            if (offer.store_id, offer.ingredient_id) == key
+        ]
+        if first_shortage_date is None:
+            reason = "NO_PURCHASE_INVENTORY_SUFFICIENT"
+        elif not matching:
+            reason = "NO_PURCHASE_NO_VALID_SUPPLIER"
+        elif not eligible:
+            arrivals = [
+                offer.order_date + timedelta(days=offer.lead_time_days)
+                for offer in matching
+            ]
+            reason = (
+                "NO_PURCHASE_ARRIVES_TOO_LATE"
+                if arrivals and min(arrivals) > request.planning_end_date
+                else "NO_PURCHASE_NO_VALID_SUPPLIER"
+            )
+        elif request.budget is not None and all(
+            max(item.offer.minimum_order_quantity, item.offer.pack_size)
+            * item.offer.unit_price + item.offer.delivery_cost > request.budget + 1e-9
+            for item in eligible
+        ):
+            reason = "NO_PURCHASE_BUDGET_BLOCKED"
+        else:
+            reason = "NO_PURCHASE_OBJECTIVE_PREFERS_SHORTAGE"
+        diagnostics.append(
+            {
+                "ingredient_id": key[1],
+                "unit": data.target_units[key],
+                "demand_by_date": demand_by_date,
+                "usable_initial_inventory": data.initial_quantity.get(key, 0.0),
+                "open_inbound_by_date": {
+                    day.isoformat(): data.existing_inbound.get((key, day), 0.0)
+                    for day in data.dates
+                    if data.existing_inbound.get((key, day), 0.0) > 0
+                },
+                "first_shortage_date_without_purchase": first_shortage_date,
+                "budget_limit": request.budget,
+                "no_order_reason": reason,
+                "offers": [
+                    {
+                        "supplier_id": item.offer.supplier_id,
+                        "offer_id": item.offer.offer_id,
+                        "available": item.offer.available,
+                        "unit": item.offer.unit,
+                        "unit_conversion_factor": item.factor_to_target,
+                        "moq": item.offer.minimum_order_quantity,
+                        "pack_size": item.offer.pack_size,
+                        "maximum_order_quantity": item.offer.maximum_order_quantity,
+                        "lead_time_days": item.offer.lead_time_days,
+                        "order_date": item.offer.order_date.isoformat(),
+                        "arrival_date": item.arrival_date.isoformat(),
+                        "unit_purchase_price": item.offer.unit_price,
+                    }
+                    for item in eligible
+                ],
+            }
+        )
+    return diagnostics
 
 
 def solve_deterministic_procurement(
@@ -238,6 +333,26 @@ def solve_deterministic_procurement(
         for line in orders
     )
     objective_value = float(result.fun) if result.fun is not None else None
+    objective_breakdown = {
+        "purchase_term": weighted_first_stage_cost,
+        "shortage_term": (
+            sum(
+                float(result.x[index]) * variables.cost[index]
+                for index in shortage_index.values()
+            )
+            if result.x is not None
+            else None
+        ),
+        "holding_and_terminal_waste_term": (
+            sum(
+                float(result.x[index]) * variables.cost[index]
+                for index in inventory_index.values()
+            )
+            if result.x is not None
+            else None
+        ),
+        "total_objective": objective_value,
+    }
     return ProcurementPlan(
         plan_id=f"{request.request_id}-{profile.name.lower()}",
         strategy=profile.name,
@@ -256,6 +371,10 @@ def solve_deterministic_procurement(
             "formulation": "chronological_aggregate_inventory_mip_v1",
             "exact_inventory_physics": False,
             "requires_m4_resimulation": True,
+            "objective_breakdown": objective_breakdown,
+            "no_order_diagnostics": _no_order_diagnostics(
+                data, request, daily_demand, orders
+            ),
         },
         warnings=data.warnings,
     )

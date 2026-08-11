@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 
 import pandas as pd
 
@@ -14,6 +15,7 @@ from shelfcash_core.contracts import ForecastPackage, ForecastPrediction
 from shelfcash_core.scenario.bom import propagate_ingredient_demand_scenarios
 from shelfcash_core.exceptions import BOMError
 
+logger = logging.getLogger("shelfcash.decision.bom")
 
 class CoreBomAdapter:
     """Loads ORM state once, then invokes the pure deterministic BOM engine."""
@@ -75,21 +77,45 @@ class CoreBomAdapter:
         )
     def recipe_frame(self, store_id, predictions):
         recipe_rows = []
+        lines_by_version = {}
+        ingredients_by_id = {}
+        seen_line_identities = set()
+        recipe_version_ids = set()
+        product_ids = set()
+        target_dates = set()
+        line_count_before_dedup = 0
+        duplicate_recipe_line_count = 0
         for row in predictions:
+            product_ids.add(row.product_id)
+            target_dates.add(row.target_date)
             active = self.recipes.get_active(store_id, row.product_id, row.target_date)
             if active is None:
                 code = "RECIPE_NOT_EFFECTIVE" if self.recipes.get_versions(store_id, row.product_id) else "RECIPE_NOT_FOUND"
                 raise PlanningError(code, "Recipe hợp lệ cho product forecast không tồn tại.", {
                     "product_id": row.product_id, "target_date": row.target_date.isoformat(),
                 })
-            lines = self.recipes.lines(active.recipe_version_id)
+            recipe_version_ids.add(active.recipe_version_id)
+            lines = lines_by_version.get(active.recipe_version_id)
+            if lines is None:
+                lines = self.recipes.lines(active.recipe_version_id)
+                lines_by_version[active.recipe_version_id] = lines
             if not lines:
                 raise PlanningError("RECIPE_LINE_INVALID", "Recipe không có line.", {"recipe_version_id": active.recipe_version_id})
+            line_count_before_dedup += len(lines)
             for line in lines:
-                ingredient = self.session.get(IngredientModel, line.ingredient_id)
+                identity = line.recipe_line_id
+                if identity in seen_line_identities:
+                    duplicate_recipe_line_count += 1
+                    continue
+                seen_line_identities.add(identity)
+                ingredient = ingredients_by_id.get(line.ingredient_id)
+                if ingredient is None:
+                    ingredient = self.session.get(IngredientModel, line.ingredient_id)
+                    ingredients_by_id[line.ingredient_id] = ingredient
                 if ingredient is None or ingredient.store_id != store_id:
                     raise PlanningError("RECIPE_LINE_INVALID", "Ingredient trong recipe không hợp lệ.", {"recipe_line_id": line.recipe_line_id})
                 recipe_rows.append({
+                    "recipe_line_id": line.recipe_line_id,
                     "store_id": store_id,
                     "recipe_id": active.recipe_version_id,
                     "product_id": row.product_id,
@@ -107,6 +133,18 @@ class CoreBomAdapter:
                     "effective_from": active.effective_from,
                     "effective_to": active.effective_to,
                 })
+        logger.info(
+            "bom_recipe_frame_built",
+            extra={
+                "event": "bom_recipe_frame_built",
+                "product_count": len(product_ids),
+                "target_date_count": len(target_dates),
+                "recipe_version_count": len(recipe_version_ids),
+                "recipe_line_count_before_dedup": line_count_before_dedup,
+                "recipe_line_count_after_dedup": len(recipe_rows),
+                "duplicate_recipe_line_count": duplicate_recipe_line_count,
+            },
+        )
         return recipe_rows
 
     def expand_scenarios(self, store_id, forecast_run, predictions, product_scenarios):

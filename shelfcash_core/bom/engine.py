@@ -163,6 +163,7 @@ def _build_source(
         product_unit=product_unit,
         recipe_id=recipe.recipe_id,
         recipe_version=recipe.recipe_version,
+        recipe_line_id=recipe.recipe_line_id,
         forecast_p25=prediction.p25,
         forecast_p50=prediction.p50,
         forecast_p75=prediction.p75,

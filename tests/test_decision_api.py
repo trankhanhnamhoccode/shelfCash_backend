@@ -27,6 +27,23 @@ def test_core_decision_package_is_persisted_and_reloaded(client):
     package = response.json()
     assert package["engine_mode"] == "deterministic"
     assert package["technical_metrics"]["baseline_engine"] == "lot_level_fefo_v1"
+    assert package["technical_metrics"]["forecast_trace"] == {
+        "decision_run_id": package["decision_run_id"],
+        "requested_forecast_run_id": "decision-forecast",
+        "resolved_forecast_run_id": "decision-forecast",
+        "forecast_store_id": "STORE_001",
+        "forecast_cutoff_date": "2026-08-03",
+        "forecast_target_min": "2026-08-04",
+        "forecast_target_max": "2026-08-04",
+        "prediction_count": 1,
+    }
+    assert package["ingredient_demand"][0]["p50"] == 2.0
+    with sf() as s:
+        s.get(RecipeLineModel, "decision-line").quantity = Decimal("2")
+        s.commit()
+    refreshed = client.post("/api/v1/stores/STORE_001/decision-runs", json={"forecast_run_id":"decision-forecast", "as_of_date":"2026-08-03", "horizon_days":1, "engine_mode":"deterministic"})
+    assert refreshed.status_code == 200, refreshed.text
+    assert refreshed.json()["ingredient_demand"][0]["p50"] == 4.0
     restored = client.get(f"/api/v1/decision-runs/{package['decision_run_id']}")
     assert restored.status_code == 200
     assert restored.json() == package

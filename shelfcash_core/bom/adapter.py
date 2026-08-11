@@ -214,6 +214,12 @@ def adapt_recipes(recipes: pd.DataFrame) -> list[RecipeRecord]:
         try:
             records.append(
                 RecipeRecord(
+                    recipe_line_id=(
+                        None
+                        if "recipe_line_id" not in frame.columns
+                        or _missing_text(row["recipe_line_id"])
+                        else str(row["recipe_line_id"]).strip()
+                    ),
                     recipe_id=str(row["recipe_id"]).strip(),
                     product_id=str(row["product_id"]).strip(),
                     ingredient_id=str(row["ingredient_id"]).strip(),

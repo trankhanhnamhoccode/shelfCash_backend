@@ -188,6 +188,12 @@ def critique_procurement_plan(
         checks["exact_service_floor"] = floor_valid
         if not floor_valid:
             violations.append("EXACT_SIMULATION_SAFETY_FLOOR")
+            details.setdefault("finding_evidence", {})["EXACT_SIMULATION_SAFETY_FLOOR"] = {
+                "minimum_key_scenario_fill_rate": minimum_exact_fill,
+                "required_minimum_fill_rate": profile.minimum_acceptable_fill_rate,
+                "any_stockout_probability": exact_stockout,
+                "maximum_stockout_probability": profile.maximum_acceptable_stockout_probability,
+            }
 
         service_valid = True
         if profile.minimum_expected_fill_rate is not None:
@@ -238,18 +244,39 @@ def critique_procurement_plan(
         checks["service_level"] = service_valid
         if not service_valid:
             violations.append("SERVICE_LEVEL_REQUIREMENT")
+            details.setdefault("finding_evidence", {})["SERVICE_LEVEL_REQUIREMENT"] = {
+                "minimum_expected_fill_rate": profile.minimum_expected_fill_rate,
+                "minimum_fill_rate": profile.minimum_fill_rate,
+                "required_fill_rate_probability": profile.required_fill_rate_probability,
+            }
 
         risk_valid = True
         if profile.maximum_stockout_probability is not None:
-            risk_valid = metrics is not None and (
-                metrics.any_stockout_probability
-                <= profile.maximum_stockout_probability + 1e-9
-            )
             if metrics is None:
                 warnings.append("UNWEIGHTED_STOCKOUT_PROBABILITY_NOT_EVALUATED")
-        checks["risk"] = risk_valid
-        if not risk_valid:
-            violations.append("RISK_CONSTRAINT_VIOLATION")
+                warnings.append("RISK_METRIC_NOT_AVAILABLE")
+                checks["risk"] = False
+                details["risk_evaluation"] = {
+                    "status": "not_evaluated",
+                    "reason": "probability_weights_unavailable",
+                    "maximum_stockout_probability": profile.maximum_stockout_probability,
+                }
+            else:
+                risk_valid = (
+                    metrics.any_stockout_probability
+                    <= profile.maximum_stockout_probability + 1e-9
+                )
+                checks["risk"] = risk_valid
+                details["risk_evaluation"] = {
+                    "status": "passed" if risk_valid else "violated",
+                    "stockout_probability": metrics.any_stockout_probability,
+                    "maximum_stockout_probability": profile.maximum_stockout_probability,
+                }
+                if not risk_valid:
+                    violations.append("RISK_CONSTRAINT_VIOLATION")
+                    details.setdefault("finding_evidence", {})["RISK_CONSTRAINT_VIOLATION"] = details["risk_evaluation"]
+        else:
+            checks["risk"] = True
 
         mismatch, mismatch_details = _model_mismatch(plan, simulation, profile)
         details["candidate_model_mismatch"] = mismatch_details
