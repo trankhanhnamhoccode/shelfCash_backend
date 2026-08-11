@@ -3,11 +3,13 @@ from datetime import date, timedelta
 from decimal import Decimal
 from uuid import uuid4
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from app.core.exceptions import (
- BudgetExceededError, DuplicateRequestError, InvalidStateTransitionError,
+ BudgetExceededError, BusinessIdentityConflictError, DuplicateRequestError, InvalidStateTransitionError,
  ModelNotReadyError, ResourceNotFoundError, ValidationError, VersionConflictError,
 )
-from app.core.provenance import canonical_hash
+from app.core.provenance import canonical_hash, normalized_optional_identifier, purchase_receipt_identity
+from app.services.sales_usage_reconciliation import reconcile_usage_from_sales
 from app.core.business_constraints import constraint_definition
 from app.core.units import convert_quantity
 from app.models.business import (
@@ -223,62 +225,54 @@ class CompletionService:
   payload=body.model_dump(mode="json");request_hash=canonical_hash(payload)
   allowed={"pos","manual","integration"} if kind=="sales_batch" else {"supplier_invoice","manual","integration"}
   if body.source not in allowed or (kind=="purchase_batch" and body.inventory_effect!="record_only"):raise ValidationError("source hoặc inventory_effect không hợp lệ.")
-  keys=[(r.date,getattr(r,"product_id",None)) if kind=="sales_batch" else (body.source,r.external_record_id) for r in body.records]
+  keys=[(r.date,r.product_id,r.promotion) if kind=="sales_batch" else purchase_receipt_identity(store_id=store,source=body.source,external_record_id=r.external_record_id,receipt_date=r.date,ingredient_id=r.ingredient_id,supplier_id=r.supplier_id,quantity=r.quantity,unit=r.unit,unit_cost=r.unit_cost,expiry_date=r.expiry_date,batch_code=r.supplier_lot_code) for r in body.records]
   if len(set(keys))!=len(keys):raise ValidationError("Business key bị lặp trong request.")
   with self.factory() as s:
    StoreRepository(s).get_required(store);idem=IdempotencyService(IdempotencyRepository(s))
    if key:
     replay=idem.register(store_id=store,endpoint=path,http_method="POST",idempotency_key=key,request_hash=request_hash)
     if replay.is_replay:s.rollback();return json.loads(replay.record.response_body_json)
-   created=unchanged=0;records=[];warnings=[]
+   created=unchanged=0;records=[];warnings=[];sales_dates=set()
    for r in body.records:
     if kind=="sales_batch":
      if not s.scalar(select(ProductModel).where(ProductModel.store_id==store,ProductModel.product_id==r.product_id)):raise ResourceNotFoundError(details={"resource":"product","product_id":r.product_id})
-     current=s.scalar(select(SalesDailyModel).where(SalesDailyModel.store_id==store,SalesDailyModel.date==r.date,SalesDailyModel.product_id==r.product_id))
+     current=s.scalar(select(SalesDailyModel).where(SalesDailyModel.store_id==store,SalesDailyModel.date==r.date,SalesDailyModel.product_id==r.product_id,SalesDailyModel.promotion==r.promotion))
      same=current and current.quantity==r.quantity and current.unit_price==r.unit_price and current.source==body.source and current.promotion==r.promotion and current.external_record_id==r.external_record_id
      if current and not same:raise DuplicateRequestError("Sales business key đã tồn tại với nội dung khác.")
      if current:unchanged+=1;rid=current.sales_record_id;status="unchanged"
      else:
       rid=str(uuid4());s.add(SalesDailyModel(sales_record_id=rid,store_id=store,date=r.date,product_id=r.product_id,quantity=r.quantity,unit_price=r.unit_price,promotion=r.promotion,source=body.source,external_record_id=r.external_record_id));created+=1;status="created"
-      sold_product=s.scalar(select(ProductModel).where(ProductModel.store_id==store,ProductModel.product_id==r.product_id))
-      demand_products=[(sold_product,Decimal(1))]
-      if sold_product.item_type=="combo":
-       bundle=list(s.execute(select(ProductBundleLineModel,ProductModel).join(ProductModel,ProductModel.product_id==ProductBundleLineModel.component_product_id).where(ProductBundleLineModel.store_id==store,ProductBundleLineModel.combo_product_id==sold_product.product_id).order_by(ProductBundleLineModel.position)))
-       demand_products=[(component,Decimal(line.quantity)) for line,component in bundle]
-      for demand_product,multiplier in demand_products:
-       recipe=s.scalar(select(RecipeVersionModel).where(
-        RecipeVersionModel.store_id==store,RecipeVersionModel.product_id==demand_product.product_id,
-        RecipeVersionModel.effective_from<=r.date,
-        (RecipeVersionModel.effective_to.is_(None)) | (RecipeVersionModel.effective_to>=r.date),
-       ).order_by(RecipeVersionModel.version.desc()))
-       if recipe:
-        for line in s.scalars(select(RecipeLineModel).where(RecipeLineModel.recipe_version_id==recipe.recipe_version_id)):
-         usage=s.scalar(select(UsageDailyModel).where(UsageDailyModel.store_id==store,UsageDailyModel.date==r.date,UsageDailyModel.ingredient_id==line.ingredient_id))
-         rebuilt=Decimal(r.quantity)*multiplier*Decimal(line.quantity)
-         if usage is None:
-          s.add(UsageDailyModel(usage_record_id=str(uuid4()),store_id=store,date=r.date,ingredient_id=line.ingredient_id,quantity=rebuilt,unit=line.unit,source="reconstructed_from_sales"))
-         elif usage.source=="reconstructed_from_sales":
-          usage.quantity=Decimal(usage.quantity)+rebuilt
-       else:warnings.append({"external_record_id":r.external_record_id,"code":"RECIPE_NOT_FOUND","combo_product_id":sold_product.product_id if sold_product.item_type=="combo" else None,"component_product_id":demand_product.product_id,"sale_date":r.date.isoformat()})
+     sales_dates.add(r.date)
      records.append({"external_record_id":r.external_record_id,"sales_record_id":rid,"status":status})
     else:
      ingredient=s.scalar(select(IngredientModel).where(IngredientModel.store_id==store,IngredientModel.ingredient_id==r.ingredient_id));supplier=s.scalar(select(SupplierModel).where(SupplierModel.store_id==store,SupplierModel.supplier_id==r.supplier_id))
      if not ingredient or not supplier:raise ResourceNotFoundError(details={"resource":"ingredient_or_supplier"})
      quantity=convert_quantity(r.quantity,r.unit,ingredient.base_unit)
-     current=s.scalar(select(PurchaseReceiptModel).where(PurchaseReceiptModel.store_id==store,PurchaseReceiptModel.source==body.source,PurchaseReceiptModel.external_record_id==r.external_record_id))
+     external=normalized_optional_identifier(r.external_record_id)
+     identity_kind, identity_key=purchase_receipt_identity(store_id=store,source=body.source,external_record_id=external,receipt_date=r.date,ingredient_id=r.ingredient_id,supplier_id=r.supplier_id,quantity=quantity,unit=ingredient.base_unit,unit_cost=r.unit_cost,expiry_date=r.expiry_date,batch_code=r.supplier_lot_code)
+     current_query=select(PurchaseReceiptModel).where(PurchaseReceiptModel.store_id==store)
+     current_query=current_query.where(PurchaseReceiptModel.source==body.source,PurchaseReceiptModel.external_record_id==external) if identity_kind=="external" else current_query.where(PurchaseReceiptModel.business_key_hash==identity_key)
+     current=s.scalar(current_query)
      same=current and current.quantity==quantity and current.unit_cost==r.unit_cost and current.receipt_date==r.date and current.ingredient_id==r.ingredient_id and current.supplier_id==r.supplier_id
      if current and not same:raise DuplicateRequestError("Purchase external ID đã tồn tại với nội dung khác.")
      if current:unchanged+=1;rid=current.receipt_id;status="unchanged"
      else:
-      rid=str(uuid4());s.add(PurchaseReceiptModel(receipt_id=rid,store_id=store,ingredient_id=r.ingredient_id,supplier_id=r.supplier_id,receipt_date=r.date,quantity=quantity,unit=ingredient.base_unit,unit_cost=r.unit_cost,expiry_date=r.expiry_date,batch_code=r.supplier_lot_code,source=body.source,external_record_id=r.external_record_id,inventory_effect="record_only"));created+=1;status="created"
+      rid=str(uuid4());s.add(PurchaseReceiptModel(receipt_id=rid,store_id=store,ingredient_id=r.ingredient_id,supplier_id=r.supplier_id,receipt_date=r.date,quantity=quantity,unit=ingredient.base_unit,unit_cost=r.unit_cost,expiry_date=r.expiry_date,batch_code=normalized_optional_identifier(r.supplier_lot_code),source=body.source,external_record_id=external,business_key_hash=identity_key if identity_kind=="business_hash" else None,inventory_effect="record_only"));created+=1;status="created"
      records.append({"external_record_id":r.external_record_id,"purchase_record_id":rid,"status":status})
+   if kind=="sales_batch":warnings.extend(reconcile_usage_from_sales(s,store,sales_dates))
    result={"batch_id":str(uuid4()),"created_count":created,"unchanged_count":unchanged,"records":records}
    if kind=="sales_batch":result.update({"usage_rebuild":{"status":"completed","warning_count":len(warnings)},"warnings":warnings})
    else:result["inventory_applied"]=False
    AuditService(AuditLogRepository(s)).record(store_id=store,action=kind,resource_type="history_batch",resource_id=result["batch_id"],after={"created_count":created,"unchanged_count":unchanged},source="api")
    if key:
     rec=IdempotencyRepository(s).get(store_id=store,endpoint=path,http_method="POST",idempotency_key=key);rec.response_status=201;rec.response_body_json=json.dumps(result,default=str)
-   s.commit();return result
+   try:s.commit()
+   except IntegrityError as exc:
+    s.rollback()
+    if "uq_purchase_receipts_external_identity" in str(exc) or "purchase_receipts.store_id, purchase_receipts.source, purchase_receipts.external_record_id" in str(exc):raise BusinessIdentityConflictError("PURCHASE_RECEIPT_DUPLICATE","Purchase receipt external identity already exists.") from None
+    if "uq_sales_natural_key" in str(exc) or "sales_daily.store_id, sales_daily.date, sales_daily.product_id, sales_daily.promotion" in str(exc):raise BusinessIdentityConflictError("DUPLICATE_SALES_DAILY_RECORD","Sales daily identity already exists.") from None
+    raise
+   return result
  def forecast_create(self,store,b,key):
   return self.forecast_service.create_legacy_run(store,b,key)
  def forecast_get(self,store,rid,result):
@@ -372,18 +366,36 @@ class CompletionService:
       if Decimal(line.received_quantity)+total_qty>Decimal(line.ordered_quantity):raise ValidationError("Không được nhận vượt số lượng đặt.")
       for lot_in in received_line.lots:
        if lot_in.expiry_date and lot_in.expiry_date<receipt_date:raise ValidationError("expiry_date trước ngày nhận.")
-       lot_id=str(uuid4());qty=Decimal(lot_in.quantity)
-       s.add(InventoryLotModel(lot_id=lot_id,store_id=store,ingredient_id=line.ingredient_id,supplier_id=po.supplier_id,batch_code=lot_in.supplier_lot_code,received_date=receipt_date,expiry_date=lot_in.expiry_date,initial_quantity=qty,unit=line.unit,unit_cost=line.unit_cost,source="purchase_order",version=1))
+       qty=Decimal(lot_in.quantity);batch_code=normalized_optional_identifier(lot_in.supplier_lot_code)
+       lot=None
+       if batch_code is not None:
+        lot=s.scalar(select(InventoryLotModel).where(InventoryLotModel.store_id==store,InventoryLotModel.ingredient_id==line.ingredient_id,InventoryLotModel.batch_code==batch_code))
+       if lot is None:
+        lot_id=str(uuid4());lot=InventoryLotModel(lot_id=lot_id,store_id=store,ingredient_id=line.ingredient_id,supplier_id=po.supplier_id,batch_code=batch_code,received_date=receipt_date,expiry_date=lot_in.expiry_date,initial_quantity=qty,unit=line.unit,unit_cost=line.unit_cost,source="purchase_order",version=1);s.add(lot);s.flush()
+       else:
+        conflicts=[]
+        if lot.unit!=line.unit:conflicts.append("unit")
+        if lot.expiry_date!=lot_in.expiry_date:conflicts.append("expiry_date")
+        if lot.supplier_id is not None and lot.supplier_id!=po.supplier_id:conflicts.append("supplier_id")
+        if conflicts:raise BusinessIdentityConflictError("INVENTORY_LOT_METADATA_CONFLICT","Batch lot metadata conflicts with the existing lot.",{"store_id":store,"ingredient_id":line.ingredient_id,"batch_code":batch_code,"existing":{"supplier_id":lot.supplier_id,"unit":lot.unit,"expiry_date":lot.expiry_date},"incoming":{"supplier_id":po.supplier_id,"unit":line.unit,"expiry_date":lot_in.expiry_date},"conflicting_fields":conflicts})
+        lot_id=lot.lot_id
        s.add(InventoryMovementModel(movement_id=str(uuid4()),store_id=store,lot_id=lot_id,movement_type="receipt",quantity_delta=qty,unit=line.unit,occurred_at=body.received_at,source="purchase_order",source_id=po.po_id))
-       s.add(PurchaseReceiptModel(receipt_id=str(uuid4()),store_id=store,ingredient_id=line.ingredient_id,supplier_id=po.supplier_id,receipt_date=receipt_date,quantity=qty,unit=line.unit,unit_cost=line.unit_cost,expiry_date=lot_in.expiry_date,batch_code=lot_in.supplier_lot_code,source="purchase_order",external_record_id=f"{body.delivery_reference}:{line.po_line_id}:{lot_id}",inventory_effect="applied",po_id=po.po_id,po_line_id=line.po_line_id))
+       s.add(PurchaseReceiptModel(receipt_id=str(uuid4()),store_id=store,ingredient_id=line.ingredient_id,supplier_id=po.supplier_id,receipt_date=receipt_date,quantity=qty,unit=line.unit,unit_cost=line.unit_cost,expiry_date=lot_in.expiry_date,batch_code=batch_code,source="purchase_order",external_record_id=f"{body.delivery_reference}:{line.po_line_id}:{lot_id}",inventory_effect="applied",po_id=po.po_id,po_line_id=line.po_line_id))
       line.received_quantity=Decimal(line.received_quantity)+total_qty;line.version+=1;received_cost+=int(total_qty*Decimal(line.unit_cost))
      if received_cost>bp.reserved_budget:raise ValidationError("Budget reservation không đủ.")
      bp.reserved_budget-=received_cost;bp.spent_budget+=received_cost
      complete=all(Decimal(x.received_quantity)==Decimal(x.ordered_quantity) for x in lines.values())
      po.status="received" if complete else "partially_received";po.received_at=body.received_at if complete else None;po.version+=1
     else:raise ValidationError("Unknown PO action.")
+   if action != "create":
     s.flush();result=self._po_public(s,po)
    AuditService(AuditLogRepository(s)).record(store_id=store,action=f"purchase_order_{action}",resource_type="purchase_order",resource_id=po_id or ",".join(x["po_id"] for x in result["orders"]),after={"action":action},source="api")
    if key:
     rec=IdempotencyRepository(s).get(store_id=store,endpoint=path,http_method="POST",idempotency_key=key);rec.response_status=201;rec.response_body_json=json.dumps(result,default=str,ensure_ascii=False)
-   s.commit();return result
+   try:s.commit()
+   except IntegrityError as exc:
+    s.rollback()
+    if "uq_purchase_receipts_external_identity" in str(exc) or "purchase_receipts.store_id, purchase_receipts.source, purchase_receipts.external_record_id" in str(exc):raise BusinessIdentityConflictError("PURCHASE_RECEIPT_DUPLICATE","Purchase receipt external identity already exists.") from None
+    if "uq_inventory_lots_store_ingredient_batch_present" in str(exc) or "inventory_lots.store_id, inventory_lots.ingredient_id, inventory_lots.batch_code" in str(exc):raise BusinessIdentityConflictError("INVENTORY_LOT_METADATA_CONFLICT","Inventory lot batch identity already exists.") from None
+    raise
+   return result

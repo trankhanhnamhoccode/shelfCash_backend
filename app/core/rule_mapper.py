@@ -52,6 +52,8 @@ ALIASES = {
     "unit_price": ["don gia", "gia mua", "unit price"],
     "total_cost": ["thanh tien", "total cost"],
     "supplier_name": ["nha cung cap", "vendor", "supplier"],
+    "external_record_id": ["external record id", "invoice id", "ma hoa don", "so hoa don"],
+    "source": ["business source", "nguon nghiep vu", "source"],
     "minimum_order_quantity": ["so luong dat toi thieu", "moq", "minimum order quantity"],
     "order_unit": ["order uom", "order unit", "don vi dat hang"],
     "package_size": ["pack size", "package size", "quy cach dong goi"],

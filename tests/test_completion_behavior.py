@@ -3,6 +3,8 @@ from decimal import Decimal
 from uuid import uuid4
 
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
+import pytest
 
 from app.models.business import (
     IngredientModel, InventoryLotModel, InventoryMovementModel, ProductModel,
@@ -92,6 +94,43 @@ def test_history_batches_are_normalized_and_have_no_stock_side_effect(client, se
         assert receipt.quantity == Decimal("1")
         assert receipt.inventory_effect == "record_only"
         assert s.scalar(select(func.count()).select_from(InventoryLotModel)) == 0
+
+
+def test_history_identity_distinguishes_sales_promotion_and_purchase_null_external_id(client, session_factory):
+    product = client.post("/api/v1/stores/STORE_001/products", json={"product": "Promo drink", "sku": "PROMO-DRINK", "price": 100, "active": True}).json()
+    sales = {"source": "pos", "records": [
+        {"external_record_id": "POS-NONE", "date": "2026-07-27", "product_id": product["product_id"], "quantity": "1", "unit_price": 100, "promotion": False},
+        {"external_record_id": "POS-PROMO", "date": "2026-07-27", "product_id": product["product_id"], "quantity": "1", "unit_price": 100, "promotion": True},
+    ]}
+    assert client.post("/api/v1/stores/STORE_001/sales-history/batch", json=sales).status_code == 201
+    _ingredient(session_factory); _supplier(session_factory)
+    purchases = {"source": "manual", "inventory_effect": "record_only", "records": [
+        {"external_record_id": None, "date": "2026-07-27", "ingredient_id": "ing-1", "supplier_id": "sup-1", "quantity": "1", "unit": "kg", "unit_cost": 10},
+        {"external_record_id": None, "date": "2026-07-28", "ingredient_id": "ing-1", "supplier_id": "sup-1", "quantity": "2", "unit": "kg", "unit_cost": 10},
+    ]}
+    response = client.post("/api/v1/stores/STORE_001/purchase-history/batch", json=purchases)
+    assert response.status_code == 201
+    with session_factory() as s:
+        assert s.scalar(select(func.count()).select_from(SalesDailyModel)) == 2
+        assert s.scalar(select(func.count()).select_from(PurchaseReceiptModel)) == 2
+
+
+def test_database_enforces_canonical_batch_and_sales_identities(client, session_factory):
+    _ingredient(session_factory, ident="batch-a"); _ingredient(session_factory, ident="batch-b")
+    with session_factory() as s:
+        s.add_all([
+            InventoryLotModel(lot_id="batch-1", store_id="STORE_001", ingredient_id="batch-a", batch_code="CAM-001", received_date=date.today(), initial_quantity=1, unit="kg", source="test", version=1),
+            InventoryLotModel(lot_id="batch-2", store_id="STORE_001", ingredient_id="batch-b", batch_code="CAM-001", received_date=date.today(), initial_quantity=1, unit="kg", source="test", version=1),
+        ])
+        s.commit()
+    with session_factory() as s:
+        s.add(InventoryLotModel(lot_id="batch-duplicate", store_id="STORE_001", ingredient_id="batch-a", batch_code="CAM-001", received_date=date.today(), initial_quantity=1, unit="kg", source="test", version=1))
+        with pytest.raises(IntegrityError): s.commit()
+    product = client.post("/api/v1/stores/STORE_001/products", json={"product": "Unique promotion", "sku": "UNIQUE-PROMO", "price": 1, "active": True}).json()
+    body = {"source": "pos", "records": [{"external_record_id": "S-1", "date": "2026-07-27", "product_id": product["product_id"], "quantity": "1", "unit_price": 1, "promotion": False}]}
+    assert client.post("/api/v1/stores/STORE_001/sales-history/batch", json=body).status_code == 201
+    duplicate = client.post("/api/v1/stores/STORE_001/sales-history/batch", json={**body, "records": [{**body["records"][0], "external_record_id": "S-2"}]})
+    assert duplicate.status_code == 409 and duplicate.json()["code"] == "DUPLICATE_REQUEST"
 
 
 def test_supplier_settings_and_calendar_production_behavior(client, session_factory):

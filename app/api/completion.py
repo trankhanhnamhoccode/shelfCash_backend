@@ -21,7 +21,7 @@ class SalesRecordIn(Strict):
     external_record_id:str=Field(min_length=1);date:date;product_id:str;quantity:Decimal=Field(ge=0,allow_inf_nan=False);unit_price:int=Field(ge=0);promotion:bool=False
 class SalesBatchIn(Strict): source:str;records:list[SalesRecordIn]=Field(min_length=1)
 class PurchaseRecordIn(Strict):
-    external_record_id:str=Field(min_length=1);date:date;ingredient_id:str;supplier_id:str;quantity:Decimal=Field(gt=0,allow_inf_nan=False);unit:str;unit_cost:int=Field(ge=0);expiry_date:date|None=None;supplier_lot_code:str|None=None
+    external_record_id:str|None=None;date:date;ingredient_id:str;supplier_id:str;quantity:Decimal=Field(gt=0,allow_inf_nan=False);unit:str;unit_cost:int=Field(ge=0);expiry_date:date|None=None;supplier_lot_code:str|None=None
 class PurchaseBatchIn(Strict): source:str;inventory_effect:str;records:list[PurchaseRecordIn]=Field(min_length=1)
 class SupplierTermIn(Strict):
     ingredient_id:str;supplier_id:str;unit_cost:int=Field(ge=0);moq:Decimal=Field(ge=0);pack_size:Decimal=Field(gt=0);lead_time_days:int=Field(ge=0);unit:str;version:int|None=Field(default=None,ge=1)

@@ -23,7 +23,7 @@ CANONICAL_SCHEMAS = {
         },
     },
     "purchase_history": {
-        "fields": ["purchase_date", "ingredient_name", "quantity_received", "unit", "unit_price", "total_cost", "supplier_name", "expiry_date", "batch_id", "purchase_order_id"],
+        "fields": ["purchase_date", "ingredient_name", "quantity_received", "unit", "unit_price", "total_cost", "supplier_name", "expiry_date", "batch_id", "purchase_order_id", "source", "external_record_id"],
         "core_fields": ["purchase_date", "ingredient_name", "quantity_received"],
     },
     "supplier_constraints": {

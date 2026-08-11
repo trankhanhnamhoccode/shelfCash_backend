@@ -33,3 +33,26 @@ def source_row_hash(*, store_id: str, import_id: str, profile_id: str, sheet_id:
 
 def purchase_business_key(**fields: Any) -> str:
     return canonical_hash(fields)
+
+
+def normalized_optional_identifier(value: Any) -> str | None:
+    """Normalize optional external/batch identifiers without changing case."""
+    if value is None:
+        return None
+    normalized = str(value).strip()
+    return normalized or None
+
+
+def purchase_receipt_identity(*, store_id: str, source: str, external_record_id: Any,
+                              receipt_date: date, ingredient_id: str, supplier_id: str | None,
+                              quantity: Any, unit: str, unit_cost: Any,
+                              expiry_date: date | None, batch_code: Any) -> tuple[str, str]:
+    """Return the canonical external or import-compatible fallback identity."""
+    external = normalized_optional_identifier(external_record_id)
+    if external is not None:
+        return "external", canonical_hash({"store_id": store_id, "source": source.strip(), "external_record_id": external})
+    return "business_hash", purchase_business_key(
+        store_id=store_id, receipt_date=receipt_date, ingredient_id=ingredient_id,
+        supplier_id=supplier_id, quantity=quantity, unit=unit, unit_cost=unit_cost,
+        expiry_date=expiry_date, batch_code=normalized_optional_identifier(batch_code),
+    )

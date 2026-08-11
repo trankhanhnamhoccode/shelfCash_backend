@@ -15,7 +15,8 @@ from app.core.exceptions import MenuError
 from app.core.menu import components_empty, parse_combo_components, parse_explicit_component
 from app.core.names import display_name, normalize_lookup_name, normalize_name
 from app.core.packaging_units import is_known_packaging_unit, normalize_packaging_unit
-from app.core.provenance import canonical_hash, purchase_business_key, source_row_hash
+from app.core.provenance import canonical_hash, normalized_optional_identifier, purchase_receipt_identity, source_row_hash
+from app.services.sales_usage_reconciliation import reconcile_usage_from_sales
 from app.core.units import convert_quantity, normalize_unit, validate_compatible
 from app.models.business import (
     CalendarFeatureModel, InventoryConstraintModel, InventoryLotModel, InventoryMovementModel, ProductBundleLineModel, ProductModel, PurchaseReceiptModel,
@@ -192,7 +193,7 @@ class ImportBusinessPersistenceService:
             ingredient = self._ingredient(job.store_id, row)
             target = convert_quantity(self._decimal(row.get("on_hand"), "on_hand"), row.get("unit"), ingredient.base_unit)
             supplier = self._supplier(job.store_id, row.get("supplier_name"))
-            batch = row.get("batch_id") or row.get("batch_code")
+            batch = normalized_optional_identifier(row.get("batch_id") or row.get("batch_code"))
             expiry = self._date(row["expiry_date"], "expiry_date") if row.get("expiry_date") else None
             received = self._date(row.get("snapshot_date") or job.forecast_date or job.created_at.date(), "snapshot_date")
             reconciliation = canonical_hash({"ingredient_id": ingredient.ingredient_id, "supplier_id": supplier.supplier_id if supplier else None, "expiry_date": expiry, "unit": ingredient.base_unit})
@@ -261,6 +262,9 @@ class ImportBusinessPersistenceService:
                 known_stockouts = [value for value in data["stockouts"] if value is not None]
                 model.quantity, model.unit_price, model.is_stockout, model.import_id, model.profile_id, model.source_row_hash = data["quantity"], data["price"], (any(known_stockouts) if known_stockouts else None), job.import_id, sheet["profile_id"], row_hash
                 self.summary.sales_records_updated += 1
+        self.summary.warnings += len(reconcile_usage_from_sales(
+            self.session, job.store_id, {day for day, _, _ in grouped}
+        ))
 
     def _persist_usage_history(self, job, sheet):
         grouped = defaultdict(Decimal)
@@ -316,12 +320,18 @@ class ImportBusinessPersistenceService:
             cost = None if cost is None else int(self._decimal(cost, "unit_price"))
             total_cost=None if row.get("total_cost") in (None,"") else self._decimal(row.get("total_cost"),"total_cost")
             expiry = self._date(row["expiry_date"], "expiry_date") if row.get("expiry_date") else None
-            batch = row.get("batch_id")
-            key = purchase_business_key(store_id=job.store_id, receipt_date=day, ingredient_id=ingredient.ingredient_id, supplier_id=supplier.supplier_id if supplier else None, quantity=quantity, unit=ingredient.base_unit, unit_cost=cost, expiry_date=expiry, batch_code=batch)
-            if self.session.scalar(select(PurchaseReceiptModel).where(PurchaseReceiptModel.store_id == job.store_id, PurchaseReceiptModel.business_key_hash == key)):
+            batch = normalized_optional_identifier(row.get("batch_id"))
+            external = normalized_optional_identifier(row.get("external_record_id"))
+            source = normalized_optional_identifier(row.get("source")) or "supplier_invoice"
+            if source not in {"supplier_invoice", "manual", "integration"}:
+                raise ValidationError("purchase source không hợp lệ.", {"source": source})
+            identity_kind, key = purchase_receipt_identity(store_id=job.store_id, source=source, external_record_id=external, receipt_date=day, ingredient_id=ingredient.ingredient_id, supplier_id=supplier.supplier_id if supplier else None, quantity=quantity, unit=ingredient.base_unit, unit_cost=cost, expiry_date=expiry, batch_code=batch)
+            existing = select(PurchaseReceiptModel).where(PurchaseReceiptModel.store_id == job.store_id)
+            existing = existing.where(PurchaseReceiptModel.source == source, PurchaseReceiptModel.external_record_id == external) if identity_kind == "external" else existing.where(PurchaseReceiptModel.business_key_hash == key)
+            if self.session.scalar(existing):
                 self.summary.rows_skipped += 1
                 continue
-            self.session.add(PurchaseReceiptModel(receipt_id=str(uuid4()), store_id=job.store_id, ingredient_id=ingredient.ingredient_id, supplier_id=supplier.supplier_id if supplier else None, receipt_date=day, quantity=quantity, unit=ingredient.base_unit, unit_cost=cost,total_cost=total_cost,purchase_order_id=row.get("purchase_order_id"), expiry_date=expiry, batch_code=batch, source="import", import_id=job.import_id, profile_id=sheet["profile_id"], source_row_hash=self._row_hash(job, sheet, row, index), business_key_hash=key))
+            self.session.add(PurchaseReceiptModel(receipt_id=str(uuid4()), store_id=job.store_id, ingredient_id=ingredient.ingredient_id, supplier_id=supplier.supplier_id if supplier else None, receipt_date=day, quantity=quantity, unit=ingredient.base_unit, unit_cost=cost,total_cost=total_cost,purchase_order_id=row.get("purchase_order_id"), expiry_date=expiry, batch_code=batch, source=source, external_record_id=external, import_id=job.import_id, profile_id=sheet["profile_id"], source_row_hash=self._row_hash(job, sheet, row, index), business_key_hash=key if identity_kind == "business_hash" else None))
             self.summary.purchase_receipts_created += 1
 
     def _persist_supplier_constraints(self, job, sheet):
