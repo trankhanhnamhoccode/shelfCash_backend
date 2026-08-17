@@ -13,6 +13,7 @@ from shelfcash_core.data.adapter import adapt_forecast_input
 from shelfcash_core.data.demand_reconstruction import reconstruct_demand
 from shelfcash_core.data.panel_builder import build_daily_panel, resolve_missing_sales
 from shelfcash_core.data.validator import validate_calendar, validate_sales
+from shelfcash_core.debug_export import ForecastDebugExport
 from shelfcash_core.exceptions import InsufficientDataError
 from shelfcash_core.features.future import (
     add_calendar_future_features,
@@ -33,6 +34,7 @@ def predict_demand(
     artifact_directory: str | Path,
     cutoff_date: str | pd.Timestamp,
     forecast_horizon: int = 7,
+    debug_export: ForecastDebugExport | None = None,
 ) -> ForecastPackage:
     """Load immutable artifacts and forecast strictly after the inclusive cutoff."""
 
@@ -65,7 +67,11 @@ def predict_demand(
     )
 
     runtime = correct_quantile_crossing(
-        predict_raw_quantiles(artifacts.model_bundle, runtime)
+        predict_raw_quantiles(
+            artifacts.model_bundle,
+            runtime,
+            debug_export=debug_export,
+        )
     )
     runtime = apply_cqr_calibrator(runtime, artifacts.calibrator)
     runtime["baseline_p50"] = seasonal_naive_predict(runtime).to_numpy()

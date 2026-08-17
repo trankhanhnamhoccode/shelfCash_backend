@@ -1,0 +1,86 @@
+{
+  "description": "Ví dụ biểu diễn dữ liệu thực tế backend truyền vào Forecast Core khi chạy forecast. Đây là JSON minh họa; lúc chạy thật, sales_history và calendar_features được đọc từ database rồi chuyển thành pandas DataFrame.",
+  "api_request": {
+    "endpoint": "POST /api/v1/stores/{store_id}/forecast-runs",
+    "path_params": {
+      "store_id": "STORE_001"
+    },
+    "headers": {
+      "Idempotency-Key": "forecast-2026-08-16-store-001"
+    },
+    "body": {
+      "cutoff_date": "2026-08-16",
+      "horizon_days": 7,
+      "quantiles": [0.25, 0.5, 0.75],
+      "scope": {
+        "product_ids": ["PRD_COFFEE_MILK", "PRD_MILK_TEA"]
+      },
+      "use_latest_calendar": true
+    }
+  },
+  "forecast_core_call": {
+    "function": "predict_demand(canonical_data, artifact_directory, cutoff_date, forecast_horizon)",
+    "artifact_directory": "runtime/forecast_artifacts/STORE_001/forecast-core-v0.1.0",
+    "cutoff_date": "2026-08-16",
+    "forecast_horizon": 7,
+    "canonical_data": {
+      "sales_history": [
+        {
+          "date": "2026-08-14",
+          "store_id": "STORE_001",
+          "product_id": "PRD_COFFEE_MILK",
+          "product_name": "Cà phê sữa",
+          "quantity_sold": 42.0,
+          "unit": "ly",
+          "selling_price": 29000,
+          "revenue": 1218000.0,
+          "is_stockout": false,
+          "promotion_name": null
+        },
+        {
+          "date": "2026-08-15",
+          "store_id": "STORE_001",
+          "product_id": "PRD_MILK_TEA",
+          "product_name": "Trà sữa trân châu",
+          "quantity_sold": 31.0,
+          "unit": "ly",
+          "selling_price": 35000,
+          "revenue": 1085000.0,
+          "is_stockout": false,
+          "promotion_name": "Khuyến mãi cuối tuần"
+        }
+      ],
+      "calendar_features": [
+        {
+          "date": "2026-08-16",
+          "is_weekend": true,
+          "is_holiday": false,
+          "is_store_closed": false,
+          "is_promotion": true,
+          "promotion_name": "Khuyến mãi cuối tuần",
+          "temperature": 31.0,
+          "rainfall": 2.5,
+          "known_at": "2026-08-15T00:00:00Z"
+        },
+        {
+          "date": "2026-08-17",
+          "is_weekend": false,
+          "is_holiday": false,
+          "is_store_closed": false,
+          "is_promotion": false,
+          "promotion_name": null,
+          "temperature": 30.0,
+          "rainfall": null,
+          "known_at": "2026-08-15T00:00:00Z"
+        }
+      ]
+    }
+  },
+  "field_notes": {
+    "sales_history_required": ["date", "product_name", "quantity_sold"],
+    "sales_history_optional": ["store_id", "product_id", "unit", "selling_price", "revenue", "is_stockout", "promotion_name"],
+    "calendar_features_optional": ["is_weekend", "is_holiday", "is_store_closed", "is_promotion", "promotion_name", "temperature", "rainfall"],
+    "runtime_behavior": "Khi inference, sales được lấy từ cutoff_date - history_days + 1 đến cutoff_date; calendar được lấy đến cutoff_date + forecast_horizon.",
+    "legacy_request_behavior": "quantiles, scope và use_latest_calendar được lưu vào forecast run. Hiện Forecast Core luôn tạo P25/P50/P75, chưa lọc theo scope và luôn đọc calendar mới nhất."
+  }
+}

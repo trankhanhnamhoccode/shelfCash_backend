@@ -32,6 +32,8 @@ class Settings(BaseSettings):
     forecast_default_model_version: str = "forecast-core-v0.1.0"
     forecast_history_days: int = 365
     forecast_max_horizon: int = 7
+    forecast_debug_export: bool = False
+    forecast_export_dir: Path = Path("forecast_debug")
     decision_engine_mode: str = "legacy"
     decision_scenario_count: int = 100
     decision_random_seed: int = 42

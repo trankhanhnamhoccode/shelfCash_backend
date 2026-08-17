@@ -7,6 +7,7 @@ import lightgbm as lgb
 import numpy as np
 import pandas as pd
 
+from shelfcash_core.debug_export import ForecastDebugExport, export_if_enabled
 
 class PredictableModel(Protocol):
     def predict(self, data: pd.DataFrame) -> np.ndarray: ...
@@ -36,9 +37,21 @@ def train_quantile_models(
     categorical_features: list[str],
     quantiles: tuple[float, ...],
     base_params: dict[str, object],
+    debug_export: ForecastDebugExport | None = None,
 ) -> QuantileModelBundle:
     x_train = train[feature_names]
     y_train = train["target"].astype(float)
+    identifier_columns = [
+        column
+        for column in ("target_date", "store_key", "product_key", "product_name", "unit")
+        if column in train
+    ]
+    export_if_enabled(
+        debug_export,
+        x_train,
+        identifiers=train.loc[:, identifier_columns],
+        target=y_train,
+    )
     models: dict[float, PredictableModel] = {}
 
     for quantile in quantiles:

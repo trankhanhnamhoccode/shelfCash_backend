@@ -20,6 +20,7 @@ from shelfcash_core.data.adapter import adapt_forecast_input
 from shelfcash_core.data.demand_reconstruction import reconstruct_demand
 from shelfcash_core.data.panel_builder import build_daily_panel, resolve_missing_sales
 from shelfcash_core.data.validator import validate_calendar, validate_sales
+from shelfcash_core.debug_export import ForecastDebugExport
 from shelfcash_core.evaluation.metrics import (
     comparison_diagnostics,
     evaluate_point_prediction,
@@ -82,6 +83,7 @@ def train_forecast_core(
     artifact_directory: str | Path,
     config: ForecastConfig | None = None,
     model_version: str = "forecast-core-v0.1.0",
+    debug_export: ForecastDebugExport | None = None,
 ) -> TrainingResult:
     config = config or ForecastConfig()
     table, panel, _calendar, quality_report = _prepare_modelling_table(
@@ -129,7 +131,11 @@ def train_forecast_core(
     encoded_train = encoder.transform(train)
     encoded_calibration = encoder.transform(calibration)
     encoded_test = encoder.transform(test)
-    model_bundle = train_model_bundle(encoded_train, config)
+    model_bundle = train_model_bundle(
+        encoded_train,
+        config,
+        debug_export=debug_export,
+    )
 
     calibration_predictions = correct_quantile_crossing(
         predict_raw_quantiles(model_bundle, encoded_calibration)

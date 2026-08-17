@@ -24,6 +24,7 @@ from app.services.audit_service import AuditService
 from app.services.idempotency_service import IdempotencyService
 from app.core.provenance import canonical_hash
 from shelfcash_core import ForecastConfig, predict_demand, train_forecast_core
+from shelfcash_core.debug_export import ForecastDebugExport
 from shelfcash_core.exceptions import ArtifactError, DataValidationError, FeatureSchemaError, FeatureTypeError, InsufficientDataError
 
 logger = logging.getLogger("shelfcash.forecast")
@@ -63,6 +64,15 @@ class ForecastService:
             return ForecastConfig.from_dict(config.to_dict())
         raise TypeError("Forecast configuration must be a ShelfCash Core contract.")
 
+    def _debug_export(self, run_id: str, filename: str = "forecast_features.csv") -> ForecastDebugExport:
+        """Build a run-scoped, optional Core debug export configuration."""
+        return ForecastDebugExport(
+            enabled=self.settings.forecast_debug_export,
+            output_directory=self.settings.forecast_export_dir,
+            run_id=run_id,
+            filename=filename,
+        )
+
     def train(self, body, request_id=None):
         started = time.monotonic(); version = body.model_version or self.settings.forecast_default_model_version
         history_days = body.history_days or self.settings.forecast_history_days
@@ -87,8 +97,16 @@ class ForecastService:
             logger.exception("forecast_training_failed request_id=%s store_id=%s model_version=%s duration=%.3f", request_id, body.store_id, version, time.monotonic()-started)
             self._raise_core(exc, training=True)
         try:
-            result = train_forecast_core({"sales_history": sales, "calendar_features": calendar}, staging,
-                                         config=self._core_config(), model_version=version)
+            result = train_forecast_core(
+                {"sales_history": sales, "calendar_features": calendar},
+                staging,
+                config=self._core_config(),
+                model_version=version,
+                debug_export=self._debug_export(
+                    f"training-{body.store_id}-{version}-{body.cutoff_date:%Y%m%d}",
+                    filename="forecast_training_features.csv",
+                ),
+            )
             missing = REQUIRED_ARTIFACTS - {p.name for p in staging.iterdir()}
             if missing: raise ArtifactError(f"Thiếu artifacts: {sorted(missing)}")
             final.parent.mkdir(parents=True, exist_ok=True)
@@ -160,8 +178,13 @@ class ForecastService:
             with self.session_factory() as session:
                 data = ForecastDataRepository(session); sales = data.sales_history(body.store_id, start, body.cutoff_date)
                 calendar = data.calendar_features(body.store_id, start, body.cutoff_date + timedelta(days=body.forecast_horizon))
-            package = predict_demand({"sales_history": sales, "calendar_features": calendar}, artifact,
-                                     body.cutoff_date, body.forecast_horizon)
+            package = predict_demand(
+                {"sales_history": sales, "calendar_features": calendar},
+                artifact,
+                body.cutoff_date,
+                body.forecast_horizon,
+                debug_export=self._debug_export(run_id),
+            )
             with self.session_factory() as session:
                 run = ForecastRepository(session).run(run_id)
                 for p in package.predictions:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import pandas as pd
 
 from shelfcash_core.config import ForecastConfig
+from shelfcash_core.debug_export import ForecastDebugExport
 from shelfcash_core.features.specification import (
     CATEGORICAL_MODEL_COLUMNS,
     MODEL_FEATURES,
@@ -16,6 +17,7 @@ from shelfcash_core.models.quantile_models import (
 def train_model_bundle(
     train: pd.DataFrame,
     config: ForecastConfig,
+    debug_export: ForecastDebugExport | None = None,
 ) -> QuantileModelBundle:
     return train_quantile_models(
         train=train,
@@ -23,4 +25,5 @@ def train_model_bundle(
         categorical_features=list(CATEGORICAL_MODEL_COLUMNS),
         quantiles=config.quantiles,
         base_params=config.lightgbm_params,
+        debug_export=debug_export,
     )

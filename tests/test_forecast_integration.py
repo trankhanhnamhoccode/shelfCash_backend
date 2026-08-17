@@ -9,9 +9,11 @@ from app.schemas.forecast import ForecastPredictRequest, ForecastTrainRequest
 from shelfcash_core import ForecastConfig
 
 
-def test_db_to_real_core_to_persisted_predictions(client, monkeypatch):
+def test_db_to_real_core_to_persisted_predictions(client, monkeypatch, tmp_path):
     cutoff=date(2026,8,3); sf=client.app.state.session_factory
     client.app.state.settings.forecast_max_horizon=2
+    client.app.state.settings.forecast_debug_export=True
+    client.app.state.settings.forecast_export_dir=tmp_path
     config=ForecastConfig(horizons=(1,2), minimum_history_observations=28,
         calibration_days=7,test_days=7,minimum_calibration_samples=3,
         walk_forward_minimum_train_days=40,walk_forward_validation_days=7,
@@ -41,6 +43,13 @@ def test_db_to_real_core_to_persisted_predictions(client, monkeypatch):
     metadata=created.json(); assert metadata["status"] == "completed"
     assert metadata["model_version"] == "integration-v1" and metadata["store_id"] == "STORE_001"
     run_id=metadata["forecast_run_id"]
+    export_path = tmp_path / run_id / "forecast_features.csv"
+    assert export_path.exists()
+    import pandas as pd
+    exported = pd.read_csv(export_path, encoding="utf-8-sig")
+    assert len(exported) == 2
+    assert exported.columns[:5].tolist() == ["target_date", "store_key", "product_key", "product_name", "unit"]
+    assert exported["product_key"].tolist() == ["real-core-product", "real-core-product"]
     replay=client.post("/api/v1/stores/STORE_001/forecast-runs",json={
         "cutoff_date":cutoff.isoformat(),"horizon_days":2,"quantiles":[0.25,0.5,0.75],
         "scope":{"ingredient_ids":[]},"use_latest_calendar":True},headers={"Idempotency-Key":"real-core-run"})
