@@ -37,13 +37,45 @@ def test_brief_preserves_supplier_quantity_and_ingredient_separation(client):
             IngredientModel(ingredient_id="di-tea", store_id="STORE_001", ingredient="Tea", normalized_name="di-tea", base_unit="kg", active=True, source="test"),
             SupplierModel(supplier_id="di-supplier", store_id="STORE_001", supplier="Dairy supplier", normalized_name="di-supplier", active=True, source="test"),
         ])
-        package = {"decision_run_id": "di-feasible", "store_id": "STORE_001", "status": "completed", "recommended_strategy": "balanced", "recommended_plan": {"items": [{"ingredient_id": "di-milk", "supplier_id": "di-supplier", "order_quantity": 24, "unit": "lít", "pack_count": 2, "pack_size": 12, "line_cost": 100, "reason_codes": ["MOQ_CONSTRAINT"]}, {"ingredient_id": "di-tea", "supplier_id": "di-supplier", "order_quantity": 3, "unit": "kg", "line_cost": 30}]}, "ingredient_demand": [{"ingredient_id": "di-milk", "unit": "lít", "p25": 10, "p50": 20, "p75": 30, "contributions": []}, {"ingredient_id": "di-tea", "unit": "kg", "p25": 1, "p50": 2, "p75": 3, "contributions": []}], "business_metrics": {}, "inventory_risk": {}, "critic": {"findings": [], "warnings": ["WATCH"]}, "reason_codes": [], "warnings": []}
+        package = {"decision_run_id": "di-feasible", "store_id": "STORE_001", "status": "completed", "recommended_strategy": "balanced", "recommended_plan": {"items": [{"ingredient_id": "di-milk", "supplier_id": "di-supplier", "order_quantity": 24, "unit": "lít", "pack_count": 2, "pack_size": 12, "line_cost": 100, "reason_codes": ["MOQ_CONSTRAINT"]}, {"ingredient_id": "di-tea", "supplier_id": "di-supplier", "order_quantity": 3, "unit": "kg", "line_cost": 30}]}, "ingredient_demand": [{"ingredient_id": "di-milk", "target_date": "2026-08-20", "unit": "lít", "p25": 10, "p50": 20, "p75": 30, "contributions": []}, {"ingredient_id": "di-tea", "target_date": "2026-08-20", "unit": "kg", "p25": 1, "p50": 2, "p75": 3, "contributions": []}], "business_metrics": {}, "inventory_risk": {}, "critic": {"findings": [], "warnings": ["WATCH"]}, "reason_codes": [], "warnings": []}
         session.add(_run("di-feasible", package)); session.commit()
     brief = client.get("/api/v1/decision-runs/di-feasible/brief").json()
     assert [(row["ingredient_id"], row["quantity"]) for row in brief["procurement_rows"]] == [("di-milk", 24.0), ("di-tea", 3.0)]
     assert brief["procurement_rows"][0]["supplier_name"] == "Dairy supplier"
     assert brief["procurement_rows"][0]["reason_codes"] == ["MOQ_CONSTRAINT"]
     assert brief["critic"]["warnings"] == ["WATCH"]
+
+
+def test_brief_keeps_daily_ingredient_demand_dates_order_and_evidence_identity(client):
+    sf = client.app.state.session_factory
+    dates = [f"2026-08-{day:02d}" for day in range(20, 27)]
+    package = {"decision_run_id": "daily-demand", "store_id": "STORE_001", "status": "completed", "recommended_strategy": "balanced", "recommended_plan": {"items": []}, "ingredient_demand": [
+        *[{"ingredient_id": "matcha", "target_date": day, "unit": "kg", "p25": 0.1, "p50": 0.2, "p75": 0.3, "contributions": []} for day in reversed(dates)],
+        {"ingredient_id": "milk", "target_date": "2026-08-22", "unit": "lít", "p25": 1, "p50": 2, "p75": 3, "contributions": []},
+    ], "business_metrics": {}, "inventory_risk": {}, "critic": {"findings": [], "warnings": []}, "reason_codes": [], "warnings": []}
+    with sf() as session:
+        session.add_all([
+            IngredientModel(ingredient_id="matcha", store_id="STORE_001", ingredient="Bột matcha", normalized_name="matcha", base_unit="kg", active=True, source="test"),
+            IngredientModel(ingredient_id="milk", store_id="STORE_001", ingredient="Milk", normalized_name="milk", base_unit="lít", active=True, source="test"),
+            _run("daily-demand", package),
+        ])
+        session.commit()
+
+    brief = client.get("/api/v1/decision-runs/daily-demand/brief").json()
+    matcha_rows = [row for row in brief["ingredient_demand"] if row["ingredient_id"] == "matcha"]
+    assert [row["target_date"] for row in matcha_rows] == dates
+    assert len({row["target_date"] for row in matcha_rows}) == 7
+    assert brief["ingredient_demand"] == sorted(brief["ingredient_demand"], key=lambda row: (row["target_date"], row["ingredient_id"], row["ingredient_name"] or ""))
+    assert {(row["ingredient_id"], row["target_date"]) for row in brief["ingredient_demand"]} == {(row["ingredient_id"], row["target_date"]) for row in package["ingredient_demand"]}
+
+    explanation = client.post("/api/v1/decision-runs/daily-demand/explanation", json={"language": "en", "detail_level": "simple", "question": "matcha demand"}).json()
+    demand_claims = [claim for claim in explanation["claims"] if claim["type"] == "INGREDIENT_DEMAND"]
+    assert demand_claims
+    assert all("target_date" in claim["value"] for claim in demand_claims)
+    evidence = client.get("/api/v1/decision-runs/daily-demand/brief").json()["evidence"]
+    demand_evidence = [item for item in evidence if item["entities"].get("ingredient_id") == "matcha"]
+    assert len({item["entities"]["target_date"] for item in demand_evidence}) == 7
+    assert len({item["evidence_id"] for item in demand_evidence}) == 7
 
 
 def test_what_if_invalid_mutations_return_422(client):

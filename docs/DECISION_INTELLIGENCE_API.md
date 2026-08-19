@@ -12,6 +12,21 @@ Returns typed, read-only `DecisionBriefFacts` derived from the persisted decisio
 
 `completed_with_no_feasible_recommendation` always has `recommendation.available=false` and an empty `procurement_rows` list. `stockout_probability` is nullable; quantiles or stress scenarios are not probabilities.
 
+```ts
+interface IngredientDemandRow {
+  ingredient_id: string;
+  ingredient_name: string | null;
+  target_date: string; // ISO business date, e.g. "2026-08-20"
+  unit: string | null;
+  p25: number | null;
+  p50: number | null;
+  p75: number | null;
+  contributions: unknown[];
+}
+```
+
+Seven rows for the same ingredient in a seven-day horizon are seven **daily** demand observations, not duplicates and not scenarios. P25/P50/P75 describe uncertainty for that specific `target_date`. The API orders rows by `target_date`, then ingredient ID/name.
+
 Strategies are `lean`, `balanced`, and `protected`. Frontend must render the order plan from `procurement_rows`, never by parsing an explanation.
 
 ## POST `/api/v1/decision-runs/{decision_run_id}/explanation`

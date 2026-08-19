@@ -31,6 +31,7 @@ class ProcurementRowBrief(_Contract):
 
 class IngredientDemandBrief(_Contract):
     ingredient_id: str; ingredient_name: str | None = None; unit: str | None = None
+    target_date: date | str
     p25: float | None = None; p50: float | None = None; p75: float | None = None
     contributions: list[dict[str, Any]] = Field(default_factory=list)
 

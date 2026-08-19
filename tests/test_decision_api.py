@@ -42,6 +42,7 @@ def test_core_decision_package_is_persisted_and_reloaded(client):
         "prediction_count": 1,
     }
     assert package["ingredient_demand"][0]["p50"] == 2.0
+    assert package["ingredient_demand"][0]["target_date"] == "2026-08-04"
     with sf() as s:
         s.get(RecipeLineModel, "decision-line").quantity = Decimal("2")
         s.commit()
@@ -56,6 +57,7 @@ def test_core_decision_package_is_persisted_and_reloaded(client):
     assert brief.json()["recommendation"]["available"] is True
     assert brief.json()["procurement_rows"][0]["ingredient_id"] == "decision-ingredient"
     assert brief.json()["risk"]["stockout_probability"] is None
+    assert brief.json()["ingredient_demand"][0]["target_date"] == package["ingredient_demand"][0]["target_date"]
     explanation = client.post(f"/api/v1/decision-runs/{package['decision_run_id']}/explanation", json={"language":"vi", "detail_level":"simple", "question":"Tại sao phải nhập decision-ingredient?"})
     assert explanation.status_code == 200
     assert explanation.json()["source"] == "template"
@@ -74,6 +76,8 @@ def test_core_decision_package_is_persisted_and_reloaded(client):
     assert what_if.status_code == 200
     assert what_if.json()["baseline"]["decision_run_id"] == package["decision_run_id"]
     assert what_if.json()["hypothetical"]["data_availability"]["authority"] == "HYPOTHETICAL"
+    assert what_if.json()["baseline"]["ingredient_demand"][0]["target_date"] == package["ingredient_demand"][0]["target_date"]
+    assert what_if.json()["hypothetical"]["ingredient_demand"][0]["target_date"] == package["ingredient_demand"][0]["target_date"]
     assert what_if.json()["comparison"]["stockout_probability_delta"] is None
     assert what_if.json()["mutations"] == {"demand_multiplier": 1.3, "supplier_delay_days": 1, "budget_limit": 10000000, "strategy": "protected"}
     with sf() as s:

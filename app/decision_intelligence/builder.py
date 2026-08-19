@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 from sqlalchemy import select
 
@@ -46,11 +46,12 @@ class DecisionBriefBuilder:
             purchase_cost=_number(item.get("purchase_cost") if "purchase_cost" in item else item.get("line_cost")),
             reason_codes=derive_verified_order_reasons(item, package.get("reason_codes", [])),
         ) for item in items if float(item.get("order_quantity", 0)) > 0]
-        demands = [IngredientDemandBrief(
+        demands = sorted((IngredientDemandBrief(
             ingredient_id=str(item.get("ingredient_id")), ingredient_name=ingredients.get(str(item.get("ingredient_id"))),
-            unit=item.get("unit"), p25=_number(item.get("p25")), p50=_number(item.get("p50")), p75=_number(item.get("p75")),
+            target_date=item["target_date"], unit=item.get("unit"),
+            p25=_number(item.get("p25")), p50=_number(item.get("p50")), p75=_number(item.get("p75")),
             contributions=item.get("contributions", []) if isinstance(item.get("contributions", []), list) else [],
-        ) for item in package.get("ingredient_demand", [])]
+        ) for item in package.get("ingredient_demand", [])), key=_ingredient_demand_sort_key)
         critic = package.get("critic", {}) if isinstance(package.get("critic"), dict) else {}
         hard = [str(item.get("code")) for item in critic.get("findings", []) if item.get("severity") == "error" and item.get("code")]
         risk = package.get("inventory_risk", {}) if isinstance(package.get("inventory_risk"), dict) else {}
@@ -67,3 +68,9 @@ class DecisionBriefBuilder:
 
 def _number(value):
     return None if value is None else float(value)
+
+
+def _ingredient_demand_sort_key(item: IngredientDemandBrief) -> tuple[str, str, str]:
+    """Keep the persisted daily grain while making the outward API deterministic."""
+    target_date = item.target_date.isoformat() if isinstance(item.target_date, date) else str(item.target_date)
+    return (target_date, item.ingredient_id, item.ingredient_name or "")
