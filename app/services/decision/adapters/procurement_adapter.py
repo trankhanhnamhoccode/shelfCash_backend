@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 import json
+from datetime import timedelta
 import pandas as pd
 from sqlalchemy import select
 
@@ -40,7 +41,7 @@ class CoreProcurementAdapter:
         self.constraints = BusinessConstraintResolver(session)
 
     def optimize(self, store_id, forecast, demand_rows, budget_override=None, use_open_purchase_orders=True, *,
-                 predictions=None, engine_mode="deterministic", scenario_count=100, seed=42, scenario_method="residual_bootstrap"):
+                 predictions=None, engine_mode="deterministic", scenario_count=100, seed=42, scenario_method="residual_bootstrap", supplier_delay_days=0):
         rows_by_ingredient = defaultdict(list)
         for row in demand_rows:
             rows_by_ingredient[row.ingredient_id].append(row)
@@ -64,8 +65,8 @@ class CoreProcurementAdapter:
                     delivery_id=f"open-{ingredient_id}-{index}", lot_id=row["lot_id"],
                     purchase_order_id=row["lot_id"], supplier_id="open_purchase_order",
                     store_id=store_id, ingredient_id=ingredient_id, quantity=float(row["quantity"]),
-                    unit=unit, arrival_date=row["date"], expiry_date=resolve_inbound_expiry(
-                        arrival_date=row["date"], shelf_life_days=row.get("shelf_life_days")
+                    unit=unit, arrival_date=row["date"] + timedelta(days=supplier_delay_days), expiry_date=resolve_inbound_expiry(
+                        arrival_date=row["date"] + timedelta(days=supplier_delay_days), shelf_life_days=row.get("shelf_life_days")
                     ),
                     provenance={"expiry_source": "purchase_order_line.shelf_life_days" if row.get("shelf_life_days") is not None else "not_configured"},
                 ))
@@ -75,7 +76,7 @@ class CoreProcurementAdapter:
                     store_id=store_id, ingredient_id=ingredient_id, unit=term.unit,
                     order_date=decision_date, pack_size=float(term.pack_size),
                     unit_price=float(term.unit_cost), minimum_order_quantity=float(term.moq),
-                    lead_time_days=term.lead_time_days, available=True,
+                    lead_time_days=term.lead_time_days + supplier_delay_days, available=True,
                     shelf_life_days=term.shelf_life_days,
                     available_delivery_days=(
                         None if term.available_delivery_days is None

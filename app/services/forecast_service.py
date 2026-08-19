@@ -26,6 +26,7 @@ from app.core.provenance import canonical_hash
 from shelfcash_core import ForecastConfig, predict_demand, train_forecast_core
 from shelfcash_core.debug_export import ForecastDebugExport
 from shelfcash_core.exceptions import ArtifactError, DataValidationError, FeatureSchemaError, FeatureTypeError, InsufficientDataError
+from app.forecasting import ExistingForecastCoreProvider, ShelfCashForecastProvider, compare_forecasts
 
 logger = logging.getLogger("shelfcash.forecast")
 REQUIRED_ARTIFACTS = {"model_q25.txt", "model_q50.txt", "model_q75.txt", "calibrator.json",
@@ -37,8 +38,14 @@ def _now(): return datetime.now(timezone.utc)
 
 
 class ForecastService:
-    def __init__(self, session_factory, settings):
+    def __init__(self, session_factory, settings, production_provider=None, shadow_provider=None):
         self.session_factory, self.settings = session_factory, settings
+        if settings.forecast_core_provider != "existing":
+            raise ValueError("Phase 1 only permits FORECAST_CORE_PROVIDER=existing.")
+        self.production_provider = production_provider or ExistingForecastCoreProvider()
+        self.shadow_provider = shadow_provider or (
+            ShelfCashForecastProvider() if settings.forecast_shadow_provider == "shelfcash_forecast" else None
+        )
 
     def _component(self, value: str, field: str) -> str:
         from app.schemas.forecast import SAFE_VERSION
@@ -73,6 +80,64 @@ class ForecastService:
             filename=filename,
         )
 
+    def _shadow_enabled(self) -> bool:
+        return bool(self.settings.forecast_shadow_enabled and self.shadow_provider is not None)
+
+    def _shadow_artifact_dir(self, store_id: str, production_version: str) -> Path:
+        root = self.settings.forecast_shadow_artifact_root.resolve()
+        store_id, production_version = self._component(store_id, "store_id"), self._component(production_version, "model_version")
+        path = (root / store_id / f"{production_version}--shelfcash_forecast").resolve()
+        if root not in path.parents:
+            raise ForecastError("FORECAST_INPUT_INVALID", "Shadow artifact path khÃ´ng há»£p lá»‡.")
+        return path
+
+    @staticmethod
+    def _shadow_summary(report):
+        return {
+            "compatible": report.compatible,
+            "missing_keys": len(report.missing_keys), "extra_keys": len(report.extra_keys),
+            "production_quantile_violations": len(report.production_quantile_violations),
+            "shadow_quantile_violations": len(report.shadow_quantile_violations),
+            "mean_abs_diff_p25": report.mean_abs_diff_p25,
+            "mean_abs_diff_p50": report.mean_abs_diff_p50,
+            "mean_abs_diff_p75": report.mean_abs_diff_p75,
+        }
+
+    def _run_shadow_training(self, *, store_id, version, canonical_data, config, request_id):
+        if not self._shadow_enabled():
+            return
+        started = time.monotonic()
+        try:
+            shadow = self.shadow_provider.train(
+                canonical_data, self._shadow_artifact_dir(store_id, version), config=config,
+                model_version=f"{version}--shadow-shelfcash_forecast",
+            )
+            logger.info("forecast_shadow_training_completed request_id=%s store_id=%s production_provider=%s shadow_provider=%s production_model_version=%s shadow_model_version=%s duration=%.3f warnings=%s",
+                request_id, store_id, self.production_provider.name, self.shadow_provider.name, version,
+                shadow.model_version, time.monotonic()-started, len(shadow.warnings))
+        except Exception as exc:
+            logger.warning("forecast_shadow_training_failed request_id=%s store_id=%s production_provider=%s shadow_provider=%s production_model_version=%s duration=%.3f error_type=%s",
+                request_id, store_id, self.production_provider.name, self.shadow_provider.name, version,
+                time.monotonic()-started, type(exc).__name__, exc_info=True)
+
+    def _run_shadow_inference(self, *, store_id, version, canonical_data, cutoff_date, horizon, production, request_id):
+        if not self._shadow_enabled():
+            return
+        started = time.monotonic()
+        try:
+            artifact = self._shadow_artifact_dir(store_id, version)
+            if not artifact.is_dir():
+                raise FileNotFoundError(f"Shadow artifact directory is missing: {artifact}")
+            shadow = self.shadow_provider.predict(canonical_data, artifact, cutoff_date, horizon)
+            report = compare_forecasts(production, shadow)
+            logger.info("forecast_shadow_inference_completed request_id=%s store_id=%s production_provider=%s shadow_provider=%s production_model_version=%s shadow_model_version=%s prediction_rows=%s duration=%.3f compatibility=%s",
+                request_id, store_id, self.production_provider.name, self.shadow_provider.name, version,
+                shadow.model_version, len(shadow.predictions), time.monotonic()-started, self._shadow_summary(report))
+        except Exception as exc:
+            logger.warning("forecast_shadow_inference_failed request_id=%s store_id=%s production_provider=%s shadow_provider=%s production_model_version=%s duration=%.3f error_type=%s",
+                request_id, store_id, self.production_provider.name, self.shadow_provider.name, version,
+                time.monotonic()-started, type(exc).__name__, exc_info=True)
+
     def train(self, body, request_id=None):
         started = time.monotonic(); version = body.model_version or self.settings.forecast_default_model_version
         history_days = body.history_days or self.settings.forecast_history_days
@@ -97,11 +162,9 @@ class ForecastService:
             logger.exception("forecast_training_failed request_id=%s store_id=%s model_version=%s duration=%.3f", request_id, body.store_id, version, time.monotonic()-started)
             self._raise_core(exc, training=True)
         try:
-            result = train_forecast_core(
-                {"sales_history": sales, "calendar_features": calendar},
-                staging,
-                config=self._core_config(),
-                model_version=version,
+            canonical_data = {"sales_history": sales, "calendar_features": calendar}
+            result = self.production_provider.train(
+                canonical_data, staging, config=self._core_config(), model_version=version,
                 debug_export=self._debug_export(
                     f"training-{body.store_id}-{version}-{body.cutoff_date:%Y%m%d}",
                     filename="forecast_training_features.csv",
@@ -138,6 +201,8 @@ class ForecastService:
                     resource_type="forecast_model", resource_id=model.model_version_id,
                     after={"model_version": version, "status": "ready"}, source="forecast_service")
                 session.commit()
+            self._run_shadow_training(store_id=body.store_id, version=version, canonical_data=canonical_data,
+                config=self._core_config(), request_id=request_id)
             logger.info("forecast_training_completed request_id=%s store_id=%s model_version=%s duration=%.3f", request_id, body.store_id, version, time.monotonic()-started)
             return {"store_id": body.store_id, "model_version": version, "status": "ready", "trained_at": model.trained_at,
                     "history_start": model.history_start, "history_end": model.history_end,
@@ -178,11 +243,9 @@ class ForecastService:
             with self.session_factory() as session:
                 data = ForecastDataRepository(session); sales = data.sales_history(body.store_id, start, body.cutoff_date)
                 calendar = data.calendar_features(body.store_id, start, body.cutoff_date + timedelta(days=body.forecast_horizon))
-            package = predict_demand(
-                {"sales_history": sales, "calendar_features": calendar},
-                artifact,
-                body.cutoff_date,
-                body.forecast_horizon,
+            canonical_data = {"sales_history": sales, "calendar_features": calendar}
+            package = self.production_provider.predict(
+                canonical_data, artifact, body.cutoff_date, body.forecast_horizon,
                 debug_export=self._debug_export(run_id),
             )
             with self.session_factory() as session:
@@ -198,6 +261,8 @@ class ForecastService:
                 AuditService(AuditLogRepository(session)).record(store_id=body.store_id, action="forecast_generated",
                     resource_type="forecast_run", resource_id=run_id, after={"model_version": version, "predictions": len(package.predictions)}, source="forecast_service")
                 session.commit()
+            self._run_shadow_inference(store_id=body.store_id, version=version, canonical_data=canonical_data,
+                cutoff_date=body.cutoff_date, horizon=body.forecast_horizon, production=package, request_id=request_id)
             logger.info("forecast_inference_completed request_id=%s store_id=%s model_version=%s forecast_run_id=%s duration=%.3f", request_id, body.store_id, version, run_id, time.monotonic()-started)
             return self.get(run_id, body.store_id)
         except Exception as exc:

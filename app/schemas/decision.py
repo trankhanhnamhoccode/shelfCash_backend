@@ -20,13 +20,14 @@ class DecisionRunRequest(_Strict):
 
 
 class ExplanationRequest(_Strict):
-    language: str = "vi"
+    language: Literal["vi", "en"] = "vi"
     detail_level: Literal["simple", "manager", "technical"] = "simple"
+    question: str | None = Field(default=None, max_length=2000)
 
 
 class WhatIfRequest(_Strict):
-    demand_multiplier: float = Field(default=1, gt=0)
-    supplier_delay_days: int = Field(default=0, ge=0)
+    demand_multiplier: float | None = Field(default=None, gt=0)
+    supplier_delay_days: int | None = Field(default=None, ge=0)
     budget_limit: int | None = Field(default=None, ge=0)
     strategy: Literal["lean", "balanced", "protected"] | None = None
 

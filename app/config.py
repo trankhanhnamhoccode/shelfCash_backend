@@ -34,6 +34,12 @@ class Settings(BaseSettings):
     forecast_max_horizon: int = 7
     forecast_debug_export: bool = False
     forecast_export_dir: Path = Path("forecast_debug")
+    # Phase-1 provider selection is deliberately production-locked.  The new
+    # core may only run alongside it until an explicit later phase changes this.
+    forecast_core_provider: str = "existing"
+    forecast_shadow_provider: str = "disabled"
+    forecast_shadow_enabled: bool = False
+    forecast_shadow_artifact_root: Path = Path("runtime/forecast_shadow_artifacts")
     decision_engine_mode: str = "legacy"
     decision_scenario_count: int = 100
     decision_random_seed: int = 42

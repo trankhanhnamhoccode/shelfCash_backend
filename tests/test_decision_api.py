@@ -1,10 +1,14 @@
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from uuid import uuid4
+import json
+from sqlalchemy import func, select
 
 from app.models.business import (IngredientModel, InventoryLotModel, InventoryMovementModel,
     ProductModel, RecipeLineModel, RecipeVersionModel, SupplierIngredientTermModel, SupplierModel)
 from app.models.operations import ForecastPredictionModel, ForecastRunModel
+from app.models.decision import DecisionRunModel
+from app.models.planning import IngredientDemandPredictionModel, ProcurementPlanModel
 
 
 def test_core_decision_package_is_persisted_and_reloaded(client):
@@ -47,9 +51,41 @@ def test_core_decision_package_is_persisted_and_reloaded(client):
     restored = client.get(f"/api/v1/decision-runs/{package['decision_run_id']}")
     assert restored.status_code == 200
     assert restored.json() == package
-    explanation = client.post(f"/api/v1/decision-runs/{package['decision_run_id']}/explanation", json={"language":"vi", "detail_level":"simple"})
+    brief = client.get(f"/api/v1/decision-runs/{package['decision_run_id']}/brief")
+    assert brief.status_code == 200, brief.text
+    assert brief.json()["recommendation"]["available"] is True
+    assert brief.json()["procurement_rows"][0]["ingredient_id"] == "decision-ingredient"
+    assert brief.json()["risk"]["stockout_probability"] is None
+    explanation = client.post(f"/api/v1/decision-runs/{package['decision_run_id']}/explanation", json={"language":"vi", "detail_level":"simple", "question":"Tại sao phải nhập decision-ingredient?"})
     assert explanation.status_code == 200
     assert explanation.json()["source"] == "template"
-    what_if = client.post(f"/api/v1/decision-runs/{package['decision_run_id']}/what-if", json={"demand_multiplier":1.3})
+    assert explanation.json()["provider"] == "shelfcash_decision_intelligence"
+    evidence_ids = {item["evidence_id"] for item in brief.json()["evidence"]}
+    assert set(explanation.json()["citations"][0]["evidence_id"] for _ in [0]) <= evidence_ids
+    with sf() as s:
+        before_counts = {
+            "decision": s.scalar(select(func.count()).select_from(DecisionRunModel)),
+            "forecast": s.scalar(select(func.count()).select_from(ForecastRunModel)),
+            "prediction": s.scalar(select(func.count()).select_from(ForecastPredictionModel)),
+            "demand": s.scalar(select(func.count()).select_from(IngredientDemandPredictionModel)),
+            "plan": s.scalar(select(func.count()).select_from(ProcurementPlanModel)),
+        }
+    what_if = client.post(f"/api/v1/decision-runs/{package['decision_run_id']}/what-if", json={"demand_multiplier":1.3, "supplier_delay_days":1, "budget_limit":10000000, "strategy":"protected"})
     assert what_if.status_code == 200
-    assert "WHAT_IF_READ_ONLY" in what_if.json()["warnings"]
+    assert what_if.json()["baseline"]["decision_run_id"] == package["decision_run_id"]
+    assert what_if.json()["hypothetical"]["data_availability"]["authority"] == "HYPOTHETICAL"
+    assert what_if.json()["comparison"]["stockout_probability_delta"] is None
+    assert what_if.json()["mutations"] == {"demand_multiplier": 1.3, "supplier_delay_days": 1, "budget_limit": 10000000, "strategy": "protected"}
+    with sf() as s:
+        assert json.loads(s.get(DecisionRunModel, package["decision_run_id"]).package_json) == package
+        assert before_counts == {
+            "decision": s.scalar(select(func.count()).select_from(DecisionRunModel)),
+            "forecast": s.scalar(select(func.count()).select_from(ForecastRunModel)),
+            "prediction": s.scalar(select(func.count()).select_from(ForecastPredictionModel)),
+            "demand": s.scalar(select(func.count()).select_from(IngredientDemandPredictionModel)),
+            "plan": s.scalar(select(func.count()).select_from(ProcurementPlanModel)),
+        }
+    no_feasible = client.post(f"/api/v1/decision-runs/{package['decision_run_id']}/what-if", json={"budget_limit": 0})
+    assert no_feasible.status_code == 200
+    assert no_feasible.json()["hypothetical"]["recommendation"]["available"] is False
+    assert no_feasible.json()["comparison"]["recommendation_changed"] is True

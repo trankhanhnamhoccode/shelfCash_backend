@@ -63,5 +63,10 @@
   {"method":"POST","path":"/api/v1/stores/{store_id}/forecast-runs/{forecast_run_id}/ingredient-demand","priority":"P0","group":"demand_planning","purpose":"Generate persisted ingredient demand"},
   {"method":"GET","path":"/api/v1/stores/{store_id}/forecast-runs/{forecast_run_id}/ingredient-demand","priority":"P0","group":"demand_planning","purpose":"Read persisted ingredient demand"},
   {"method":"POST","path":"/api/v1/stores/{store_id}/forecast-runs/{forecast_run_id}/procurement-plans","priority":"P0","group":"demand_planning","purpose":"Generate procurement strategy plans"},
-  {"method":"GET","path":"/api/v1/stores/{store_id}/forecast-runs/{forecast_run_id}/procurement-plans","priority":"P0","group":"demand_planning","purpose":"Read persisted procurement strategy plans"}
+  {"method":"GET","path":"/api/v1/stores/{store_id}/forecast-runs/{forecast_run_id}/procurement-plans","priority":"P0","group":"demand_planning","purpose":"Read persisted procurement strategy plans"},
+  {"method":"POST","path":"/api/v1/stores/{store_id}/decision-runs","priority":"P1","group":"decision_runs","purpose":"Create feature-gated unified decision run"},
+  {"method":"GET","path":"/api/v1/decision-runs/{decision_run_id}","priority":"P1","group":"decision_runs","purpose":"Read persisted unified decision package"},
+  {"method":"GET","path":"/api/v1/decision-runs/{decision_run_id}/brief","priority":"P1","group":"decision_runs","purpose":"Read grounded decision brief facts"},
+  {"method":"POST","path":"/api/v1/decision-runs/{decision_run_id}/explanation","priority":"P1","group":"decision_runs","purpose":"Explain persisted decision package"},
+  {"method":"POST","path":"/api/v1/decision-runs/{decision_run_id}/what-if","priority":"P1","group":"decision_runs","purpose":"Read-only decision what-if comparison"}
 ]
