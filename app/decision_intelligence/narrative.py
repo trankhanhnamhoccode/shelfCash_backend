@@ -218,14 +218,15 @@ class DecisionNarrativeProvider:
 
     def explain(self, brief: DecisionBriefFacts, *, question: str | None, language: str, detail_level: str) -> DecisionExplanationResponse:
         fallback = self.deterministic.explain(brief, question=question, language=language, detail_level=detail_level)
-        if self.settings.decision_narrative_provider != "local_qwen" or not self.llm_provider.available:
+        if not self.llm_provider or not self.llm_provider.available:
             return fallback
         return self._qwen_or_fallback(brief, question, language, detail_level, fallback)
 
     def _qwen_or_fallback(self, brief, question, language, detail_level, fallback):
         started = time.monotonic()
+        raw = None
         try:
-            logger.info("decision_narrative_started decision_run_id=%s provider=local_qwen", brief.decision_run_id)
+            logger.info("decision_narrative_started decision_run_id=%s provider=openrouter_qwen", brief.decision_run_id)
             evidence = self.deterministic._evidence(brief)
             resolved_question = question or ("Why is this plan recommended?" if language == "en" else "Tại sao kế hoạch này được đề xuất?")
             retrieved = StructuredLocalRetriever().retrieve(resolved_question, evidence, DecisionGraph(request_id=brief.decision_run_id, nodes=[], edges=[]), context=build_retrieval_context(resolved_question, evidence, recommended_strategy=(brief.recommendation.strategy or "").upper() or None))
@@ -234,15 +235,18 @@ class DecisionNarrativeProvider:
                 raise ValueError("no_retrieved_evidence")
             logger.info("decision_narrative_retrieval_completed decision_run_id=%s evidence_count=%d intent=%s", brief.decision_run_id, len(structured), retrieved.intent)
             payload = {"question": resolved_question, "language": language, "detail_level": detail_level, "evidence": structured}
-            raw = asyncio.run(self.llm_provider.generate_json(SYSTEM_PROMPT, payload, max_new_tokens=self.settings.decision_narrative_max_new_tokens))
-            logger.info("decision_narrative_qwen_completed decision_run_id=%s provider=local_qwen", brief.decision_run_id)
+            raw = asyncio.run(self.llm_provider.generate_json(SYSTEM_PROMPT, payload, max_new_tokens=getattr(self.settings, "decision_narrative_max_new_tokens", 2000)))
+            logger.info("decision_narrative_qwen_completed decision_run_id=%s provider=openrouter_qwen", brief.decision_run_id)
             response = self._guard(raw, structured, evidence.items, brief, language, detail_level, retrieved.intent)
-            logger.info("decision_narrative_grounding_passed decision_run_id=%s provider=local_qwen duration_ms=%d", brief.decision_run_id, int((time.monotonic() - started) * 1000))
+            logger.info("decision_narrative_grounding_passed decision_run_id=%s provider=openrouter_qwen duration_ms=%d", brief.decision_run_id, int((time.monotonic() - started) * 1000))
             return response
         except Exception as exc:
-            logger.warning("decision_narrative_grounding_failed decision_run_id=%s provider=local_qwen reason=%s", brief.decision_run_id, type(exc).__name__)
-            logger.warning("decision_narrative_fallback decision_run_id=%s provider=local_qwen reason=%s duration_ms=%d", brief.decision_run_id, type(exc).__name__, int((time.monotonic() - started) * 1000))
-            return fallback.model_copy(update={"provider": "deterministic_fallback"})
+            logger.warning("decision_narrative_grounding_failed decision_run_id=%s provider=openrouter_qwen reason=%s", brief.decision_run_id, type(exc).__name__)
+            logger.warning("decision_narrative_fallback decision_run_id=%s provider=openrouter_qwen reason=%s duration_ms=%d", brief.decision_run_id, type(exc).__name__, int((time.monotonic() - started) * 1000))
+            update_dict: dict[str, Any] = {"provider": "deterministic_fallback"}
+            if raw is not None:
+                update_dict["raw_response"] = raw
+            return fallback.model_copy(update=update_dict)
 
     def _guard(self, raw, structured, evidence_items, brief, language, detail_level, intent):
         if not isinstance(raw.get("answer"), str) or not isinstance(raw.get("claims"), list):
@@ -268,12 +272,12 @@ class DecisionNarrativeProvider:
             claims.append(ExplanationClaim(type=claim["type"], value=claim["text"], evidence_ids=claim_source_ids))
             for evidence_id in ids:
                 citation_ids.update(structured_by_id[evidence_id].get("evidence_ids", [evidence_id]))
-        used = raw.get("used_evidence_ids", list(citation_ids))
-        if not isinstance(used, list) or not set(used) <= allowed_ids:
-            raise ValueError("unsupported_used_evidence_id")
+            used = raw.get("used_evidence_ids", list(citation_ids))
+            if not isinstance(used, list) or not set(used) <= allowed_ids:
+                raise ValueError("unsupported_used_evidence_id")
         citations = [Citation(evidence_id=item.evidence_id, label=item.text, source_type=item.source_object) for item in evidence_items if item.evidence_id in citation_ids]
         entities = {"ingredient_ids": sorted({item.entities["ingredient_id"] for item in evidence_items if item.evidence_id in citation_ids and item.entities.get("ingredient_id")}), "supplier_ids": sorted({item.entities["supplier_id"] for item in evidence_items if item.evidence_id in citation_ids and item.entities.get("supplier_id")})}
-        return DecisionExplanationResponse(source="local_qwen", language=language, detail_level=detail_level, summary=raw["answer"], why_this_plan=[raw["answer"]], main_risks=brief.critic.warnings, tradeoffs=[], important_assumptions=["Narrative is grounded only in the persisted decision package."], decision_run_id=brief.decision_run_id, answer=raw["answer"], intent=str(intent).upper(), entities=entities, claims=claims, citations=citations, grounded=True, provider="local_qwen")
+        return DecisionExplanationResponse(source="openrouter_qwen", language=language, detail_level=detail_level, summary=raw["answer"], why_this_plan=[raw["answer"]], main_risks=brief.critic.warnings, tradeoffs=[], important_assumptions=["Narrative is grounded only in the persisted decision package."], decision_run_id=brief.decision_run_id, answer=raw["answer"], intent=str(intent).upper(), entities=entities, claims=claims, citations=citations, grounded=True, provider="openrouter_qwen", raw_response=raw)
 
     @staticmethod
     def _validate_numbers(text: str, payloads: list[dict]):

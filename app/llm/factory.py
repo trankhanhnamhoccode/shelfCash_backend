@@ -1,10 +1,7 @@
-from app.llm.disabled import DisabledLLMProvider
+from __future__ import annotations
+
+from app.llm.openrouter_qwen import OpenRouterQwenProvider
 
 
-def create_llm_provider(settings):
-    if settings.llm_provider == "disabled":
-        return DisabledLLMProvider()
-    if settings.llm_provider == "local_qwen":
-        from app.llm.local_qwen import LocalQwenProvider
-        return LocalQwenProvider(settings)
-    raise ValueError(f"Unsupported LLM_PROVIDER: {settings.llm_provider}")
+def create_llm_provider(settings) -> OpenRouterQwenProvider:
+    return OpenRouterQwenProvider(settings)

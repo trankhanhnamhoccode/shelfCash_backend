@@ -10,7 +10,7 @@ from sqlalchemy import func, select
 from app.config import Settings
 from app.core.rule_mapper import finalize_mapping, map_sheet_rules
 from app.db.session import create_engine_from_url, create_session_factory
-from app.llm.local_qwen import LocalQwenProvider
+from app.llm.openrouter_qwen import OpenRouterQwenProvider
 from app.main import create_app
 from app.models.audit_log import AuditLogModel
 from app.models.import_legacy import ImportModel
@@ -177,7 +177,6 @@ def test_import_survives_application_restart(tmp_path):
         database_url=database_url,
         upload_dir=tmp_path / "uploads",
         result_dir=tmp_path / "results",
-        llm_provider="disabled",
     )
     with TestClient(create_app(settings)) as first_client:
         created = upload_csv(first_client).json()
@@ -433,7 +432,6 @@ def test_total_request_limit_and_filesystem_failure_compensation(tmp_path, monke
         database_url=database_url,
         upload_dir=tmp_path / "uploads",
         result_dir=tmp_path / "results",
-        llm_provider="disabled",
         max_file_size_mb=2,
         max_total_upload_size_mb=1,
     )
@@ -499,7 +497,7 @@ def test_mapping_finalizer_removes_stale_structural_warning_and_keeps_semantic()
     assert not final.requires_review
 
 
-def test_local_qwen_post_validation_recomputes_structural_warnings():
+def test_openrouter_qwen_post_validation_recomputes_structural_warnings():
     profile = SheetProfile(
         file_name="sales.csv",
         sheet_name="sales",
@@ -510,8 +508,8 @@ def test_local_qwen_post_validation_recomputes_structural_warnings():
         dtypes={},
         sample_rows=[],
     )
-    provider = LocalQwenProvider(Settings())
-    result = provider._validate_result(
+    provider = OpenRouterQwenProvider(Settings())
+    result = provider._validate_mapping_result(
         {
             "sheet_type": "sales_history",
             "confidence": 0.9,

@@ -33,7 +33,7 @@ def brief(days=1):
 
 
 def settings():
-    return Settings(llm_provider="disabled", decision_narrative_provider="local_qwen")
+    return Settings(openrouter_api_key="mock-key")
 
 
 def test_qwen_narrative_accepts_supported_quantity():
@@ -41,8 +41,10 @@ def test_qwen_narrative_accepts_supported_quantity():
         order = next(item for item in payload["evidence"] if item["type"] == "PROCUREMENT_QUANTITY")
         return {"answer": "Kế hoạch ghi nhận đặt 60 lít Sữa tươi.", "claims": [{"type": "PROCUREMENT_QUANTITY", "text": "Kế hoạch ghi nhận đặt 60 lít Sữa tươi.", "evidence_ids": [order["evidence_id"]]}], "used_evidence_ids": [order["evidence_id"]]}
     result = DecisionNarrativeProvider(MockQwen(response), settings()).explain(brief(), question="Tại sao phải nhập Sữa tươi?", language="vi", detail_level="simple")
-    assert result.provider == "local_qwen" and result.grounded is True
+    assert result.provider == "openrouter_qwen" and result.grounded is True
     assert result.claims[0].evidence_ids
+    assert result.raw_response is not None
+    assert result.raw_response["answer"] == "Kế hoạch ghi nhận đặt 60 lít Sữa tươi."
 
 
 def test_qwen_unsupported_number_and_entity_fall_back():

@@ -135,3 +135,23 @@ class BusinessIdentityConflictError(ShelfCashError):
     def __init__(self, code: str, message: str, details=None):
         self.code, self.http_status = code, 409
         super().__init__(message, details)
+
+
+class LLMUnavailableError(ShelfCashError):
+    code = "LLM_UNAVAILABLE"
+    default_message = "Không thể sử dụng dịch vụ diễn giải dữ liệu lúc này và chưa có ánh xạ rule-based đủ tin cậy."
+    http_status = 503
+
+    def __init__(self, message: str | None = None, details: dict[str, Any] | None = None):
+        super().__init__(message or self.default_message, details)
+
+
+class LLMProviderError(ShelfCashError):
+    code = "LLM_PROVIDER_ERROR"
+    default_message = "Dịch vụ LLM gặp lỗi trong quá trình xử lý."
+    http_status = 502
+
+    def __init__(self, message: str | None = None, details: dict[str, Any] | None = None, *, http_status: int = 502):
+        self.http_status = http_status
+        super().__init__(message or self.default_message, details)
+

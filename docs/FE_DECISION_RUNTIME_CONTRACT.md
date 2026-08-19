@@ -113,7 +113,8 @@ export interface DecisionExplanationResponse {
   }>;
   citations: Array<{ evidence_id: string; label: string; source_type: string }>;
   grounded: boolean;
-  provider: "shelfcash_decision_intelligence" | "legacy_template_fallback";
+  provider: "openrouter_qwen" | "shelfcash_decision_intelligence" | "deterministic_fallback" | "legacy_template_fallback";
+  raw_response?: Record<string, unknown> | null;
 }
 ```
 

@@ -4,11 +4,11 @@ Frontend-ready TypeScript contract: [FE_DECISION_RUNTIME_CONTRACT.md](FE_DECISIO
 
 ## Grounded narrative generation
 
-`DecisionBriefFacts → deterministic evidence → deterministic aggregation → question-aware retrieval → Local Qwen → grounding guard → explanation`.
+`DecisionBriefFacts → deterministic evidence → deterministic aggregation → question-aware retrieval → OpenRouter Qwen → grounding guard → explanation`.
 
 Qwen is an optional narrative layer only: it has no authority to forecast, calculate BOM, optimize procurement, alter risk, write data, or create purchase orders. It receives compact structured evidence, never raw database dumps. Daily demand is retained for date-specific questions; totals/min/max/peak are calculated in application code before Qwen receives them.
 
-Set `DECISION_NARRATIVE_PROVIDER=local_qwen` to use the already-loaded local Qwen runtime. Invalid JSON, timeout, unavailable Qwen, unsupported evidence IDs, entity mismatches, or unsupported numbers fall back to the deterministic explanation without failing the endpoint.
+ShelfCash uses OpenRouter (`qwen/qwen3.5-9b`) when `OPENROUTER_API_KEY` is configured. Invalid JSON, timeout, unavailable OpenRouter, unsupported evidence IDs, entity mismatches, or unsupported numbers fall back to the deterministic explanation without failing the endpoint.
 
 For example, with grounded demand and procurement evidence, the question `Tại sao phải nhập thêm sữa?` can return: `Kế hoạch ghi nhận đặt 60 lít sữa tươi.` The answer can only state a cause such as inventory shortage when the retrieved evidence explicitly supports it.
 

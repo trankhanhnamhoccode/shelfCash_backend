@@ -77,6 +77,7 @@ class DecisionExplanationResponse(_Contract):
     decision_run_id: str; answer: str; intent: str; entities: dict[str, list[str]]
     claims: list[ExplanationClaim] = Field(default_factory=list); citations: list[Citation] = Field(default_factory=list)
     grounded: bool; provider: str
+    raw_response: dict[str, Any] | None = None
 
 
 class WhatIfOrderChange(_Contract):

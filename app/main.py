@@ -81,8 +81,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.session_factory = session_factory
         app.state.llm_provider = provider
         try:
-            if active_settings.llm_provider == "local_qwen":
-                await provider.load()
             pipeline = IngestionPipeline(provider, active_settings.rule_confidence_threshold)
             app.state.import_service = ImportService(
                 session_factory, pipeline, active_settings

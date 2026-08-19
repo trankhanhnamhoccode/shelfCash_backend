@@ -17,27 +17,21 @@ FastAPI backend nhận Excel từ React, profile workbook, đề xuất mapping 
 
 Luồng xử lý là `API → ImportService → IngestionPipeline → Excel profiler / Rule mapper / LLMProvider → Normalizer / Validator → SQLite + JSON result`. Repository lưu trạng thái import trong SQLite; file upload và kết quả nằm trong `runtime/`. Mapping luôn được validate theo canonical schema. Pipeline chỉ gửi `SheetProfile` và tối đa 8 sample rows vào Qwen, không gửi toàn bộ workbook.
 
-`LLMProvider` tách inference khỏi pipeline. `DisabledLLMProvider` chạy CPU/CI, còn `LocalQwenProvider` lazy-import torch/transformers, load model đúng một lần trong FastAPI lifespan, chạy 4-bit NF4 và serialize inference bằng semaphore.
+`OpenRouterQwenProvider` kết nối trực tiếp với OpenRouter API (`qwen/qwen3.5-9b`). Khi `OPENROUTER_API_KEY` được cấu hình, Qwen hỗ trợ gợi ý mapping Excel và diễn giải quyết định (Decision Narrative). Khi không có API key hoặc upstream gặp sự cố, hệ thống tự động sử dụng cơ chế fallback rule-based / deterministic an toàn.
 
-## Chạy local không LLM
+## Chạy local
 
-Yêu cầu Python 3.11:
+Yêu cầu Python 3.11+:
 
 ```bash
 python -m venv .venv
 # Windows: .venv\Scripts\activate
 python -m pip install -r requirements.txt
 copy .env.example .env
-set LLM_PROVIDER=disabled
+# Cấu hình OPENROUTER_API_KEY trong .env (nếu muốn dùng tính năng LLM)
 alembic upgrade head
 python -m scripts.seed_database
 uvicorn app.main:app --host 0.0.0.0 --port 8000
-```
-
-PowerShell dùng `$env:LLM_PROVIDER="disabled"`. Linux/macOS có thể dùng:
-
-```bash
-LLM_PROVIDER=disabled uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
 ## Database và migration
@@ -109,18 +103,19 @@ pytest -q
 python scripts/create_fake_excel.py
 ```
 
-## Kaggle GPU với Qwen
+## Kaggle với OpenRouter Qwen
 
-Không cài lại hoặc pin PyTorch; dùng bản PyTorch/CUDA sẵn có của Kaggle:
+Chạy backend trên Kaggle thông qua OpenRouter API (không cần GPU cho LLM):
 
 ```bash
 pip install -r requirements-kaggle.txt
-export LLM_PROVIDER=local_qwen
-export QWEN_MODEL_ID=Qwen/Qwen3-4B
+export OPENROUTER_API_KEY="sk-or-v1-..."
+alembic upgrade head
+python -m scripts.seed_database
 uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
-Model được load lúc startup, mặc định 4-bit NF4 với `device_map="auto"`. Kaggle notebook và Quick Tunnel chỉ phù hợp demo, không phải production: runtime có thể ngắt, URL thay đổi, và tunnel không thay thế authentication/network controls.
+Kaggle notebook và Quick Tunnel chỉ phù hợp demo, không phải production: runtime có thể ngắt, URL thay đổi, và tunnel không thay thế authentication/network controls.
 
 ## API và curl
 

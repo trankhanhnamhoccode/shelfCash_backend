@@ -35,7 +35,6 @@ def test_domain_and_unknown_errors_are_safe(tmp_path):
         database_url=database_url,
         upload_dir=tmp_path / "uploads",
         result_dir=tmp_path / "results",
-        llm_provider="disabled",
     )
     app = create_app(settings)
 

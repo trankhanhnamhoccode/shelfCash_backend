@@ -1,5 +1,1 @@
 -r requirements.txt
-transformers>=4.51.0
-accelerate
-bitsandbytes
-sentencepiece
