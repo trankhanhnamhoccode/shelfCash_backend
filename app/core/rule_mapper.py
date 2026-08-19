@@ -208,6 +208,7 @@ def finalize_mapping(
         errors=errors,
         source=suggestion.source,
         requires_review=bool(errors or missing_core or confidence_review),
+        raw_response=suggestion.raw_response,
     )
 
 

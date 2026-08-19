@@ -229,7 +229,8 @@ async def test_map_sheet_openrouter_failure_with_safe_rule_fallback(monkeypatch)
     result = await provider.map_sheet(profile, {}, rule_suggestion)
     assert result.source == "rule_fallback"
     assert result.requires_review is True
-    assert "LLM mapping failed; rule suggestion retained" in result.warnings
+    assert any("LLM mapping failed" in w for w in result.warnings)
+    assert result.raw_response is not None
     await provider.close()
 
 

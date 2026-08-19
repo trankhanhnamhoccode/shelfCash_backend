@@ -235,17 +235,30 @@ class DecisionNarrativeProvider:
                 raise ValueError("no_retrieved_evidence")
             logger.info("decision_narrative_retrieval_completed decision_run_id=%s evidence_count=%d intent=%s", brief.decision_run_id, len(structured), retrieved.intent)
             payload = {"question": resolved_question, "language": language, "detail_level": detail_level, "evidence": structured}
-            raw = asyncio.run(self.llm_provider.generate_json(SYSTEM_PROMPT, payload, max_new_tokens=getattr(self.settings, "decision_narrative_max_new_tokens", 2000)))
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = None
+
+            if loop and loop.is_running():
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                    raw = pool.submit(lambda: asyncio.run(self.llm_provider.generate_json(SYSTEM_PROMPT, payload, max_new_tokens=getattr(self.settings, "decision_narrative_max_new_tokens", 2000)))).result()
+            else:
+                raw = asyncio.run(self.llm_provider.generate_json(SYSTEM_PROMPT, payload, max_new_tokens=getattr(self.settings, "decision_narrative_max_new_tokens", 2000)))
+
             logger.info("decision_narrative_qwen_completed decision_run_id=%s provider=openrouter_qwen", brief.decision_run_id)
             response = self._guard(raw, structured, evidence.items, brief, language, detail_level, retrieved.intent)
             logger.info("decision_narrative_grounding_passed decision_run_id=%s provider=openrouter_qwen duration_ms=%d", brief.decision_run_id, int((time.monotonic() - started) * 1000))
             return response
         except Exception as exc:
-            logger.warning("decision_narrative_grounding_failed decision_run_id=%s provider=openrouter_qwen reason=%s", brief.decision_run_id, type(exc).__name__)
+            logger.warning("decision_narrative_grounding_failed decision_run_id=%s provider=openrouter_qwen reason=%s error=%s", brief.decision_run_id, type(exc).__name__, str(exc))
             logger.warning("decision_narrative_fallback decision_run_id=%s provider=openrouter_qwen reason=%s duration_ms=%d", brief.decision_run_id, type(exc).__name__, int((time.monotonic() - started) * 1000))
             update_dict: dict[str, Any] = {"provider": "deterministic_fallback"}
             if raw is not None:
                 update_dict["raw_response"] = raw
+            else:
+                update_dict["raw_response"] = {"error": str(exc), "reason": type(exc).__name__, "details": getattr(exc, "details", None)}
             return fallback.model_copy(update=update_dict)
 
     def _guard(self, raw, structured, evidence_items, brief, language, detail_level, intent):

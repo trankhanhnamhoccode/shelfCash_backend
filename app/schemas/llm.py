@@ -29,6 +29,7 @@ class MappingSuggestion(BaseModel):
     errors: list[str] = Field(default_factory=list)
     source: Literal["rule", "llm", "rule_fallback"] = "rule"
     requires_review: bool = False
+    raw_response: dict[str, Any] | None = None
 
     @model_validator(mode="after")
     def fields_belong_to_schema(self):

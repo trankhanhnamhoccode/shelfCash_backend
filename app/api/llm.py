@@ -27,11 +27,12 @@ async def map_sheet(
             return await provider.map_sheet(payload.profile, CANONICAL_SCHEMAS, rule)
         except LLMUnavailableError:
             raise
-        except Exception:
+        except Exception as exc:
             if rule.confidence >= threshold or (rule.sheet_type != "unknown" and rule.column_mapping):
                 rule.source = "rule_fallback"
                 rule.requires_review = True
-                rule.warnings.append("LLM mapping failed; rule suggestion retained")
+                rule.warnings.append(f"LLM mapping failed ({type(exc).__name__}: {str(exc)}); rule suggestion retained")
+                rule.raw_response = {"error": str(exc), "details": getattr(exc, "details", None)}
                 return rule
             raise LLMUnavailableError()
     if rule.confidence >= threshold or (rule.sheet_type != "unknown" and rule.column_mapping):

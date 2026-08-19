@@ -97,6 +97,12 @@ class OpenRouterQwenProvider(LLMProvider):
 
         try:
             response = await client.post(url, json=body)
+            # If provider does not support response_format, retry without it
+            if response.status_code == 400 and "response_format" in body:
+                logger.info("openrouter_retrying_without_response_format model=%s response=%s", self.model, response.text[:200])
+                body_no_rf = dict(body)
+                body_no_rf.pop("response_format", None)
+                response = await client.post(url, json=body_no_rf)
         except httpx.TimeoutException as exc:
             duration_ms = int((time.monotonic() - started) * 1000)
             logger.warning(
@@ -134,16 +140,16 @@ class OpenRouterQwenProvider(LLMProvider):
             raise LLMProviderError("OpenRouter rate limit exceeded", details={"reason": "OPENROUTER_RATE_LIMITED"}, http_status=429)
         elif response.status_code >= 500:
             logger.warning(
-                "openrouter_request_failed model=%s reason=OPENROUTER_UPSTREAM_ERROR status_code=%d duration_ms=%d",
-                self.model, response.status_code, duration_ms,
+                "openrouter_request_failed model=%s reason=OPENROUTER_UPSTREAM_ERROR status_code=%d duration_ms=%d body=%s",
+                self.model, response.status_code, duration_ms, response.text[:200],
             )
-            raise LLMProviderError(f"OpenRouter upstream server error ({response.status_code})", details={"reason": "OPENROUTER_UPSTREAM_ERROR", "status_code": response.status_code}, http_status=502)
+            raise LLMProviderError(f"OpenRouter upstream server error ({response.status_code})", details={"reason": "OPENROUTER_UPSTREAM_ERROR", "status_code": response.status_code, "body": response.text[:500]}, http_status=502)
         elif response.is_error:
             logger.warning(
-                "openrouter_request_failed model=%s reason=OPENROUTER_HTTP_ERROR status_code=%d duration_ms=%d",
-                self.model, response.status_code, duration_ms,
+                "openrouter_request_failed model=%s reason=OPENROUTER_HTTP_ERROR status_code=%d duration_ms=%d body=%s",
+                self.model, response.status_code, duration_ms, response.text[:200],
             )
-            raise LLMProviderError(f"OpenRouter HTTP error ({response.status_code})", details={"reason": "OPENROUTER_HTTP_ERROR", "status_code": response.status_code}, http_status=502)
+            raise LLMProviderError(f"OpenRouter HTTP error ({response.status_code}): {response.text[:200]}", details={"reason": "OPENROUTER_HTTP_ERROR", "status_code": response.status_code, "body": response.text[:500]}, http_status=response.status_code)
 
         try:
             data = response.json()
@@ -173,7 +179,7 @@ class OpenRouterQwenProvider(LLMProvider):
                 "openrouter_request_failed model=%s reason=OPENROUTER_INVALID_RESPONSE duration_ms=%d error=%s",
                 self.model, duration_ms, type(exc).__name__,
             )
-            raise LLMProviderError("OpenRouter returned invalid JSON", details={"reason": "OPENROUTER_INVALID_RESPONSE"}, http_status=502) from exc
+            raise LLMProviderError(f"OpenRouter returned invalid JSON: {type(exc).__name__}", details={"reason": "OPENROUTER_INVALID_RESPONSE", "raw_content": response.text[:500]}, http_status=502) from exc
 
     async def map_sheet(self, profile, canonical_schemas: dict, rule_suggestion: MappingSuggestion) -> MappingSuggestion:
         system = (
@@ -198,19 +204,23 @@ class OpenRouterQwenProvider(LLMProvider):
                 return fallback
             raise LLMUnavailableError()
 
+        raw = None
         try:
             raw = await self.generate_json(system, user_payload)
-            return self._validate_mapping_result(raw, profile)
+            suggestion = self._validate_mapping_result(raw, profile)
+            suggestion.raw_response = raw
+            return suggestion
         except Exception as exc:
             logger.warning(
-                "openrouter_mapping_failed reason=%s fallback_to_rule=True",
-                type(exc).__name__,
+                "openrouter_mapping_failed reason=%s error=%s fallback_to_rule=True",
+                type(exc).__name__, str(exc),
             )
             if rule_suggestion.confidence >= threshold or (rule_suggestion.sheet_type != "unknown" and rule_suggestion.column_mapping):
                 fallback = rule_suggestion.model_copy(deep=True)
                 fallback.source = "rule_fallback"
                 fallback.requires_review = True
-                fallback.warnings.append("LLM mapping failed; rule suggestion retained")
+                fallback.warnings.append(f"LLM mapping failed ({type(exc).__name__}: {str(exc)}); rule suggestion retained")
+                fallback.raw_response = raw or {"error": str(exc), "details": getattr(exc, "details", None)}
                 return fallback
             raise LLMUnavailableError() from exc
 
