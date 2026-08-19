@@ -31,7 +31,7 @@ logger=logging.getLogger("shelfcash.planning")
 LEGACY_STRATEGIES={"economy":"lean","balanced":"balanced","safe":"protected","lean":"lean","protected":"protected"}
 
 class DecisionPlanningService:
- def __init__(self,factory,settings=None):self.factory=factory;self.settings=settings
+ def __init__(self,factory,settings=None,llm_provider=None):self.factory=factory;self.settings=settings;self.llm_provider=llm_provider
  def _forecast(self,s,store,run_id):
   StoreRepository(s).get_required(store);run=s.get(ForecastRunModel,run_id)
   if not run or run.store_id!=store:raise PlanningError("FORECAST_RUN_NOT_FOUND","Không tìm thấy forecast run.",{"forecast_run_id":run_id},http_status=404)
@@ -259,9 +259,9 @@ class DecisionPlanningService:
  def explain_decision(self,rid,body):
   """M6 read-only explanation with legacy deterministic fallback."""
   try:
-   from app.decision_intelligence import ShelfCashDecisionIntelligenceAdapter
+   from app.decision_intelligence.narrative import DecisionNarrativeProvider
    brief=self.get_decision_brief(rid)
-   return ShelfCashDecisionIntelligenceAdapter().explain(brief,question=body.question,language=body.language,detail_level=body.detail_level).model_dump(mode="json")
+   return DecisionNarrativeProvider(self.llm_provider,self.settings).explain(brief,question=body.question,language=body.language,detail_level=body.detail_level).model_dump(mode="json")
   except Exception:
    logger.exception("decision_intelligence_failed decision_run_id=%s",rid)
    return self._template_explanation(rid,body)

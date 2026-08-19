@@ -64,6 +64,16 @@ class LocalQwenProvider(LLMProvider):
                 fallback.warnings.append("LLM mapping failed; rule suggestion retained")
                 return fallback
 
+    async def generate_json(self, system: str, payload: dict[str, Any], *, max_new_tokens: int | None = None) -> dict[str, Any]:
+        """Use the already-loaded Excel Qwen instance for a bounded JSON task."""
+        if not self.available:
+            raise RuntimeError("Local Qwen is unavailable")
+        async with self._semaphore:
+            return await asyncio.wait_for(
+                asyncio.to_thread(self._generate_json_sync, system, payload, max_new_tokens),
+                timeout=self.settings.qwen_timeout_seconds,
+            )
+
     def _generate_sync(self, profile: dict[str, Any], canonical_schemas: dict, rule_suggestion: dict):
         system = (
             "You map Excel sheet profiles to canonical schemas. Return exactly one JSON object, "
@@ -79,6 +89,25 @@ class LocalQwenProvider(LLMProvider):
         output = self.model.generate(**inputs, max_new_tokens=self.settings.qwen_max_new_tokens, do_sample=False)
         generated = output[0][inputs["input_ids"].shape[-1]:]
         return json.loads(repair_json(self.tokenizer.decode(generated, skip_special_tokens=True)))
+
+    def _generate_json_sync(self, system: str, payload: dict[str, Any], max_new_tokens: int | None):
+        prompt = self.tokenizer.apply_chat_template(
+            [{"role": "system", "content": system}, {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}],
+            tokenize=False, add_generation_prompt=True, enable_thinking=False,
+        )
+        inputs = self.tokenizer(prompt, return_tensors="pt").to(self.model.device)
+        output = self.model.generate(
+            **inputs, max_new_tokens=max_new_tokens or self.settings.qwen_max_new_tokens,
+            do_sample=False, temperature=None,
+        )
+        generated = self.tokenizer.decode(output[0][inputs["input_ids"].shape[-1]:], skip_special_tokens=True).strip()
+        if generated.startswith("```"):
+            generated = generated.split("\n", 1)[1] if "\n" in generated else generated
+            generated = generated.rsplit("```", 1)[0].strip()
+        parsed = json.loads(repair_json(generated))
+        if not isinstance(parsed, dict):
+            raise ValueError("Qwen JSON response must be an object")
+        return parsed
 
     def _validate_result(self, raw: dict, profile) -> MappingSuggestion:
         columns = set(profile.columns)

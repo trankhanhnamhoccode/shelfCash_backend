@@ -19,6 +19,8 @@ class Settings(BaseSettings):
     qwen_load_in_4bit: bool = True
     qwen_max_new_tokens: int = 900
     qwen_timeout_seconds: int = 180
+    decision_narrative_provider: str = "deterministic"
+    decision_narrative_max_new_tokens: int = 384
     rule_confidence_threshold: float = 0.82
     max_files_per_request: int = 10
     max_file_size_mb: int = 12

@@ -13,6 +13,9 @@ class LLMProvider(ABC):
     @abstractmethod
     async def map_sheet(self, profile, canonical_schemas, rule_suggestion): ...
 
+    async def generate_json(self, system: str, payload: dict, *, max_new_tokens: int | None = None) -> dict[str, Any]:
+        raise RuntimeError("JSON generation is unavailable")
+
     async def load(self) -> None:
         return None
 
