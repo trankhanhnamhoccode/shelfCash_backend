@@ -6,9 +6,13 @@ from datetime import date, datetime, timezone
 from sqlalchemy import select
 
 from app.decision_intelligence.contracts import (
-    CriticBrief, DecisionBriefFacts, ForecastBrief, IngredientDemandBrief,
+    AssistantSummary, CriticBrief, DecisionBriefFacts, ForecastBrief, IngredientDemandBrief,
+    IngredientDemandSummaryBrief,
     ProcurementRowBrief, RecommendationBrief, RiskBrief,
 )
+from app.decision_intelligence.semantic_evidence import DecisionSemanticEvidenceBuilder
+from app.decision_intelligence.risk_metadata import project_risk_details
+from app.decision_intelligence.strategy_comparison import project_strategy_comparison
 from app.models.business import IngredientModel, SupplierModel
 from app.models.decision import DecisionRunModel
 from app.models.operations import ForecastRunModel
@@ -55,15 +59,47 @@ class DecisionBriefBuilder:
         critic = package.get("critic", {}) if isinstance(package.get("critic"), dict) else {}
         hard = [str(item.get("code")) for item in critic.get("findings", []) if item.get("severity") == "error" and item.get("code")]
         risk = package.get("inventory_risk", {}) if isinstance(package.get("inventory_risk"), dict) else {}
-        return DecisionBriefFacts(
+        brief = DecisionBriefFacts(
             decision_run_id=run.decision_run_id, store_id=run.store_id, status=run.status,
             forecast=ForecastBrief(forecast_run_id=run.forecast_run_id, model_version=(forecast.model_version if forecast else None), horizon_days=run.horizon_days, cutoff_date=run.as_of_date),
-            recommendation=RecommendationBrief(available=available, strategy=(package.get("recommended_strategy") if available else None), summary=("Persisted production recommendation." if available else None), total_purchase_cost=_number(metrics.get("purchase_cost") or metrics.get("total_purchase_cost")), expected_fill_rate=_number(metrics.get("fill_rate") or metrics.get("expected_fill_rate"))),
+            recommendation=RecommendationBrief(available=available, strategy=(package.get("recommended_strategy") if available else None), summary=("Persisted production recommendation." if available else None), total_purchase_cost=_number(metrics.get("projected_purchase_cost") if metrics.get("projected_purchase_cost") is not None else metrics.get("purchase_cost") or metrics.get("total_purchase_cost")), expected_fill_rate=_number(metrics.get("fill_rate") or metrics.get("expected_fill_rate"))),
             procurement_rows=rows, ingredient_demand=demands,
             risk=RiskBrief(stockout_probability=None, expected_fill_rate=_number(metrics.get("fill_rate") or metrics.get("expected_fill_rate")), shortage_quantity=_number(metrics.get("shortage_quantity") or metrics.get("projected_shortage_quantity")), waste_quantity=_number(metrics.get("waste_quantity") or metrics.get("projected_waste_quantity"))),
             critic=CriticBrief(hard_violations=hard, warnings=[str(value) for value in critic.get("warnings", [])]),
             data_availability={"stockout_probability": "UNAVAILABLE", "forecast_model": "AVAILABLE" if forecast else "UNAVAILABLE", "ingredient_demand": "AVAILABLE" if demands else "UNAVAILABLE"}, generated_at=datetime.now(timezone.utc),
         )
+        facts = DecisionSemanticEvidenceBuilder().build(brief, package)
+        risk_details = project_risk_details(brief, facts)
+        strategy_comparison = project_strategy_comparison(brief, facts)
+        summaries = [
+            IngredientDemandSummaryBrief(
+                ingredient_id=fact.entities["ingredient_id"],
+                ingredient_name=fact.values.get("ingredient_name"),
+                unit=fact.values.get("unit"),
+                period_start=fact.values["period_start"],
+                period_end=fact.values["period_end"],
+                p25_total=fact.values["p25_total"],
+                p50_total=fact.values["p50_total"],
+                p75_total=fact.values["p75_total"],
+                daily_p50_min=fact.values["daily_p50_min"],
+                daily_p50_max=fact.values["daily_p50_max"],
+                peak_date=fact.values["peak_date"],
+                peak_p50=fact.values["peak_p50"],
+                aggregation_method=fact.values["aggregation_method"],
+            )
+            for fact in facts if fact.fact_type == "DEMAND_HORIZON_SUMMARY"
+        ]
+        assistant_data = (package.get("assistant") or {}).get("overall_summary")
+        try:
+            assistant_summary = AssistantSummary.model_validate(assistant_data) if assistant_data else None
+        except Exception:
+            assistant_summary = None
+        return brief.model_copy(update={
+            "ingredient_demand_summary": summaries,
+            "risk_details": risk_details,
+            "strategy_comparison": strategy_comparison,
+            "assistant_summary": assistant_summary,
+        })
 
 
 def _number(value):

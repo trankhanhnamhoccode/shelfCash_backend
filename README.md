@@ -21,12 +21,13 @@ Luồng xử lý là `API → ImportService → IngestionPipeline → Excel prof
 
 Task profiles mặc định:
 
-`OPENROUTER_MODEL` is retained for legacy configuration and health output only; runtime routing uses the two task-specific model variables below.
+`OPENROUTER_MODEL` is retained for legacy configuration and health output only; runtime routing uses the task-specific model variables below.
 
 | Task | Model config | Max output | Timeout |
 | --- | --- | ---: | ---: |
 | Excel mapping | `OPENROUTER_MAPPING_MODEL` | 1200 | 60s |
 | Decision narrative/Q&A | `OPENROUTER_NARRATIVE_MODEL` | 800 | 60s |
+| Overall Decision Brief | `OPENROUTER_SUMMARY_MODEL` | 600 | 60s |
 
 ## Chạy local
 

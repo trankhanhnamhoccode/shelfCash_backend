@@ -1,4 +1,5 @@
 from pathlib import Path
+import logging
 
 import pytest
 from alembic import command
@@ -15,6 +16,13 @@ def migrate_database(database_url: str) -> None:
     config = Config("alembic.ini")
     config.set_main_option("sqlalchemy.url", database_url.replace("%", "%%"))
     command.upgrade(config, "head")
+    # Alembic's logging configuration disables existing named loggers by
+    # default.  Test migrations must not leak that global state into later
+    # API/provider tests.
+    for name, candidate in logging.root.manager.loggerDict.items():
+        if name == "shelfcash" or name.startswith("shelfcash."):
+            if isinstance(candidate, logging.Logger):
+                candidate.disabled = False
 
 
 @pytest.fixture

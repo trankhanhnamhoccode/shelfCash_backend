@@ -1,0 +1,331 @@
+{
+  "create_decision_run_request": {
+    "forecast_run_id": "forecast-demo-2026-08-20",
+    "as_of_date": "2026-08-20",
+    "horizon_days": 7,
+    "engine_mode": "deterministic",
+    "include_open_purchase_orders": true,
+    "budget_override": null,
+    "scenario_count": null,
+    "random_seed": null
+  },
+  "brief_response": {
+    "decision_run_id": "decision-demo-001",
+    "store_id": "store-demo",
+    "status": "completed",
+    "forecast": {
+      "forecast_run_id": "forecast-demo-2026-08-20",
+      "model_version": "demo-model",
+      "horizon_days": 7,
+      "cutoff_date": "2026-08-20"
+    },
+    "recommendation": {
+      "available": true,
+      "strategy": "protected",
+      "summary": "Kế hoạch nhập hàng khả thi.",
+      "total_purchase_cost": 8338000,
+      "expected_fill_rate": 0.988
+    },
+    "procurement_rows": [
+      {
+        "ingredient_id": "ingredient-banana",
+        "ingredient_name": "Chuối",
+        "supplier_id": "supplier-demo",
+        "supplier_name": "Nhà cung cấp minh họa",
+        "quantity": 30,
+        "unit": "kg",
+        "pack_count": 6,
+        "pack_size": 5,
+        "order_date": "2026-08-20",
+        "arrival_date": "2026-08-21",
+        "purchase_cost": 1200000,
+        "reason_codes": ["PACK_SIZE_ROUNDING"]
+      }
+    ],
+    "ingredient_demand": [
+      {
+        "ingredient_id": "ingredient-banana",
+        "ingredient_name": "Chuối",
+        "unit": "kg",
+        "target_date": "2026-08-21",
+        "p25": 3.4,
+        "p50": 4.1,
+        "p75": 4.9,
+        "contributions": []
+      },
+      {"ingredient_id": "ingredient-banana", "ingredient_name": "Chuối", "unit": "kg", "target_date": "2026-08-22", "p25": 3.3, "p50": 4.0, "p75": 4.8, "contributions": []},
+      {"ingredient_id": "ingredient-banana", "ingredient_name": "Chuối", "unit": "kg", "target_date": "2026-08-23", "p25": 4.0, "p50": 4.8, "p75": 5.7, "contributions": []},
+      {"ingredient_id": "ingredient-banana", "ingredient_name": "Chuối", "unit": "kg", "target_date": "2026-08-24", "p25": 3.5, "p50": 4.2, "p75": 4.9, "contributions": []},
+      {"ingredient_id": "ingredient-banana", "ingredient_name": "Chuối", "unit": "kg", "target_date": "2026-08-25", "p25": 3.4, "p50": 4.0, "p75": 4.7, "contributions": []},
+      {"ingredient_id": "ingredient-banana", "ingredient_name": "Chuối", "unit": "kg", "target_date": "2026-08-26", "p25": 3.1, "p50": 3.4, "p75": 4.3, "contributions": []},
+      {"ingredient_id": "ingredient-banana", "ingredient_name": "Chuối", "unit": "kg", "target_date": "2026-08-27", "p25": 3.5, "p50": 4.45, "p75": 4.8, "contributions": []}
+    ],
+    "ingredient_demand_summary": [
+      {
+        "ingredient_id": "ingredient-banana",
+        "ingredient_name": "Chuối",
+        "unit": "kg",
+        "period_start": "2026-08-21",
+        "period_end": "2026-08-27",
+        "p25_total": 24.2,
+        "p50_total": 28.95,
+        "p75_total": 34.1,
+        "daily_p50_min": 3.4,
+        "daily_p50_max": 4.8,
+        "peak_date": "2026-08-23",
+        "peak_p50": 4.8,
+        "aggregation_method": "sum_daily_quantiles"
+      }
+    ],
+    "risk": {
+      "stockout_probability": null,
+      "expected_fill_rate": 0.988,
+      "shortage_quantity": null,
+      "waste_quantity": null
+    },
+    "critic": {
+      "hard_violations": [],
+      "warnings": ["RISK_METRIC_NOT_AVAILABLE"]
+    },
+    "risk_details": [
+      {
+        "code": "RISK_METRIC_NOT_AVAILABLE",
+        "classification": "limitation",
+        "category": "risk_evaluation",
+        "severity": "warning",
+        "title": "Chưa đủ dữ liệu đánh giá chỉ số rủi ro",
+        "meaning": "Một số chỉ số rủi ro chưa đủ dữ liệu để đánh giá.",
+        "recommended_action": "Xem thêm dữ liệu hoặc kết quả mô phỏng trước khi đánh giá rủi ro.",
+        "scope": "run",
+        "ingredient_id": null,
+        "ingredient_name": null,
+        "evidence_ids": ["warning:run:risk-metric"],
+        "source_count": 1
+      }
+    ],
+    "strategy_comparison": {
+      "selected_strategy": "protected",
+      "candidates": [
+        {
+          "strategy": "protected",
+          "label": "An toàn",
+          "selected": true,
+          "feasible": true,
+          "metrics": {
+            "purchase_cost": 8338000,
+            "expected_fill_rate": 0.988,
+            "stockout_probability": null,
+            "risk_evaluation_status": "not_available",
+            "risk_evaluation_method": null
+          },
+          "critic": {
+            "hard_violation_count": 0,
+            "warning_count": 1,
+            "stress_shortage_observed": false,
+            "stress_capacity_violation": null
+          },
+          "vs_selected": null,
+          "evidence_ids": ["strategy:protected"]
+        },
+        {
+          "strategy": "lean",
+          "label": "Tiết kiệm",
+          "selected": false,
+          "feasible": true,
+          "metrics": {
+            "purchase_cost": 6890000,
+            "expected_fill_rate": 0.92,
+            "stockout_probability": null,
+            "risk_evaluation_status": "not_available",
+            "risk_evaluation_method": null
+          },
+          "critic": {
+            "hard_violation_count": 0,
+            "warning_count": 1,
+            "stress_shortage_observed": false,
+            "stress_capacity_violation": null
+          },
+          "vs_selected": {
+            "left_strategy": "protected",
+            "right_strategy": "lean",
+            "purchase_cost_delta": 1448000,
+            "expected_fill_rate_delta": 0.068,
+            "expected_fill_rate_percentage_point_delta": 6.8,
+            "stockout_probability_delta": null
+          },
+          "evidence_ids": ["strategy:lean"]
+        }
+      ],
+      "selection_reason": {
+        "available": true,
+        "selected_strategy": "protected",
+        "rule": "lowest_valid_candidate_cost_then_strategy_name",
+        "eligible_strategies": ["lean", "protected"],
+        "selection_metric": "purchase_cost",
+        "tie_breaker": "strategy_name_ascending",
+        "evidence_ids": ["selection:decision-demo-001"]
+      }
+    },
+    "evidence": [
+      {
+        "evidence_id": "demand:banana:2026-08-21",
+        "label": "Nhu cầu Chuối ngày 2026-08-21",
+        "source_type": "forecast",
+        "entities": {"ingredient_id": "ingredient-banana"}
+      }
+    ],
+    "data_availability": {"stockout_probability": "not_available"},
+    "assistant_summary": {
+      "headline": "Kế hoạch nhập hàng 7 ngày",
+      "summary": "ShelfCash đề xuất nhập hàng cho kỳ 7 ngày tới.",
+      "key_points": ["Mức đáp ứng dự kiến là 98,8% khi chỉ số này có sẵn."],
+      "warning_summary": "Một số chỉ số rủi ro chưa đủ dữ liệu để đánh giá.",
+      "source": "deterministic_fallback",
+      "grounded": true
+    },
+    "generated_at": "2026-08-20T10:00:00Z"
+  },
+  "general_explanation_request": {
+    "language": "vi",
+    "detail_level": "simple",
+    "question": "Tại sao kế hoạch này đáng chú ý?",
+    "ingredient_id": null
+  },
+  "ingredient_explanation_request": {
+    "language": "vi",
+    "detail_level": "simple",
+    "question": "Vì sao cần nhập nguyên liệu này?",
+    "ingredient_id": "ingredient-banana"
+  },
+  "explanation_response": {
+    "source": "deterministic_fallback",
+    "language": "vi",
+    "detail_level": "simple",
+    "summary": "Nhu cầu trung vị của Chuối trong 7 ngày tới khoảng 28,95 kg.",
+    "why_this_plan": ["Kế hoạch hiện đề xuất nhập 30 kg Chuối."],
+    "main_risks": [],
+    "tradeoffs": [],
+    "important_assumptions": ["Nội dung chỉ dùng dữ liệu đã tính trong Decision Run."],
+    "decision_run_id": "decision-demo-001",
+    "answer": "Nhu cầu trung vị của Chuối trong 7 ngày tới khoảng 28,95 kg. Kế hoạch hiện đề xuất nhập 30 kg.",
+    "intent": "INGREDIENT_NEED",
+    "entities": {"ingredient_ids": ["ingredient-banana"], "supplier_ids": []},
+    "claims": [
+      {
+        "type": "DEMAND_HORIZON_SUMMARY",
+        "value": "Nhu cầu trung vị của Chuối trong 7 ngày tới khoảng 28,95 kg.",
+        "unit": "kg",
+        "evidence_ids": ["demand:banana:2026-08-21"]
+      }
+    ],
+    "citations": [
+      {
+        "evidence_id": "demand:banana:2026-08-21",
+        "label": "Nhu cầu Chuối ngày 2026-08-21",
+        "source_type": "forecast"
+      }
+    ],
+    "grounded": true,
+    "provider": "deterministic_fallback",
+    "authority": null,
+    "raw_response": null
+  },
+  "what_if_demand_request": {
+    "demand_multiplier": 1.1,
+    "supplier_delay_days": null,
+    "budget_limit": null,
+    "strategy": null
+  },
+  "what_if_strategy_request": {
+    "demand_multiplier": null,
+    "supplier_delay_days": null,
+    "budget_limit": null,
+    "strategy": "lean"
+  },
+  "what_if_response": {
+    "decision_run_id": "decision-demo-001",
+    "baseline": {
+      "decision_run_id": "decision-demo-001",
+      "store_id": "store-demo",
+      "status": "completed",
+      "forecast": {"forecast_run_id": "forecast-demo-2026-08-20", "model_version": "demo-model", "horizon_days": 7, "cutoff_date": "2026-08-20"},
+      "recommendation": {"available": true, "strategy": "protected", "summary": "Kế hoạch nhập hàng khả thi.", "total_purchase_cost": 8338000, "expected_fill_rate": 0.988},
+      "procurement_rows": [{"ingredient_id": "ingredient-banana", "ingredient_name": "Chuối", "supplier_id": "supplier-demo", "supplier_name": "Nhà cung cấp minh họa", "quantity": 30, "unit": "kg", "pack_count": 6, "pack_size": 5, "order_date": "2026-08-20", "arrival_date": "2026-08-21", "purchase_cost": 1200000, "reason_codes": []}],
+      "ingredient_demand": [{"ingredient_id": "ingredient-banana", "ingredient_name": "Chuối", "unit": "kg", "target_date": "2026-08-21", "p25": 3.4, "p50": 4.1, "p75": 4.9, "contributions": []}, {"ingredient_id": "ingredient-banana", "ingredient_name": "Chuối", "unit": "kg", "target_date": "2026-08-22", "p25": 3.3, "p50": 4.0, "p75": 4.8, "contributions": []}, {"ingredient_id": "ingredient-banana", "ingredient_name": "Chuối", "unit": "kg", "target_date": "2026-08-23", "p25": 4.0, "p50": 4.8, "p75": 5.7, "contributions": []}, {"ingredient_id": "ingredient-banana", "ingredient_name": "Chuối", "unit": "kg", "target_date": "2026-08-24", "p25": 3.5, "p50": 4.2, "p75": 4.9, "contributions": []}, {"ingredient_id": "ingredient-banana", "ingredient_name": "Chuối", "unit": "kg", "target_date": "2026-08-25", "p25": 3.4, "p50": 4.0, "p75": 4.7, "contributions": []}, {"ingredient_id": "ingredient-banana", "ingredient_name": "Chuối", "unit": "kg", "target_date": "2026-08-26", "p25": 3.1, "p50": 3.4, "p75": 4.3, "contributions": []}, {"ingredient_id": "ingredient-banana", "ingredient_name": "Chuối", "unit": "kg", "target_date": "2026-08-27", "p25": 3.5, "p50": 4.45, "p75": 4.8, "contributions": []}],
+      "ingredient_demand_summary": [{"ingredient_id": "ingredient-banana", "ingredient_name": "Chuối", "unit": "kg", "period_start": "2026-08-21", "period_end": "2026-08-27", "p25_total": 24.2, "p50_total": 28.95, "p75_total": 34.1, "daily_p50_min": 3.4, "daily_p50_max": 4.8, "peak_date": "2026-08-23", "peak_p50": 4.8, "aggregation_method": "sum_daily_quantiles"}],
+      "risk": {"stockout_probability": null, "expected_fill_rate": 0.988, "shortage_quantity": null, "waste_quantity": null},
+      "critic": {"hard_violations": [], "warnings": []},
+      "risk_details": [],
+      "strategy_comparison": null,
+      "evidence": [],
+      "data_availability": {},
+      "assistant_summary": null,
+      "generated_at": "2026-08-20T10:00:00Z"
+    },
+    "hypothetical": {
+      "decision_run_id": "decision-demo-001",
+      "store_id": "store-demo",
+      "status": "completed",
+      "forecast": {"forecast_run_id": "forecast-demo-2026-08-20", "model_version": "demo-model", "horizon_days": 7, "cutoff_date": "2026-08-20"},
+      "recommendation": {"available": true, "strategy": "protected", "summary": "Kế hoạch giả định khả thi.", "total_purchase_cost": 9538000, "expected_fill_rate": 0.97},
+      "procurement_rows": [{"ingredient_id": "ingredient-banana", "ingredient_name": "Chuối", "supplier_id": "supplier-demo", "supplier_name": "Nhà cung cấp minh họa", "quantity": 35, "unit": "kg", "pack_count": 7, "pack_size": 5, "order_date": "2026-08-20", "arrival_date": "2026-08-21", "purchase_cost": 1400000, "reason_codes": []}],
+      "ingredient_demand": [{"ingredient_id": "ingredient-banana", "ingredient_name": "Chuối", "unit": "kg", "target_date": "2026-08-21", "p25": 3.74, "p50": 4.51, "p75": 5.39, "contributions": []}, {"ingredient_id": "ingredient-banana", "ingredient_name": "Chuối", "unit": "kg", "target_date": "2026-08-22", "p25": 3.63, "p50": 4.4, "p75": 5.28, "contributions": []}, {"ingredient_id": "ingredient-banana", "ingredient_name": "Chuối", "unit": "kg", "target_date": "2026-08-23", "p25": 4.4, "p50": 5.28, "p75": 6.27, "contributions": []}, {"ingredient_id": "ingredient-banana", "ingredient_name": "Chuối", "unit": "kg", "target_date": "2026-08-24", "p25": 3.85, "p50": 4.62, "p75": 5.39, "contributions": []}, {"ingredient_id": "ingredient-banana", "ingredient_name": "Chuối", "unit": "kg", "target_date": "2026-08-25", "p25": 3.74, "p50": 4.4, "p75": 5.17, "contributions": []}, {"ingredient_id": "ingredient-banana", "ingredient_name": "Chuối", "unit": "kg", "target_date": "2026-08-26", "p25": 3.41, "p50": 3.74, "p75": 4.73, "contributions": []}, {"ingredient_id": "ingredient-banana", "ingredient_name": "Chuối", "unit": "kg", "target_date": "2026-08-27", "p25": 3.85, "p50": 4.895, "p75": 5.28, "contributions": []}],
+      "ingredient_demand_summary": [{"ingredient_id": "ingredient-banana", "ingredient_name": "Chuối", "unit": "kg", "period_start": "2026-08-21", "period_end": "2026-08-27", "p25_total": 26.62, "p50_total": 31.845, "p75_total": 37.51, "daily_p50_min": 3.74, "daily_p50_max": 5.28, "peak_date": "2026-08-23", "peak_p50": 5.28, "aggregation_method": "sum_daily_quantiles"}],
+      "risk": {"stockout_probability": null, "expected_fill_rate": 0.97, "shortage_quantity": null, "waste_quantity": null},
+      "critic": {"hard_violations": [], "warnings": []},
+      "risk_details": [],
+      "strategy_comparison": null,
+      "evidence": [],
+      "data_availability": {},
+      "assistant_summary": null,
+      "generated_at": "2026-08-20T10:00:01Z"
+    },
+    "mutations": {"demand_multiplier": 1.1, "supplier_delay_days": null, "budget_limit": null, "strategy": null},
+    "mutation_facts": {"demand_multiplier": 1.1, "demand_change_ratio": 0.1, "demand_change_percent": 10, "demand_change_percentage_points": 10, "supplier_delay_days": 0, "budget_limit": null, "strategy_override": null},
+    "comparison": {
+      "recommendation_changed": true,
+      "baseline_strategy": "protected",
+      "hypothetical_strategy": "protected",
+      "purchase_cost_delta": 1200000,
+      "expected_fill_rate_delta": -0.018,
+      "stockout_probability_delta": null,
+      "shortage_quantity_delta": null,
+      "waste_quantity_delta": null,
+      "expected_fill_rate_percentage_point_delta": -1.8,
+      "baseline_recommendation_available": true,
+      "hypothetical_recommendation_available": true,
+      "feasibility_changed": false,
+      "strategy_change": {"changed": false, "baseline_strategy": "protected", "hypothetical_strategy": "protected", "forced_by_request": false},
+      "order_changes": [{"ingredient_id": "ingredient-banana", "baseline_quantity": 30, "hypothetical_quantity": 35, "quantity_delta": 5, "baseline_supplier_id": "supplier-demo", "hypothetical_supplier_id": "supplier-demo", "baseline_arrival_date": "2026-08-21", "hypothetical_arrival_date": "2026-08-21", "ingredient_name": "Chuối", "unit": "kg", "change_type": "increased"}],
+      "warnings_added": [],
+      "warnings_removed": [],
+      "hard_violations_added": [],
+      "hard_violations_removed": [],
+      "new_issues": [],
+      "resolved_issues": [],
+      "new_risks": [],
+      "resolved_risks": []
+    },
+    "grounded_explanation": {
+      "source": "deterministic_fallback",
+      "language": "vi",
+      "detail_level": "simple",
+      "summary": "Trong kịch bản nhu cầu tăng 10%, chi phí mua dự kiến tăng 1.200.000 đồng.",
+      "why_this_plan": ["Lượng Chuối cần mua tăng thêm 5 kg."],
+      "main_risks": [],
+      "tradeoffs": [],
+      "important_assumptions": ["Đây là kết quả của kịch bản giả định."],
+      "decision_run_id": "decision-demo-001",
+      "answer": "Trong kịch bản nhu cầu tăng 10%, chi phí mua dự kiến tăng 1.200.000 đồng và mức đáp ứng giảm 1,8 điểm phần trăm.",
+      "intent": "WHAT_IF",
+      "entities": {"ingredient_ids": ["ingredient-banana"], "supplier_ids": []},
+      "claims": [],
+      "citations": [],
+      "grounded": true,
+      "provider": "deterministic_fallback",
+      "authority": "HYPOTHETICAL",
+      "raw_response": null
+    },
+    "generated_at": "2026-08-20T10:00:02Z"
+  }
+}

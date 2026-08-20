@@ -80,6 +80,10 @@ def test_core_decision_package_is_persisted_and_reloaded(client):
     assert what_if.json()["hypothetical"]["ingredient_demand"][0]["target_date"] == package["ingredient_demand"][0]["target_date"]
     assert what_if.json()["comparison"]["stockout_probability_delta"] is None
     assert what_if.json()["mutations"] == {"demand_multiplier": 1.3, "supplier_delay_days": 1, "budget_limit": 10000000, "strategy": "protected"}
+    assert what_if.json()["mutation_facts"]["demand_change_percent"] == 30.0
+    assert what_if.json()["mutation_facts"]["demand_change_percentage_points"] == 30.0
+    assert what_if.json()["comparison"]["new_issues"] == what_if.json()["comparison"]["new_risks"]
+    assert what_if.json()["grounded_explanation"]["authority"] == "HYPOTHETICAL"
     with sf() as s:
         assert json.loads(s.get(DecisionRunModel, package["decision_run_id"]).package_json) == package
         assert before_counts == {

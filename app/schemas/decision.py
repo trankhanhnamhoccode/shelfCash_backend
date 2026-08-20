@@ -23,6 +23,8 @@ class ExplanationRequest(_Strict):
     language: Literal["vi", "en"] = "vi"
     detail_level: Literal["simple", "manager", "technical"] = "simple"
     question: str | None = Field(default=None, max_length=2000)
+    # Optional so existing question-only explanation requests remain valid.
+    ingredient_id: str | None = Field(default=None, min_length=1, max_length=255)
 
 
 class WhatIfRequest(_Strict):

@@ -19,6 +19,22 @@ dependencies = [
 test = ["pytest", "pytest-asyncio"]
 kaggle = ["transformers>=4.51.0", "accelerate", "bitsandbytes", "sentencepiece"]
 
+[tool.setuptools.packages.find]
+where = ["."]
+include = [
+  "app*",
+  "shelfcash_core*",
+  "shelfcash_forecast*",
+]
+exclude = [
+  "tests*",
+  "alembic*",
+  "dataset*",
+  "runtime*",
+  "debug_inputs*",
+  "node_modules*",
+]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"

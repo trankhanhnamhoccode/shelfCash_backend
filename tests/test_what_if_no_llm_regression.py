@@ -2,8 +2,8 @@ import ast
 from pathlib import Path
 
 
-def test_what_if_execution_has_no_openrouter_or_llm_generation_call():
-    """What-if is deliberately deterministic; keep Qwen out of this authority path."""
+def test_what_if_computation_remains_deterministic_before_optional_narration():
+    """M1-M5 recomputation stays local; narration receives only completed facts."""
     path = Path(__file__).parents[1] / "app" / "services" / "decision_planning_service.py"
     source = path.read_text(encoding="utf-8")
     module = ast.parse(source)
@@ -14,4 +14,6 @@ def test_what_if_execution_has_no_openrouter_or_llm_generation_call():
     assert "generate_json" not in method_source
     assert "OpenRouter" not in method_source
     assert "DecisionNarrativeProvider" not in method_source
-    assert "ShelfCashDecisionIntelligenceAdapter().explain" in method_source
+    assert "adapter.optimize" in method_source
+    assert "build_what_if_facts" in method_source
+    assert "WhatIfNarrativeProvider" in method_source

@@ -37,6 +37,14 @@ class Settings(BaseSettings):
     openrouter_narrative_structured_output: bool = True
     openrouter_narrative_strict_schema: bool = True
     openrouter_narrative_require_parameters: bool = True
+    openrouter_summary_model: str = "qwen/qwen3.5-9b"
+    openrouter_summary_timeout_seconds: float = 60
+    openrouter_summary_max_tokens: int = 600
+    openrouter_summary_temperature: float = 0.0
+    openrouter_summary_reasoning_enabled: bool = False
+    openrouter_summary_structured_output: bool = True
+    openrouter_summary_strict_schema: bool = True
+    openrouter_summary_require_parameters: bool = True
     # Retained for callers/configuration that used the old setting. Narrative
     # requests now use OPENROUTER_NARRATIVE_MAX_TOKENS.
     decision_narrative_max_new_tokens: int = 800

@@ -12,7 +12,10 @@ from pydantic import ValidationError as PydanticValidationError
 from app.core.exceptions import LLMProviderError, LLMUnavailableError
 from app.core.logging_context import get_request_id
 from app.core.rule_mapper import finalize_mapping
-from app.decision_intelligence.contracts import DecisionNarrativeLLMResponse
+from app.decision_intelligence.contracts import (
+    DecisionNarrativeLLMResponse,
+    DecisionOverallSummaryLLMResponse,
+)
 from app.llm.base import LLMProvider
 from app.llm.tasks import LLMFailureStage, LLMTask, OpenRouterTaskProfile
 from app.schemas.llm import MappingSuggestion
@@ -60,16 +63,20 @@ class OpenRouterLLMGateway(LLMProvider):
         }
 
     def task_profile(self, task: LLMTask) -> OpenRouterTaskProfile:
-        if task not in (LLMTask.EXCEL_MAPPING, LLMTask.DECISION_NARRATIVE):
+        if task not in (LLMTask.EXCEL_MAPPING, LLMTask.DECISION_NARRATIVE, LLMTask.PLAN_SUMMARY):
             raise ValueError(f"Unsupported LLM task: {task}")
-        prefix = "openrouter_mapping" if task is LLMTask.EXCEL_MAPPING else "openrouter_narrative"
+        prefix = {
+            LLMTask.EXCEL_MAPPING: "openrouter_mapping",
+            LLMTask.DECISION_NARRATIVE: "openrouter_narrative",
+            LLMTask.PLAN_SUMMARY: "openrouter_summary",
+        }[task]
         # Task models own routing.  Do not let a legacy OPENROUTER_MODEL value
         # silently switch either current production task to another model.
         configured_model = getattr(self.settings, f"{prefix}_model", None) or "qwen/qwen3.5-9b"
         return OpenRouterTaskProfile(
             model=configured_model,
             temperature=float(getattr(self.settings, f"{prefix}_temperature", 0.0)),
-            max_tokens=int(getattr(self.settings, f"{prefix}_max_tokens", 1200 if task is LLMTask.EXCEL_MAPPING else 800)),
+            max_tokens=int(getattr(self.settings, f"{prefix}_max_tokens", 1200 if task is LLMTask.EXCEL_MAPPING else 600 if task is LLMTask.PLAN_SUMMARY else 800)),
             timeout_seconds=float(getattr(self.settings, f"{prefix}_timeout_seconds", 60)),
             reasoning_enabled=bool(getattr(self.settings, f"{prefix}_reasoning_enabled", False)),
             structured_output=bool(getattr(self.settings, f"{prefix}_structured_output", True)),
@@ -83,6 +90,8 @@ class OpenRouterLLMGateway(LLMProvider):
             return MappingSuggestion.model_json_schema()
         if task is LLMTask.DECISION_NARRATIVE:
             return DecisionNarrativeLLMResponse.model_json_schema()
+        if task is LLMTask.PLAN_SUMMARY:
+            return DecisionOverallSummaryLLMResponse.model_json_schema()
         raise ValueError(f"Unsupported LLM task: {task}")
 
     @staticmethod

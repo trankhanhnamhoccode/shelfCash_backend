@@ -13,8 +13,12 @@ from shelfcash_forecast.decision_intelligence.contracts import DecisionGraph
 from shelfcash_forecast.decision_intelligence.retrieval import StructuredLocalRetriever, build_retrieval_context
 
 from app.core.logging_context import get_request_id
-from app.decision_intelligence.adapter import ShelfCashDecisionIntelligenceAdapter
+from app.decision_intelligence.adapter import (
+    ShelfCashDecisionIntelligenceAdapter,
+    ingredient_scoped_semantic_facts,
+)
 from app.decision_intelligence.contracts import Citation, DecisionBriefFacts, DecisionExplanationResponse, DecisionNarrativeLLMResponse, ExplanationClaim
+from app.decision_intelligence.semantic_evidence import DecisionSemanticEvidenceBuilder, SemanticFact
 from app.llm.tasks import LLMFailureStage, LLMTask
 
 logger = logging.getLogger("shelfcash.decision_narrative")
@@ -176,42 +180,124 @@ def _date(value: object) -> str:
     return value.isoformat() if hasattr(value, "isoformat") else str(value)
 
 
-def aggregate_evidence(brief: DecisionBriefFacts, retrieved_items) -> list[dict[str, Any]]:
-    """Perform all daily-demand arithmetic deterministically before Qwen sees it."""
-    selected_ids = {item.evidence_id for item in retrieved_items}
-    selected_ingredients = {item.entities.get("ingredient_id") for item in retrieved_items if item.entities.get("ingredient_id")}
+def aggregate_evidence(
+    brief: DecisionBriefFacts,
+    retrieved_items,
+    semantic_facts: list[SemanticFact] | None = None,
+    *,
+    include_daily: bool = True,
+) -> list[dict[str, Any]]:
+    """Adapt canonical deterministic facts to the established Qwen evidence format.
+
+    Horizon arithmetic lives exclusively in ``DecisionSemanticEvidenceBuilder``.
+    Legacy package reason codes are intentionally not promoted to trusted causal
+    evidence here.
+    """
+    facts = semantic_facts or DecisionSemanticEvidenceBuilder().build(brief)
+    selected_ingredients = {
+        item.entities.get("ingredient_id")
+        for item in retrieved_items
+        if item.entities.get("ingredient_id")
+    }
     records: list[dict[str, Any]] = []
     for item in retrieved_items:
         if item.evidence_type == "first_stage_order":
-            records.append({"evidence_id": item.evidence_id, "type": "PROCUREMENT_QUANTITY", "ingredient_id": item.entities.get("ingredient_id"), "supplier_id": item.entities.get("supplier_id"), "value": item.payload.get("quantity"), "unit": item.payload.get("unit"), "purchase_cost": item.payload.get("purchase_cost")})
+            records.append({
+                "evidence_id": item.evidence_id,
+                "type": "PROCUREMENT_QUANTITY",
+                "ingredient_id": item.entities.get("ingredient_id"),
+                "supplier_id": item.entities.get("supplier_id"),
+                "value": item.payload.get("quantity"),
+                "unit": item.payload.get("unit"),
+                "purchase_cost": item.payload.get("purchase_cost"),
+                "evidence_ids": [item.evidence_id],
+            })
 
-    grouped: dict[str, list] = defaultdict(list)
-    for demand in brief.ingredient_demand:
-        if not selected_ingredients or demand.ingredient_id in selected_ingredients:
-            grouped[demand.ingredient_id].append(demand)
-    for ingredient_id, rows in grouped.items():
-        ordered = sorted(rows, key=lambda row: _date(row.target_date))
-        unit = ordered[0].unit
-        daily = [
-            {"target_date": _date(row.target_date), "p25": row.p25, "p50": row.p50, "p75": row.p75}
-            for row in ordered
-        ]
-        peak = max(ordered, key=lambda row: (row.p50 if row.p50 is not None else float("-inf"), _date(row.target_date)))
-        matching = [item for item in retrieved_items if item.evidence_type == "ingredient_demand" and item.entities.get("ingredient_id") == ingredient_id]
-        ids = [item.evidence_id for item in matching]
-        if not ids:
-            continue
-        record = {"evidence_id": "aggregate:" + ":".join(ids), "type": "DEMAND_HORIZON_SUMMARY", "ingredient_id": ingredient_id, "ingredient_name": ordered[0].ingredient_name, "unit": unit, "period_start": _date(ordered[0].target_date), "period_end": _date(ordered[-1].target_date), "p25_total": sum(row.p25 or 0 for row in ordered), "p50_total": sum(row.p50 or 0 for row in ordered), "p75_total": sum(row.p75 or 0 for row in ordered), "daily_p50_min": min(row.p50 for row in ordered if row.p50 is not None), "daily_p50_max": max(row.p50 for row in ordered if row.p50 is not None), "peak_date": _date(peak.target_date), "peak_p50": peak.p50, "evidence_ids": ids}
-        records.append(record)
-        # Keep daily facts available for date-specific retrieval; never aggregate them away.
-        records.extend({"evidence_id": item.evidence_id, "type": "DEMAND_DAILY", "ingredient_id": ingredient_id, "ingredient_name": ordered[0].ingredient_name, "target_date": item.payload["target_date"], "p25": item.payload.get("p25"), "p50": item.payload.get("p50"), "p75": item.payload.get("p75"), "unit": item.payload.get("unit")} for item in matching)
+    semantic_items = {
+        str(item.payload.get("semantic_fact_id")): item
+        for item in retrieved_items
+        if item.evidence_type.startswith("semantic_") and item.payload.get("semantic_fact_id")
+    }
+    daily_by_ingredient: dict[str, list] = defaultdict(list)
+    order_by_ingredient: dict[str, list] = defaultdict(list)
     for item in retrieved_items:
-        if item.evidence_type == "first_stage_order":
-            for code in item.payload.get("reason_codes", []):
-                if code in REASON_TEXT:
-                    records.append({"evidence_id": item.evidence_id, "type": "PROCUREMENT_REASON", "ingredient_id": item.entities.get("ingredient_id"), "code": code, "meaning": REASON_TEXT[code]})
-        elif item.evidence_type == "inventory_risk":
-            records.append({"evidence_id": item.evidence_id, "type": "RISK", **item.payload})
+        ingredient_id = item.entities.get("ingredient_id")
+        if not ingredient_id:
+            continue
+        if item.evidence_type == "ingredient_demand":
+            daily_by_ingredient[ingredient_id].append(item)
+        elif item.evidence_type == "first_stage_order":
+            order_by_ingredient[ingredient_id].append(item)
+
+    for fact in facts:
+        ingredient_id = fact.entities.get("ingredient_id")
+        if selected_ingredients and ingredient_id and ingredient_id not in selected_ingredients:
+            continue
+        if fact.fact_type == "DEMAND_HORIZON_SUMMARY":
+            matching = daily_by_ingredient.get(ingredient_id or "", [])
+            source_ids = [item.evidence_id for item in matching]
+            semantic_item = semantic_items.get(fact.fact_id)
+            if not source_ids and semantic_item is not None:
+                source_ids = [semantic_item.evidence_id]
+            if not source_ids:
+                continue
+            records.append({
+                "evidence_id": semantic_item.evidence_id if semantic_item else "aggregate:" + ":".join(source_ids),
+                "type": fact.fact_type,
+                "ingredient_id": ingredient_id,
+                "classification": fact.classification.value,
+                **fact.values,
+                "evidence_ids": source_ids,
+            })
+            if include_daily:
+                for item in matching:
+                    records.append({
+                        "evidence_id": item.evidence_id,
+                        "type": "DEMAND_DAILY",
+                        "ingredient_id": ingredient_id,
+                        "ingredient_name": fact.values.get("ingredient_name"),
+                        "target_date": item.payload["target_date"],
+                        "p25": item.payload.get("p25"),
+                        "p50": item.payload.get("p50"),
+                        "p75": item.payload.get("p75"),
+                        "unit": item.payload.get("unit"),
+                        "evidence_ids": [item.evidence_id],
+                    })
+        elif fact.fact_type == "DEMAND_ORDER_ALIGNMENT":
+            source_ids = [
+                item.evidence_id
+                for item in daily_by_ingredient.get(ingredient_id or "", [])
+                + order_by_ingredient.get(ingredient_id or "", [])
+            ]
+            semantic_item = semantic_items.get(fact.fact_id)
+            if semantic_item is not None:
+                source_ids = [semantic_item.evidence_id]
+            if not source_ids:
+                continue
+            records.append({
+                "evidence_id": semantic_item.evidence_id if semantic_item else "aggregate:" + ":".join(source_ids),
+                "type": fact.fact_type,
+                "ingredient_id": ingredient_id,
+                "classification": fact.classification.value,
+                **fact.values,
+                "evidence_ids": source_ids,
+            })
+        elif fact.fact_type not in {"PROCUREMENT_QUANTITY", "SELECTED_PLAN_RISK_METRICS"}:
+            semantic_item = semantic_items.get(fact.fact_id)
+            if semantic_item is None:
+                continue
+            records.append({
+                "evidence_id": semantic_item.evidence_id,
+                "type": fact.fact_type,
+                "classification": fact.classification.value,
+                **fact.entities,
+                **fact.values,
+                "evidence_ids": [semantic_item.evidence_id],
+            })
+
+    for item in retrieved_items:
+        if item.evidence_type == "inventory_risk":
+            records.append({"evidence_id": item.evidence_id, "type": "RISK", **item.payload, "evidence_ids": [item.evidence_id]})
     return records
 
 
@@ -221,13 +307,38 @@ class DecisionNarrativeProvider:
         self.settings = settings
         self.deterministic = ShelfCashDecisionIntelligenceAdapter()
 
-    def explain(self, brief: DecisionBriefFacts, *, question: str | None, language: str, detail_level: str) -> DecisionExplanationResponse:
-        fallback = self.deterministic.explain(brief, question=question, language=language, detail_level=detail_level)
+    def explain(
+        self,
+        brief: DecisionBriefFacts,
+        *,
+        question: str | None,
+        language: str,
+        detail_level: str,
+        semantic_facts: list[SemanticFact] | None = None,
+        ingredient_id: str | None = None,
+    ) -> DecisionExplanationResponse:
+        # Preserve the existing human-readable deterministic fallback. Semantic
+        # facts are machine evidence for retrieval/Qwen/grounding, not fallback prose.
+        if ingredient_id:
+            fallback = self.deterministic.explain_ingredient(
+                brief, ingredient_id=ingredient_id, language=language,
+                detail_level=detail_level, semantic_facts=semantic_facts or [],
+            )
+        else:
+            fallback = self.deterministic.explain(
+                brief, question=question, language=language, detail_level=detail_level,
+            )
         if not self.llm_provider or not self.llm_provider.available:
             return fallback
-        return self._qwen_or_fallback(brief, question, language, detail_level, fallback)
+        return self._qwen_or_fallback(
+            brief, question, language, detail_level, fallback, semantic_facts,
+            ingredient_id=ingredient_id,
+        )
 
-    def _qwen_or_fallback(self, brief, question, language, detail_level, fallback):
+    def _qwen_or_fallback(
+        self, brief, question, language, detail_level, fallback, semantic_facts,
+        *, ingredient_id: str | None = None,
+    ):
         started = time.monotonic()
         request_id = get_request_id()
         raw = None
@@ -235,14 +346,52 @@ class DecisionNarrativeProvider:
         request_context: dict[str, Any] = {"decision_run_id": brief.decision_run_id}
         try:
             logger.info("decision_narrative_started request_id=%s decision_run_id=%s task=%s", request_id, brief.decision_run_id, LLMTask.DECISION_NARRATIVE.value)
-            evidence = self.deterministic._evidence(brief)
+            scoped_facts = (
+                ingredient_scoped_semantic_facts(semantic_facts or [], ingredient_id)
+                if ingredient_id else semantic_facts
+            )
+            evidence = (
+                self.deterministic.ingredient_evidence(
+                    brief, ingredient_id=ingredient_id, semantic_facts=scoped_facts or [],
+                )
+                if ingredient_id
+                else self.deterministic._evidence(brief, semantic_facts=semantic_facts)
+            )
             resolved_question = question or ("Why is this plan recommended?" if language == "en" else "Tại sao kế hoạch này được đề xuất?")
-            retrieved = StructuredLocalRetriever().retrieve(resolved_question, evidence, DecisionGraph(request_id=brief.decision_run_id, nodes=[], edges=[]), context=build_retrieval_context(resolved_question, evidence, recommended_strategy=(brief.recommendation.strategy or "").upper() or None))
-            structured = aggregate_evidence(brief, retrieved.items)
+            if ingredient_id:
+                # The API target is authoritative.  Do not let question-token
+                # scoring select a different entity or omit target evidence.
+                retrieved_items = evidence.items
+                intent = _ingredient_intent(resolved_question)
+            elif _requests_strategy_comparison(resolved_question):
+                # Strategy questions need all persisted candidates and their
+                # selected-relative deltas; token ranking must not drop one side.
+                retrieved_items = [
+                    item for item in evidence.items
+                    if item.evidence_type in {
+                        "semantic_strategy_candidate_metrics",
+                        "semantic_strategy_comparison",
+                        "semantic_strategy_selection_proof",
+                    }
+                ]
+                intent = "STRATEGY_COMPARISON"
+            else:
+                retrieved = StructuredLocalRetriever().retrieve(resolved_question, evidence, DecisionGraph(request_id=brief.decision_run_id, nodes=[], edges=[]), context=build_retrieval_context(resolved_question, evidence, recommended_strategy=(brief.recommendation.strategy or "").upper() or None))
+                retrieved_items = retrieved.items
+                intent = retrieved.intent
+            structured = aggregate_evidence(
+                brief, retrieved_items, semantic_facts=scoped_facts,
+                include_daily=not ingredient_id or _requests_daily_detail(resolved_question),
+            )
             if not structured:
                 raise ValueError("no_retrieved_evidence")
-            logger.info("decision_narrative_retrieval_completed decision_run_id=%s evidence_count=%d intent=%s", brief.decision_run_id, len(structured), retrieved.intent)
+            logger.info("decision_narrative_retrieval_completed decision_run_id=%s evidence_count=%d intent=%s target_ingredient_id=%s", brief.decision_run_id, len(structured), intent, ingredient_id)
             payload = {"question": resolved_question, "language": language, "detail_level": detail_level, "evidence": structured}
+            if ingredient_id:
+                payload["target"] = {
+                    "ingredient_name": _ingredient_display_name(brief, ingredient_id),
+                    "scope": "one_ingredient_only",
+                }
             try:
                 loop = asyncio.get_running_loop()
             except RuntimeError:
@@ -268,7 +417,10 @@ class DecisionNarrativeProvider:
                 failure_stage = LLMFailureStage.SCHEMA_VALIDATION.value
                 raise ValueError("narrative_schema_validation_failed") from exc
             try:
-                response = self._guard(typed_raw.model_dump(mode="json"), structured, evidence.items, brief, language, detail_level, retrieved.intent)
+                response = self._guard(
+                    typed_raw.model_dump(mode="json"), structured, evidence.items, brief,
+                    language, detail_level, intent, target_ingredient_id=ingredient_id,
+                )
             except Exception:
                 failure_stage = LLMFailureStage.GROUNDING.value
                 raise
@@ -306,12 +458,20 @@ class DecisionNarrativeProvider:
                 update_dict["raw_response"] = {"failure_stage": failure_stage, "reason": type(exc).__name__}
             return fallback.model_copy(update=update_dict)
 
-    def _guard(self, raw, structured, evidence_items, brief, language, detail_level, intent):
+    def _guard(
+        self, raw, structured, evidence_items, brief, language, detail_level, intent,
+        *, target_ingredient_id: str | None = None,
+    ):
         if not isinstance(raw.get("answer"), str) or not isinstance(raw.get("claims"), list):
             raise ValueError("malformed_qwen_output")
         by_id = {item.evidence_id: item for item in evidence_items}
         structured_by_id = {item["evidence_id"]: item for item in structured}
         allowed_ids = set(structured_by_id)
+        if target_ingredient_id:
+            for item in structured:
+                item_ingredient_id = item.get("ingredient_id")
+                if item_ingredient_id and item_ingredient_id != target_ingredient_id:
+                    raise ValueError("target_evidence_entity_mismatch")
         claims = []
         citation_ids = set()
         used = raw.get("used_evidence_ids")
@@ -330,13 +490,22 @@ class DecisionNarrativeProvider:
                 raise ValueError("unsupported_claim_type")
             self._validate_numbers(claim["text"], [structured_by_id[evidence_id] for evidence_id in ids])
             self._validate_entities(claim["text"], [structured_by_id[evidence_id] for evidence_id in ids], brief)
+            self._validate_target_entity(
+                claim["text"], [structured_by_id[evidence_id] for evidence_id in ids],
+                brief, target_ingredient_id,
+            )
             self._validate_supported_concepts(claim["text"], [structured_by_id[evidence_id] for evidence_id in ids])
+            self._validate_causal_language(claim["text"], [structured_by_id[evidence_id] for evidence_id in ids])
+            self._validate_strategy_selection_language(claim["text"], [structured_by_id[evidence_id] for evidence_id in ids])
+            self._validate_baseline_language(claim["text"], [structured_by_id[evidence_id] for evidence_id in ids])
+            self._validate_public_text(claim["text"])
             claim_source_ids = sorted({source_id for evidence_id in ids for source_id in structured_by_id[evidence_id].get("evidence_ids", [evidence_id])})
             claims.append(ExplanationClaim(type=claim["type"], value=claim["text"], evidence_ids=claim_source_ids))
             for evidence_id in ids:
                 citation_ids.update(structured_by_id[evidence_id].get("evidence_ids", [evidence_id]))
         if set(used) != claimed_evidence_ids:
             raise ValueError("used_evidence_ids_mismatch")
+        self._validate_public_text(raw["answer"])
         citations = [Citation(evidence_id=item.evidence_id, label=item.text, source_type=item.source_object) for item in evidence_items if item.evidence_id in citation_ids]
         entities = {"ingredient_ids": sorted({item.entities["ingredient_id"] for item in evidence_items if item.evidence_id in citation_ids and item.entities.get("ingredient_id")}), "supplier_ids": sorted({item.entities["supplier_id"] for item in evidence_items if item.evidence_id in citation_ids and item.entities.get("supplier_id")})}
         return DecisionExplanationResponse(source="openrouter_qwen", language=language, detail_level=detail_level, summary=raw["answer"], why_this_plan=[raw["answer"]], main_risks=brief.critic.warnings, tradeoffs=[], important_assumptions=["Narrative is grounded only in the persisted decision package."], decision_run_id=brief.decision_run_id, answer=raw["answer"], intent=str(intent).upper(), entities=entities, claims=claims, citations=citations, grounded=True, provider="openrouter_qwen", raw_response=raw)
@@ -359,6 +528,45 @@ class DecisionNarrativeProvider:
                 raise ValueError("entity_mismatch")
 
     @staticmethod
+    def _validate_target_entity(text: str, items: list[dict], brief, target_ingredient_id: str | None):
+        if not target_ingredient_id:
+            return
+        cited_ids = {item.get("ingredient_id") for item in items if item.get("ingredient_id")}
+        known_names = {
+            row.ingredient_name.lower(): row.ingredient_id
+            for row in [*brief.ingredient_demand, *brief.procurement_rows]
+            if row.ingredient_name
+        }
+        lowered = text.lower()
+        if any(name in lowered and ingredient_id != target_ingredient_id for name, ingredient_id in known_names.items()):
+            raise ValueError("target_entity_switched")
+        target_name = next((name for name, value in known_names.items() if value == target_ingredient_id), None)
+        if target_name and target_name in lowered and target_ingredient_id not in cited_ids:
+            raise ValueError("target_claim_requires_target_evidence")
+
+    @staticmethod
+    def _validate_baseline_language(text: str, items: list[dict]):
+        if not any(item.get("type") == "NO_PLANNED_PURCHASE_BASELINE" for item in items):
+            return
+        if not any(item.get("existing_inbound_retained") is True for item in items):
+            return
+        lowered = text.lower()
+        prohibited = (
+            "kh\u00f4ng c\u00f3 b\u1ea5t k\u1ef3 h\u00e0ng nh\u1eadp n\u00e0o",
+            "kh\u00f4ng c\u00f3 h\u00e0ng nh\u1eadp v\u1ec1",
+            "no inbound",
+            "no incoming stock",
+        )
+        if any(phrase in lowered for phrase in prohibited):
+            raise ValueError("baseline_inbound_semantics_contradicted")
+
+    @staticmethod
+    def _validate_public_text(text: str):
+        """Machine codes are evidence identifiers, never manager-facing prose."""
+        if re.search(r"\b[A-Z][A-Z0-9]+(?:_[A-Z0-9]+)+\b", text):
+            raise ValueError("raw_machine_code_in_narrative")
+
+    @staticmethod
     def _validate_supported_concepts(text: str, items: list[dict]):
         lowered = text.lower()
         required = {
@@ -367,8 +575,84 @@ class DecisionNarrativeProvider:
             ("hạn dùng", "hết hạn"): lambda: any(item["type"] == "EXPIRY" or item.get("code") == "EXPIRING_INVENTORY" for item in items),
             ("lead time", "thời gian giao"): lambda: any(item["type"] == "LEAD_TIME" or item.get("code") == "LEAD_TIME_PRESSURE" for item in items),
             ("ngân sách", "budget"): lambda: any(item["type"] == "BUDGET" or item.get("code") == "BUDGET_CONSTRAINT" for item in items),
-            ("rủi ro", "xác suất thiếu"): lambda: any(item["type"] == "RISK" or item.get("code") == "STOCKOUT_RISK" for item in items),
+            ("rủi ro", "xác suất thiếu"): lambda: any(
+                item["type"] == "RISK"
+                or item.get("code") == "STOCKOUT_RISK"
+                or (
+                    item["type"] in {"STRATEGY_CANDIDATE_METRICS", "STRATEGY_COMPARISON"}
+                    and (item.get("stockout_probability") is not None or item.get("stockout_probability_delta") is not None)
+                )
+                for item in items
+            ),
         }
         for phrases, is_supported in required.items():
             if any(phrase in lowered for phrase in phrases) and not is_supported():
                 raise ValueError("unsupported_causal_concept")
+
+    @staticmethod
+    def _validate_causal_language(text: str, items: list[dict]):
+        lowered = f" {text.lower()} "
+        causal_markers = (
+            " vÃ¬ ", " do ", " nÃªn ", " dáº«n Ä‘áº¿n ", " Ä‘á»ƒ trÃ¡nh ",
+            " because ", " due to ", " therefore ", " caused by ",
+        )
+        # Keep the Vietnamese markers ASCII-escaped: this file contains
+        # historical mojibake literals, while model output is UTF-8 text.
+        causal_markers = (
+            " v\u00ec ", " do ", " n\u00ean ", " d\u1eabn \u0111\u1ebfn ",
+            " \u0111\u1ec3 tr\u00e1nh ", " because ", " due to ", " therefore ", " caused by ",
+        )
+        if not any(marker in lowered for marker in causal_markers):
+            return
+        if any(item.get("classification") == "CAUSAL" or item.get("type") == "PROCUREMENT_REASON" for item in items):
+            return
+        raise ValueError("unsupported_causal_claim")
+
+    @staticmethod
+    def _validate_strategy_selection_language(text: str, items: list[dict]):
+        """Selection claims may use only the persisted cost-based proof."""
+        if not any(item.get("type") == "STRATEGY_SELECTION_PROOF" for item in items):
+            return
+        lowered = text.lower()
+        forbidden = (
+            "fill rate cao nhất", "mức đáp ứng cao nhất", "rủi ro thấp nhất",
+            "an toàn nhất", "tốt nhất", "optimal", "safest", "highest fill",
+        )
+        if any(phrase in lowered for phrase in forbidden):
+            raise ValueError("unsupported_strategy_selection_reason")
+        if any(marker in f" {lowered} " for marker in (" vì ", " do ", " because ", " due to ")):
+            if not any(marker in lowered for marker in ("chi phí", "purchase cost", "cost")):
+                raise ValueError("selection_reason_missing_persisted_metric")
+
+
+def _ingredient_display_name(brief: DecisionBriefFacts, ingredient_id: str) -> str:
+    for row in [*brief.ingredient_demand, *brief.procurement_rows]:
+        if row.ingredient_id == ingredient_id and row.ingredient_name:
+            return row.ingredient_name
+    return ingredient_id
+
+
+def _ingredient_intent(question: str) -> str:
+    lowered = question.lower()
+    if any(token in lowered for token in ("n\u1ebfu kh\u00f4ng", "kh\u00f4ng nh\u1eadp", "without purchase", "without ordering")):
+        return "INGREDIENT_BASELINE"
+    if any(token in lowered for token in ("bao nhi\u00eau", "l\u01b0\u1ee3ng", "quantity", "30 kg")):
+        return "INGREDIENT_QUANTITY"
+    if any(token in lowered for token in ("nhu c\u1ea7u", "peak", "demand")):
+        return "INGREDIENT_DEMAND"
+    if any(token in lowered for token in ("v\u00ec sao", "t\u1ea1i sao", "why", "c\u1ea7n nh\u1eadp")):
+        return "INGREDIENT_NEED"
+    return "EXPLAIN_INGREDIENT_PROCUREMENT"
+
+
+def _requests_daily_detail(question: str) -> bool:
+    lowered = question.lower()
+    return any(token in lowered for token in ("t\u1eebng ng\u00e0y", "ng\u00e0y n\u00e0o", "daily", "peak"))
+
+
+def _requests_strategy_comparison(question: str) -> bool:
+    lowered = question.lower()
+    return any(token in lowered for token in (
+        "chi\u1ebfn l\u01b0\u1ee3c", "strategy", "protected", "balanced", "lean",
+        "an to\u00e0n", "c\u00e2n b\u1eb1ng", "ti\u1ebft ki\u1ec7m",
+    ))

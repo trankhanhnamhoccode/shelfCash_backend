@@ -1,4 +1,5 @@
 import json
+import logging
 import pytest
 from datetime import date, datetime, timezone
 import httpx
@@ -57,17 +58,23 @@ def test_gateway_exposes_independent_task_profiles():
         openrouter_narrative_model="qwen/qwen3.5-9b",
         openrouter_narrative_max_tokens=800,
         openrouter_narrative_timeout_seconds=60,
+        openrouter_summary_model="qwen/qwen3.5-9b",
+        openrouter_summary_max_tokens=600,
+        openrouter_summary_timeout_seconds=60,
     )
     provider = OpenRouterLLMGateway(settings)
     mapping = provider.task_profile(LLMTask.EXCEL_MAPPING)
     narrative = provider.task_profile(LLMTask.DECISION_NARRATIVE)
+    summary = provider.task_profile(LLMTask.PLAN_SUMMARY)
 
-    assert mapping.model == narrative.model == "qwen/qwen3.5-9b"
+    assert mapping.model == narrative.model == summary.model == "qwen/qwen3.5-9b"
     assert (mapping.max_tokens, mapping.timeout_seconds) == (1200, 60)
     assert (narrative.max_tokens, narrative.timeout_seconds) == (800, 60)
-    assert not mapping.reasoning_enabled and not narrative.reasoning_enabled
+    assert (summary.max_tokens, summary.timeout_seconds) == (600, 60)
+    assert not mapping.reasoning_enabled and not narrative.reasoning_enabled and not summary.reasoning_enabled
     assert mapping.structured_output and mapping.strict_schema and mapping.require_parameters
     assert narrative.structured_output and narrative.strict_schema and narrative.require_parameters
+    assert summary.structured_output and summary.strict_schema and summary.require_parameters
 
 
 @pytest.mark.asyncio
@@ -88,9 +95,10 @@ async def test_task_requests_use_strict_schema_reasoning_off_and_required_parame
     monkeypatch.setattr(client, "post", mock_post)
     await provider.generate_json("mapping", {}, task=LLMTask.EXCEL_MAPPING)
     await provider.generate_json("narrative", {}, task=LLMTask.DECISION_NARRATIVE)
+    await provider.generate_json("summary", {}, task=LLMTask.PLAN_SUMMARY)
 
-    mapping, narrative = sent
-    for body, task in ((mapping, LLMTask.EXCEL_MAPPING), (narrative, LLMTask.DECISION_NARRATIVE)):
+    mapping, narrative, summary = sent
+    for body, task in ((mapping, LLMTask.EXCEL_MAPPING), (narrative, LLMTask.DECISION_NARRATIVE), (summary, LLMTask.PLAN_SUMMARY)):
         assert body["reasoning"] == {"effort": "none"}
         assert body["provider"] == {"require_parameters": True}
         assert body["response_format"]["type"] == "json_schema"
@@ -98,6 +106,7 @@ async def test_task_requests_use_strict_schema_reasoning_off_and_required_parame
         assert body["response_format"]["json_schema"]["name"] == task.value
     assert "column_mapping" in mapping["response_format"]["json_schema"]["schema"]["properties"]
     assert "used_evidence_ids" in narrative["response_format"]["json_schema"]["schema"]["properties"]
+    assert "headline" in summary["response_format"]["json_schema"]["schema"]["properties"]
     await provider.close()
 
 
@@ -174,6 +183,13 @@ async def test_transient_5xx_retries_once_and_logs_response_metadata(monkeypatch
     assert "routing_strategy=auto" in caplog.text
     assert "prompt_tokens=11" in caplog.text
     await provider.close()
+
+
+def test_llm_logger_remains_capturable_after_decision_api_client(client, caplog):
+    """Regression for logger state leaking from representative API tests."""
+    caplog.set_level("INFO", logger="shelfcash.llm")
+    logging.getLogger("shelfcash.llm").info("provider_logger_after_decision_api")
+    assert "provider_logger_after_decision_api" in caplog.text
 
 
 @pytest.mark.asyncio

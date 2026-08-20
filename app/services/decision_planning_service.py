@@ -239,7 +239,13 @@ class DecisionPlanningService:
     rec=IdempotencyRepository(s).get(store_id=store,endpoint=endpoint,http_method="POST",idempotency_key=key);rec.resource_type="decision_run";rec.resource_id=rid;rec.response_status=200
    s.commit()
    logger.info("decision_stage_completed decision_run_id=%s store_id=%s stage=core_runner duration_ms=%d scenario_count=%s optimizer_type=%s warning_count=%d",rid,store,int((time.monotonic()-started)*1000),package["technical_metrics"]["scenario_count"],package["technical_metrics"]["optimizer_type"],len(package["warnings"]))
-  return package
+  try:
+   self._generate_and_persist_overall_summary(rid)
+  except Exception:
+   # Narrative generation is downstream metadata; a failure never invalidates
+   # the deterministic Decision Run already committed above.
+   logger.exception("overall_summary_persistence_failed decision_run_id=%s",rid)
+  return self.get_decision(rid)
 
  def get_decision(self,rid):
   with self.factory() as s:
@@ -249,22 +255,72 @@ class DecisionPlanningService:
 
  def get_decision_brief(self,rid):
   from app.decision_intelligence import DecisionBriefBuilder, ShelfCashDecisionIntelligenceAdapter
+  from app.decision_intelligence.overall_summary import OverallSummaryProvider
+  from app.decision_intelligence.semantic_evidence import DecisionSemanticEvidenceBuilder
   with self.factory() as s:
    run=s.get(DecisionRunModel,rid)
    if not run:raise PlanningError("DECISION_RUN_NOT_FOUND","Decision run not found.",{"decision_run_id":rid},http_status=404)
    brief=DecisionBriefBuilder().build(s,run)
+   if brief.assistant_summary is None:
+    package=json.loads(run.package_json)
+    facts=DecisionSemanticEvidenceBuilder().build(brief,package)
+    # Older Decision Runs are read-only: provide safe deterministic text, never
+    # spend tokens or backfill package_json during GET.
+    brief=brief.model_copy(update={"assistant_summary":OverallSummaryProvider(self.llm_provider,self.settings).deterministic_fallback(brief,facts)})
    # Evidence is derived from the same immutable package, never persisted or used by M1-M5.
    return brief.model_copy(update={"evidence":ShelfCashDecisionIntelligenceAdapter().evidence_briefs(brief)})
 
+ def _generate_and_persist_overall_summary(self,rid):
+  """Generate exactly once after the core Decision Package is committed."""
+  from app.decision_intelligence import DecisionBriefBuilder
+  from app.decision_intelligence.overall_summary import OverallSummaryProvider
+  from app.decision_intelligence.semantic_evidence import DecisionSemanticEvidenceBuilder
+  with self.factory() as s:
+   run=s.get(DecisionRunModel,rid)
+   if not run:return
+   package=json.loads(run.package_json)
+   if isinstance((package.get("assistant") or {}).get("overall_summary"),dict):return
+   brief=DecisionBriefBuilder().build(s,run)
+   facts=DecisionSemanticEvidenceBuilder().build(brief,package)
+   summary=OverallSummaryProvider(self.llm_provider,self.settings).summarize(brief,facts)
+   package["assistant"]={**(package.get("assistant") if isinstance(package.get("assistant"),dict) else {}),"overall_summary":summary.model_dump(mode="json")}
+   run.package_json=dump(package)
+   s.commit()
+
  def explain_decision(self,rid,body):
   """M6 read-only explanation with legacy deterministic fallback."""
-  try:
-   from app.decision_intelligence.narrative import DecisionNarrativeProvider
+  from app.decision_intelligence.narrative import DecisionNarrativeProvider
+  from app.decision_intelligence.semantic_evidence import DecisionSemanticEvidenceBuilder
+  if body.ingredient_id:
+   # Validate against the immutable Decision Run snapshot before any LLM call.
+   # An ID in another store/current inventory must not be substituted here.
    brief=self.get_decision_brief(rid)
-   return DecisionNarrativeProvider(self.llm_provider,self.settings).explain(brief,question=body.question,language=body.language,detail_level=body.detail_level).model_dump(mode="json")
+   self._require_decision_ingredient(brief,body.ingredient_id)
+   package=self.get_decision(rid)
+   semantic_facts=DecisionSemanticEvidenceBuilder().build(brief,package)
+   return DecisionNarrativeProvider(self.llm_provider,self.settings).explain(
+    brief,question=body.question,language=body.language,detail_level=body.detail_level,
+    semantic_facts=semantic_facts,ingredient_id=body.ingredient_id,
+   ).model_dump(mode="json")
+  try:
+   brief=self.get_decision_brief(rid)
+   package=self.get_decision(rid)
+   semantic_facts=DecisionSemanticEvidenceBuilder().build(brief,package)
+   return DecisionNarrativeProvider(self.llm_provider,self.settings).explain(brief,question=body.question,language=body.language,detail_level=body.detail_level,semantic_facts=semantic_facts).model_dump(mode="json")
   except Exception:
    logger.exception("decision_intelligence_failed decision_run_id=%s",rid)
    return self._template_explanation(rid,body)
+
+ def _require_decision_ingredient(self,brief,ingredient_id):
+  ingredient_ids={row.ingredient_id for row in brief.ingredient_demand}
+  ingredient_ids.update(row.ingredient_id for row in brief.procurement_rows)
+  if ingredient_id not in ingredient_ids:
+   raise PlanningError(
+    "DECISION_RUN_INGREDIENT_NOT_FOUND",
+    "Ingredient is not present in this Decision Run.",
+    {"decision_run_id":brief.decision_run_id,"ingredient_id":ingredient_id},
+    http_status=422,
+   )
 
  def _template_explanation(self,rid,body):
   """Legacy response retained exclusively as M6 failure fallback."""
@@ -273,6 +329,9 @@ class DecisionPlanningService:
            "MOQ_ROUNDING":"Số lượng đặt được nâng lên để đáp ứng mức đặt tối thiểu.",
            "STOCKOUT_RISK_HIGH":"Kế hoạch ưu tiên giảm nguy cơ thiếu hàng trong kỳ kế hoạch.",
            "SUPPLIER_DELAY_SENSITIVITY":"Độ trễ giao hàng làm kế hoạch nhạy cảm hơn với thiếu hàng."}
+  # Raw package reason codes remain available for compatibility/debugging, but
+  # they are not causal proof and must not drive a natural-language fallback.
+  mapping={}
   for reason in reasons:
    if reason.get("code") in mapping: messages.append(mapping[reason["code"]])
   if not messages: messages.append("Kế hoạch dựa trên forecast, BOM, tồn kho theo lô và các ràng buộc nhà cung cấp hiện có.")
@@ -282,6 +341,7 @@ class DecisionPlanningService:
  def what_if_decision(self,rid,body):
   """Execute an in-memory M1-M5 hypothetical; no ORM entity is mutated or persisted."""
   from app.decision_intelligence import DecisionBriefBuilder, ShelfCashDecisionIntelligenceAdapter
+  from app.decision_intelligence.what_if_evidence import WhatIfNarrativeProvider, build_what_if_facts
   with self.factory() as s:
    run=s.get(DecisionRunModel,rid)
    if not run:raise PlanningError("DECISION_RUN_NOT_FOUND","Decision run not found.",{"decision_run_id":rid},http_status=404)
@@ -306,13 +366,10 @@ class DecisionPlanningService:
    hypothetical_run=SimpleNamespace(decision_run_id=hypothetical_id,store_id=run.store_id,forecast_run_id=run.forecast_run_id,as_of_date=run.as_of_date,horizon_days=run.horizon_days,status=package["status"],package_json=dump(package))
    hypothetical=DecisionBriefBuilder().build(s,hypothetical_run)
    hypothetical=hypothetical.model_copy(update={"evidence":ShelfCashDecisionIntelligenceAdapter().evidence_briefs(hypothetical),"data_availability":{**hypothetical.data_availability,"authority":"HYPOTHETICAL","mutation_scope":"ingredient_demand"}})
-   comparison=self._what_if_comparison(baseline_brief,hypothetical)
-   explanation=None
-   try:
-    answer=ShelfCashDecisionIntelligenceAdapter().explain(hypothetical,question=None,language="vi",detail_level="simple")
-    explanation={"answer":answer.answer,"citations":[x.model_dump(mode="json") for x in answer.citations],"grounded":answer.grounded,"authority":"HYPOTHETICAL"}
-   except Exception:logger.exception("what_if_explanation_failed decision_run_id=%s",rid)
-   return {"decision_run_id":rid,"baseline":baseline_brief.model_dump(mode="json"),"hypothetical":hypothetical.model_dump(mode="json"),"mutations":body.model_dump(mode="json"),"comparison":comparison,"grounded_explanation":explanation,"generated_at":now()}
+   what_if_facts=build_what_if_facts(rid,baseline_brief,hypothetical,body,baseline_package=baseline_package,hypothetical_package=package)
+   explanation=WhatIfNarrativeProvider(self.llm_provider).explain(rid,what_if_facts).model_dump(mode="json")
+   explanation["authority"]="HYPOTHETICAL"
+   return {"decision_run_id":rid,"baseline":baseline_brief.model_dump(mode="json"),"hypothetical":hypothetical.model_dump(mode="json"),"mutations":body.model_dump(mode="json"),"mutation_facts":what_if_facts.mutation.model_dump(mode="json"),"comparison":what_if_facts.comparison.model_dump(mode="json"),"grounded_explanation":explanation,"generated_at":now()}
 
  @staticmethod
  def _select_hypothetical_strategy(package,strategy):
@@ -321,14 +378,6 @@ class DecisionPlanningService:
    package["recommended_strategy"]=strategy;package["recommended_plan"]={"items":candidate.get("items",[])};package["business_metrics"]=candidate.get("business_metrics",{});package["critic"]=candidate.get("critic",{});package["stress_tests"]=candidate.get("stress_tests") or [];package["status"]="completed"
   else:
    package["recommended_strategy"]=None;package["recommended_plan"]={"items":[]};package["business_metrics"]={};package["critic"]=candidate.get("critic",{});package["status"]="completed_with_no_feasible_recommendation"
-
- @staticmethod
- def _what_if_comparison(baseline,hypothetical):
-  def delta(a,b):return None if a is None or b is None else b-a
-  left={row.ingredient_id:row for row in baseline.procurement_rows};right={row.ingredient_id:row for row in hypothetical.procurement_rows};changes=[]
-  for ingredient_id in sorted(set(left)|set(right)):
-   a,b=left.get(ingredient_id),right.get(ingredient_id);changes.append({"ingredient_id":ingredient_id,"baseline_quantity":a.quantity if a else None,"hypothetical_quantity":b.quantity if b else None,"quantity_delta":delta(a.quantity if a else None,b.quantity if b else None),"baseline_supplier_id":a.supplier_id if a else None,"hypothetical_supplier_id":b.supplier_id if b else None,"baseline_arrival_date":a.arrival_date if a else None,"hypothetical_arrival_date":b.arrival_date if b else None})
-  return {"recommendation_changed":baseline.recommendation.available!=hypothetical.recommendation.available or baseline.recommendation.strategy!=hypothetical.recommendation.strategy,"baseline_strategy":baseline.recommendation.strategy,"hypothetical_strategy":hypothetical.recommendation.strategy,"purchase_cost_delta":delta(baseline.recommendation.total_purchase_cost,hypothetical.recommendation.total_purchase_cost),"expected_fill_rate_delta":delta(baseline.risk.expected_fill_rate,hypothetical.risk.expected_fill_rate),"stockout_probability_delta":delta(baseline.risk.stockout_probability,hypothetical.risk.stockout_probability),"shortage_quantity_delta":delta(baseline.risk.shortage_quantity,hypothetical.risk.shortage_quantity),"waste_quantity_delta":delta(baseline.risk.waste_quantity,hypothetical.risk.waste_quantity),"order_changes":changes,"warnings_added":sorted(set(hypothetical.critic.warnings)-set(baseline.critic.warnings)),"warnings_removed":sorted(set(baseline.critic.warnings)-set(hypothetical.critic.warnings)),"hard_violations_added":sorted(set(hypothetical.critic.hard_violations)-set(baseline.critic.hard_violations)),"hard_violations_removed":sorted(set(baseline.critic.hard_violations)-set(hypothetical.critic.hard_violations))}
 
  @staticmethod
  def _decision_package(rid,store,forecast,mode,result,request,baseline,demands,scenario_metadata=None,forecast_trace=None,shortage_economics=None):
@@ -340,8 +389,11 @@ class DecisionPlanningService:
    sim=evaluation.simulation;critic=evaluation.critic;warnings.update(evaluation.plan.warnings);warnings.update(critic.warnings)
    strategies[name.lower()]={"strategy":name.lower(),"is_feasible":critic.passed,"purchase_cost":evaluation.plan.purchase_cost,"expected_recourse_cost":evaluation.plan.expected_recourse_cost,"business_metrics":build_business_metrics(purchase_cost=evaluation.plan.purchase_cost,simulation=sim,recommended=True,risk_simulation=evaluation.risk_simulation,risk_metadata=request.risk_evaluation_metadata) if sim else {},"items":[x.model_dump(mode="json") for x in evaluation.plan.orders],"critic":{"status":"pass" if critic.passed else "fail","findings":[{"code":x,"severity":"error","evidence":critic.details.get("finding_evidence",{}).get(x,{})} for x in critic.hard_violations],"warnings":critic.warnings,"checks":critic.checks,"details":critic.details},"stress_tests":evaluation.stress_simulation.model_dump(mode="json") if evaluation.stress_simulation else None,"technical_metrics":evaluation.plan.provenance}
   selected=strategies.get(recommended or "",{});status="completed" if recommended else "completed_with_no_feasible_recommendation"
+  # Retain the exact selector inputs as downstream assistant metadata.  This
+  # neither changes the optimizer nor reconstructs a rule at read time.
+  strategy_selection={"rule":result.provenance.get("recommendation_rule"),"selected_strategy":recommended,"eligible_candidates":sorted(name for name,candidate in strategies.items() if candidate.get("is_feasible") and candidate.get("purchase_cost") is not None)}
   reasons=[]
   for item in selected.get("items",[]):
    if item.get("pack_count",0) and item.get("order_quantity",0) > 0: reasons.append({"code":"PACK_SIZE_ROUNDING","entity_id":item.get("ingredient_id"),"evidence":{"pack_size":item.get("pack_size"),"final_order_quantity":item.get("order_quantity")}})
   top_metrics=selected.get("business_metrics") if selected else build_business_metrics(purchase_cost=None,simulation=None,recommended=False)
-  return {"decision_run_id":rid,"store_id":store,"as_of_date":forecast.cutoff_date.isoformat(),"horizon_days":forecast.horizon_days,"status":status,"engine_mode":mode,"recommended_strategy":recommended,"business_metrics":top_metrics,"recommended_plan":{"items":selected.get("items",[])},"ingredient_demand":[{"ingredient_id":x.ingredient_id,"target_date":x.target_date.isoformat(),"unit":x.unit,"p25":float(x.p25),"p50":float(x.p50),"p75":float(x.p75),"contributions":json.loads(x.contributions_json)} for x in demands],"inventory_risk":baseline.model_dump(mode="json"),"strategies":strategies,"stress_tests":selected.get("stress_tests") or [],"critic":selected.get("critic",{}),"reason_codes":reasons,"warnings":sorted(warnings),"technical_metrics":{"scenario_count":len(request.demand_scenarios),"scenario_method":scenario_metadata.get("method","quantile_design_fallback"),"random_seed":request.seed,"optimizer_type":result.provenance["candidate_engine"],"cvar_alpha":None,"core_version":"local","stochastic_saa_enabled":request.stochastic,"risk_evaluation_status":request.risk_evaluation_metadata.get("status"),"risk_evaluation_sample_count":(len(request.demand_scenarios) if request.stochastic else len(request.risk_demand_scenarios)),"baseline_engine":"lot_level_fefo_v1","scenario_diagnostics":scenario_metadata.get("diagnostics",{}),"forecast_trace":forecast_trace or {},"shortage_economics":shortage_economics or {}}}
+  return {"decision_run_id":rid,"store_id":store,"as_of_date":forecast.cutoff_date.isoformat(),"horizon_days":forecast.horizon_days,"status":status,"engine_mode":mode,"recommended_strategy":recommended,"business_metrics":top_metrics,"recommended_plan":{"items":selected.get("items",[])},"ingredient_demand":[{"ingredient_id":x.ingredient_id,"target_date":x.target_date.isoformat(),"unit":x.unit,"p25":float(x.p25),"p50":float(x.p50),"p75":float(x.p75),"contributions":json.loads(x.contributions_json)} for x in demands],"inventory_risk":baseline.model_dump(mode="json"),"strategies":strategies,"strategy_selection":strategy_selection,"stress_tests":selected.get("stress_tests") or [],"critic":selected.get("critic",{}),"reason_codes":reasons,"warnings":sorted(warnings),"technical_metrics":{"scenario_count":len(request.demand_scenarios),"scenario_method":scenario_metadata.get("method","quantile_design_fallback"),"random_seed":request.seed,"optimizer_type":result.provenance["candidate_engine"],"cvar_alpha":None,"core_version":"local","stochastic_saa_enabled":request.stochastic,"risk_evaluation_status":request.risk_evaluation_metadata.get("status"),"risk_evaluation_sample_count":(len(request.demand_scenarios) if request.stochastic else len(request.risk_demand_scenarios)),"baseline_engine":"lot_level_fefo_v1","scenario_diagnostics":scenario_metadata.get("diagnostics",{}),"forecast_trace":forecast_trace or {},"shortage_economics":shortage_economics or {}}}
