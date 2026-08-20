@@ -38,12 +38,19 @@ def validate_records(sheet_type: str, records: list[dict[str, Any]]) -> dict[str
             if item_type == "combo" and components_empty(components) and not has_explicit_component:
                 missing.append("combo_components")
         for field in missing:
+            code = "CORE_FIELD_MISSING"
+            if sheet_type == "inventory" and field == "batch_id":
+                code = "INVENTORY_BATCH_ID_REQUIRED"
+            elif sheet_type == "supplier_constraints" and field == "unit_price":
+                code = "UNIT_PRICE_NOT_CONFIGURED"
+            elif sheet_type == "supplier_constraints" and field == "lead_time_days":
+                code = "LEAD_TIME_NOT_CONFIGURED"
             errors.append({
                 "sheet": record.get("_source_sheet"),
                 "row": index + 1,
                 "row_number": record.get("_source_excel_row", index + 1),
                 "field": field,
-                "code": "CORE_FIELD_MISSING",
+                "code": code,
                 "message": f"Required canonical field '{field}' is missing or invalid.",
                 "raw_value": record.get(field),
                 "remediation": f"Map or provide a valid value for '{field}'.",

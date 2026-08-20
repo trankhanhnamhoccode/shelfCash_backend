@@ -1,7 +1,11 @@
 CANONICAL_SCHEMAS = {
     "inventory": {
-        "fields": ["snapshot_date", "ingredient_name", "on_hand", "unit", "expiry_date", "batch_id", "warehouse_name"],
-        "core_fields": ["ingredient_name", "on_hand"],
+        "fields": ["snapshot_date", "ingredient_name", "on_hand", "unit", "received_date", "expiry_date", "batch_id", "supplier_name", "warehouse_name"],
+        # Inventory imports are lot-level observations.  ``received_date`` is
+        # deliberately optional: an observation does not prove when a lot was
+        # received.  A stable batch identifier is required so a later snapshot
+        # can reconcile the same physical lot without mutable-key guesses.
+        "core_fields": ["snapshot_date", "ingredient_name", "on_hand", "unit", "batch_id"],
     },
     "sales_history": {
         "fields": ["date", "product_name", "quantity_sold", "unit", "selling_price", "revenue", "is_stockout", "promotion_name"],
@@ -28,7 +32,7 @@ CANONICAL_SCHEMAS = {
     },
     "supplier_constraints": {
         "fields": ["supplier_name", "ingredient_name", "minimum_order_quantity", "order_unit", "package_size", "package_base_unit", "lead_time_days", "shelf_life_days", "unit_price", "available_delivery_days"],
-        "core_fields": ["supplier_name", "ingredient_name", "minimum_order_quantity", "order_unit", "package_size", "package_base_unit"],
+        "core_fields": ["supplier_name", "ingredient_name", "minimum_order_quantity", "order_unit", "package_size", "package_base_unit", "lead_time_days", "unit_price"],
     },
     "calendar_features": {
         "fields": ["date", "is_weekend", "is_holiday", "is_store_closed", "is_promotion", "promotion_name", "temperature", "rainfall"],

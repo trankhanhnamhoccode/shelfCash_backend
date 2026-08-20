@@ -51,7 +51,7 @@ class InventoryLot(StrictInventoryContract): # lô hàng vật lý đang tổn t
     ingredient_id: str = Field(min_length=1)
     quantity_remaining: float = Field(ge=0)
     unit: str = Field(min_length=1)
-    received_date: date
+    received_date: date | None = None
     expiry_date: date | None = None
     unit_cost: float | None = Field(default=None, ge=0)
     location: str | None = None
@@ -352,7 +352,7 @@ class LotExpiryTrace(StrictInventoryContract): # phiên bản của LotConsumpti
     source_type: Literal["initial_inventory", "inbound", "planned_inbound"]
     source_reference_id: str | None = None
     supplier_id: str | None = None
-    received_date: date
+    received_date: date | None = None
     provenance: dict[str, Any] = Field(default_factory=dict)
 
 

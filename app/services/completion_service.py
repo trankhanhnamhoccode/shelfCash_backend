@@ -215,7 +215,7 @@ class CompletionService:
    if same:model=current
    else:
     if current:current.active=False
-    model=SupplierIngredientTermModel(constraint_id=str(uuid4()),store_id=store,supplier_id=b.supplier_id,ingredient_id=b.ingredient_id,unit_cost=b.unit_cost,moq=values["moq"],pack_size=values["pack_size"],order_unit=None,lead_time_days=b.lead_time_days,shelf_life_days=b.shelf_life_days,unit=ingredient.base_unit,version=max([x.version for x in versions] or [0])+1,active=True,source="api");s.add(model)
+    model=SupplierIngredientTermModel(constraint_id=str(uuid4()),store_id=store,supplier_id=b.supplier_id,ingredient_id=b.ingredient_id,unit_cost=b.unit_cost,moq=values["moq"],pack_size=values["pack_size"],order_unit=None,lead_time_days=b.lead_time_days,unit_price_status="declared",lead_time_status="declared",shelf_life_days=b.shelf_life_days,unit=ingredient.base_unit,version=max([x.version for x in versions] or [0])+1,active=True,source="api");s.add(model)
    s.flush();result={"constraint_id":model.constraint_id,"ingredient_id":model.ingredient_id,"supplier_id":model.supplier_id,"supplier":supplier.supplier,"unit_cost":model.unit_cost,"moq":str(model.moq),"pack_size":str(model.pack_size),"order_unit":model.order_unit,"lead_time_days":model.lead_time_days,"shelf_life_days":model.shelf_life_days,"unit":model.unit,"version":model.version,"active":model.active}
    AuditService(AuditLogRepository(s)).record(store_id=store,action=kind,resource_type="supplier_constraint",resource_id=model.constraint_id,after={"version":model.version},source="api")
    if key:

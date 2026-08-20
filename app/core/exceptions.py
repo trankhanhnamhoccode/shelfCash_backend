@@ -137,6 +137,14 @@ class BusinessIdentityConflictError(ShelfCashError):
         super().__init__(message, details)
 
 
+class InventorySnapshotError(ShelfCashError):
+    """A domain validation error for a lot-level inventory observation."""
+
+    def __init__(self, code: str, message: str, details=None, *, http_status: int = 422):
+        self.code, self.http_status = code, http_status
+        super().__init__(message, details)
+
+
 class LLMUnavailableError(ShelfCashError):
     code = "LLM_UNAVAILABLE"
     default_message = "Không thể sử dụng dịch vụ diễn giải dữ liệu lúc này và chưa có ánh xạ rule-based đủ tin cậy."

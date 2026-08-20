@@ -154,7 +154,7 @@ def simulate_inventory( # chạy vật lý 1 lô cho một kịch bản tương 
             },
         )
     snapshot_date = start_date - timedelta(days=1)
-    if any(lot.received_date > snapshot_date for lot in initial_inventory):
+    if any(lot.received_date is not None and lot.received_date > snapshot_date for lot in initial_inventory):
         raise InventoryValidationError(
             "Initial inventory phải là end-of-day snapshot ngay trước simulation start.",
             details={"expected_snapshot_date": snapshot_date.isoformat()},

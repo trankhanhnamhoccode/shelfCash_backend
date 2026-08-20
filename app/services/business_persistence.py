@@ -1,15 +1,19 @@
 from collections import defaultdict
 from dataclasses import asdict, dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, time, timezone
 from decimal import Decimal, InvalidOperation
 import json
 from typing import Any
 from uuid import uuid4
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
-from app.core.exceptions import BusinessConstraintError, ValidationError
+from app.core.exceptions import (
+    BusinessConstraintError, BusinessIdentityConflictError,
+    InventorySnapshotError, ValidationError,
+)
 from app.core.business_constraints import constraint_definition, normalize_constraint_type, validate_and_normalize_business_constraint
 from app.core.exceptions import MenuError
 from app.core.menu import components_empty, parse_combo_components, parse_explicit_component
@@ -31,7 +35,7 @@ from app.services.entity_resolution import EntityResolutionService
 from app.services.recipe_service import RecipeVersionService
 from app.services.audit_service import AuditService
 
-SCHEMA_VERSION = "20260804_0018"
+SCHEMA_VERSION = "20260821_0023"
 
 _DAY_ALIASES={"mon":0,"monday":0,"thu 2":0,"thu hai":0,"t2":0,"tue":1,"tuesday":1,"thu 3":1,"thu ba":1,"t3":1,
     "wed":2,"wednesday":2,"thu 4":2,"thu tu":2,"t4":2,"thu":3,"thursday":3,"thu 5":3,"thu nam":3,"t5":3,
@@ -90,9 +94,10 @@ class ImportBusinessPersistenceService:
         self.recipes = RecipeVersionService(RecipeRepository(session))
         self.summary = BusinessWriteSummary()
         self.menu_result: list[dict[str, Any]] = []
+        self.store = None
 
     def persist(self, *, job, sheets: list[dict[str, Any]]) -> dict[str, int]:
-        StoreRepository(self.session).get_required(job.store_id)
+        self.store = StoreRepository(self.session).get_required(job.store_id)
         for sheet in sheets:
             kind = sheet["sheet_type"]
             if kind == "unknown":
@@ -121,6 +126,40 @@ class ImportBusinessPersistenceService:
             return value if isinstance(value, date) else date.fromisoformat(str(value))
         except (TypeError, ValueError):
             raise ValidationError("Ngày không hợp lệ.", {"field": field}) from None
+
+    def _snapshot_effective_at(self, snapshot_date: date) -> datetime:
+        """Persist date-only observations at store-local midnight, in UTC."""
+        try:
+            zone = ZoneInfo(self.store.timezone)
+        except ZoneInfoNotFoundError:
+            raise ValidationError("Store timezone is invalid.", {"timezone": self.store.timezone}) from None
+        return datetime.combine(snapshot_date, time.min, tzinfo=zone).astimezone(timezone.utc)
+
+    @staticmethod
+    def _as_utc(value: datetime) -> datetime:
+        return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
+
+    @staticmethod
+    def _metadata_conflicts(lot, *, supplier_id, received_date, received_date_supplied,
+                            expiry_date, expiry_date_supplied, warehouse_name,
+                            warehouse_supplied, unit):
+        """A normal snapshot observes metadata; it never corrects a physical lot."""
+        fields = []
+        comparisons = (
+            ("unit", lot.unit, unit, True),
+            ("supplier_id", lot.supplier_id, supplier_id, supplier_id is not None),
+            ("received_date", lot.received_date, received_date, received_date_supplied),
+            ("expiry_date", lot.expiry_date, expiry_date, expiry_date_supplied),
+            ("warehouse_name", lot.warehouse_name, warehouse_name, warehouse_supplied),
+        )
+        for field, existing, incoming, supplied in comparisons:
+            if supplied and existing != incoming:
+                fields.append({
+                    "field": field,
+                    "existing_value": str(existing) if existing is not None else None,
+                    "incoming_value": str(incoming) if incoming is not None else None,
+                })
+        return fields
 
     def _row_hash(self, job, sheet, row, index):
         return source_row_hash(
@@ -189,45 +228,130 @@ class ImportBusinessPersistenceService:
         return item
 
     def _persist_inventory(self, job, sheet):
+        """Reconcile lot-level inventory observations without inventing receipt history."""
+        prepared = []
+        seen_identities = set()
+        try:
+            store_zone = ZoneInfo(self.store.timezone)
+        except ZoneInfoNotFoundError:
+            raise ValidationError("Store timezone is invalid.", {"timezone": self.store.timezone}) from None
+
+        # Preflight every source row before a lot or movement can be mutated.
         for index, row in enumerate(sheet["rows"]):
             ingredient = self._ingredient(job.store_id, row)
-            target = convert_quantity(self._decimal(row.get("on_hand"), "on_hand"), row.get("unit"), ingredient.base_unit)
-            supplier = self._supplier(job.store_id, row.get("supplier_name"))
             batch = normalized_optional_identifier(row.get("batch_id") or row.get("batch_code"))
-            expiry = self._date(row["expiry_date"], "expiry_date") if row.get("expiry_date") else None
-            received = self._date(row.get("snapshot_date") or job.forecast_date or job.created_at.date(), "snapshot_date")
-            reconciliation = canonical_hash({"ingredient_id": ingredient.ingredient_id, "supplier_id": supplier.supplier_id if supplier else None, "expiry_date": expiry, "unit": ingredient.base_unit})
-            statement = select(InventoryLotModel).where(InventoryLotModel.store_id == job.store_id, InventoryLotModel.ingredient_id == ingredient.ingredient_id)
-            statement = statement.where(InventoryLotModel.batch_code == batch) if batch else statement.where(InventoryLotModel.reconciliation_key == reconciliation)
-            lots = list(self.session.scalars(statement))
-            if len(lots) > 1:
-                raise ValidationError("Không thể xác định duy nhất inventory lot.", {"reason": "ambiguous_inventory_lot", "source_row": index + 1})
+            if batch is None:
+                raise InventorySnapshotError(
+                    "INVENTORY_BATCH_ID_REQUIRED", "Inventory snapshot requires batch_id for every lot.",
+                    {"source_row": index + 1, "ingredient_id": ingredient.ingredient_id},
+                )
+            identity = (ingredient.ingredient_id, batch)
+            if identity in seen_identities:
+                raise InventorySnapshotError(
+                    "INVENTORY_SNAPSHOT_DUPLICATE_BATCH", "A lot appears more than once in one inventory snapshot.",
+                    {"source_row": index + 1, "ingredient_id": ingredient.ingredient_id, "batch_id": batch},
+                )
+            seen_identities.add(identity)
+
+            snapshot_date = self._date(row.get("snapshot_date"), "snapshot_date")
+            if snapshot_date > datetime.now(store_zone).date():
+                raise InventorySnapshotError(
+                    "INVENTORY_SNAPSHOT_FUTURE_DATE", "Inventory snapshot_date cannot be in the future.",
+                    {"source_row": index + 1, "snapshot_date": snapshot_date.isoformat()},
+                )
+            received_supplied = row.get("received_date") not in (None, "")
+            received = self._date(row.get("received_date"), "received_date") if received_supplied else None
+            expiry_supplied = row.get("expiry_date") not in (None, "")
+            expiry = self._date(row.get("expiry_date"), "expiry_date") if expiry_supplied else None
+            if received is not None and expiry is not None and expiry < received:
+                raise ValidationError("expiry_date cannot precede received_date.", {"source_row": index + 1})
+
+            prepared.append({
+                "index": index,
+                "row": row,
+                "ingredient": ingredient,
+                "batch": batch,
+                "declared_unit": normalize_unit(row.get("unit")),
+                "target": convert_quantity(self._decimal(row.get("on_hand"), "on_hand"), row.get("unit"), ingredient.base_unit),
+                "supplier": self._supplier(job.store_id, row.get("supplier_name")),
+                "snapshot_date": snapshot_date,
+                "effective_at": self._snapshot_effective_at(snapshot_date),
+                "received": received,
+                "received_supplied": received_supplied,
+                "expiry": expiry,
+                "expiry_supplied": expiry_supplied,
+                "warehouse": row.get("warehouse_name"),
+                "warehouse_supplied": row.get("warehouse_name") not in (None, ""),
+            })
+
+        for item in prepared:
+            index, row = item["index"], item["row"]
+            ingredient, batch = item["ingredient"], item["batch"]
+            lot = self.session.scalar(select(InventoryLotModel).where(
+                InventoryLotModel.store_id == job.store_id,
+                InventoryLotModel.ingredient_id == ingredient.ingredient_id,
+                InventoryLotModel.batch_code == batch,
+            ))
             row_hash = self._row_hash(job, sheet, row, index)
-            if not lots:
+            if lot is not None:
+                conflicts = self._metadata_conflicts(
+                    lot,
+                    supplier_id=item["supplier"].supplier_id if item["supplier"] else None,
+                    received_date=item["received"], received_date_supplied=item["received_supplied"],
+                    expiry_date=item["expiry"], expiry_date_supplied=item["expiry_supplied"],
+                    warehouse_name=item["warehouse"], warehouse_supplied=item["warehouse_supplied"],
+                    unit=item["declared_unit"],
+                )
+                if conflicts:
+                    raise BusinessIdentityConflictError(
+                        "INVENTORY_LOT_METADATA_CONFLICT", "Inventory snapshot metadata conflicts with the existing lot.",
+                        {"ingredient_id": ingredient.ingredient_id, "batch_id": batch, "conflicts": conflicts},
+                    )
+                latest_event = self.session.scalar(
+                    select(InventoryMovementModel.occurred_at).where(
+                        InventoryMovementModel.lot_id == lot.lot_id
+                    ).order_by(InventoryMovementModel.occurred_at.desc()).limit(1)
+                )
+                if latest_event is not None and self._as_utc(latest_event) > item["effective_at"]:
+                    raise InventorySnapshotError(
+                        "INVENTORY_SNAPSHOT_OUT_OF_ORDER", "Inventory snapshot predates an existing lot event.",
+                        {
+                            "ingredient_id": ingredient.ingredient_id,
+                            "batch_id": batch,
+                            "snapshot_date": item["snapshot_date"].isoformat(),
+                            "latest_event_at": self._as_utc(latest_event).isoformat(),
+                        },
+                    )
+                delta = item["target"] - self.inventory.calculate_lot_balance(job.store_id, lot.lot_id)
+                movement_type = "physical_count_adjustment"
+            else:
                 lot = InventoryLotModel(
                     lot_id=str(uuid4()), store_id=job.store_id, ingredient_id=ingredient.ingredient_id,
-                    supplier_id=supplier.supplier_id if supplier else None, batch_code=batch,
-                    received_date=received, expiry_date=expiry, initial_quantity=target,
-                    unit=ingredient.base_unit, source="import", source_import_id=job.import_id,
+                    supplier_id=item["supplier"].supplier_id if item["supplier"] else None,
+                    batch_code=batch, received_date=item["received"],
+                    received_date_status="declared" if item["received_supplied"] else "unknown",
+                    expiry_date=item["expiry"], initial_quantity=item["target"], unit=ingredient.base_unit,
+                    source="inventory_snapshot", source_import_id=job.import_id,
                     source_profile_id=sheet["profile_id"], source_row_hash=row_hash,
-                    reconciliation_key=None if batch else reconciliation, version=1,
-                    warehouse_name=row.get("warehouse_name"),
+                    reconciliation_key=None, version=1, warehouse_name=item["warehouse"],
+                    last_counted_at=item["effective_at"],
                 )
                 self.inventory.add_lot(lot)
                 self.session.flush()
-                delta, movement_type = target, "opening_balance"
+                delta, movement_type = item["target"], "opening_balance"
                 self.summary.inventory_lots_created += 1
-            else:
-                lot = lots[0]
-                delta = target - self.inventory.calculate_lot_balance(job.store_id, lot.lot_id)
-                movement_type = "physical_count_adjustment"
+
+            # A snapshot updates only the observation timestamp.  Material lot
+            # metadata is immutable through this route and was checked above.
+            lot.last_counted_at = item["effective_at"]
             if delta:
                 self.inventory.add_movement(InventoryMovementModel(
                     movement_id=str(uuid4()), store_id=job.store_id, lot_id=lot.lot_id,
                     movement_type=movement_type, quantity_delta=delta, unit=ingredient.base_unit,
-                    occurred_at=datetime.now(timezone.utc), source="import",
+                    occurred_at=item["effective_at"], source="inventory_snapshot",
+                    source_id=f"inventory_snapshot:{item['snapshot_date'].isoformat()}",
                     source_import_id=job.import_id, source_profile_id=sheet["profile_id"],
-                    source_row_hash=row_hash,
+                    source_row_hash=row_hash, note=f"snapshot_date={item['snapshot_date'].isoformat()}",
                 ))
                 self.summary.inventory_movements_created += 1
             else:
@@ -408,12 +532,21 @@ class ImportBusinessPersistenceService:
                     issue_source="business_persistence",
                 ))
 
-            cost = int(self._decimal(
-                row.get("unit_price") or 0, "unit_price"
-            ))
-            lead = int(self._decimal(
-                row.get("lead_time_days") or 0, "lead_time_days"
-            ))
+            # Missing values are not business zeros.  Canonical validation
+            # requires both fields; keeping this strict also protects callers
+            # that invoke persistence directly.
+            if row.get("unit_price") in (None, ""):
+                raise InventorySnapshotError(
+                    "UNIT_PRICE_NOT_CONFIGURED", "Supplier term requires unit_price.",
+                    {"source_row": index + 1, "ingredient_id": ingredient.ingredient_id},
+                )
+            if row.get("lead_time_days") in (None, ""):
+                raise InventorySnapshotError(
+                    "LEAD_TIME_NOT_CONFIGURED", "Supplier term requires lead_time_days.",
+                    {"source_row": index + 1, "ingredient_id": ingredient.ingredient_id},
+                )
+            cost = int(self._decimal(row.get("unit_price"), "unit_price"))
+            lead = int(self._decimal(row.get("lead_time_days"), "lead_time_days"))
             shelf_life_raw = row.get("shelf_life_days")
             shelf_life_value = None if shelf_life_raw in (None, "") else self._decimal(shelf_life_raw, "shelf_life_days")
             if shelf_life_value is not None and (shelf_life_value < 0 or shelf_life_value != shelf_life_value.to_integral_value()):
@@ -455,6 +588,7 @@ class ImportBusinessPersistenceService:
                 order_unit=order_unit,
                 available_delivery_days=None if delivery_days is None else json.dumps(delivery_days),
                 lead_time_days=lead,
+                unit_price_status="declared", lead_time_status="declared",
                 shelf_life_days=shelf_life,
                 unit=target_base_unit,
                 version=(latest.version + 1 if latest else 1),
@@ -495,8 +629,12 @@ class ImportBusinessPersistenceService:
                     issue_source="business_persistence",
                 ))
                 continue
-            cost = int(self._decimal(row.get("unit_price") or 0, "unit_price"))
-            lead = int(self._decimal(row.get("lead_time_days") or 0, "lead_time_days"))
+            if row.get("unit_price") in (None, ""):
+                raise InventorySnapshotError("UNIT_PRICE_NOT_CONFIGURED", "Supplier term requires unit_price.", {"source_row": index + 1})
+            if row.get("lead_time_days") in (None, ""):
+                raise InventorySnapshotError("LEAD_TIME_NOT_CONFIGURED", "Supplier term requires lead_time_days.", {"source_row": index + 1})
+            cost = int(self._decimal(row.get("unit_price"), "unit_price"))
+            lead = int(self._decimal(row.get("lead_time_days"), "lead_time_days"))
             shelf_life_raw = row.get("shelf_life_days")
             shelf_life_value = None if shelf_life_raw in (None, "") else self._decimal(shelf_life_raw, "shelf_life_days")
             if shelf_life_value is not None and (shelf_life_value < 0 or shelf_life_value != shelf_life_value.to_integral_value()):
@@ -509,7 +647,7 @@ class ImportBusinessPersistenceService:
                 continue
             if latest:
                 latest.active = False
-            self.session.add(SupplierIngredientTermModel(constraint_id=str(uuid4()), store_id=job.store_id, supplier_id=supplier.supplier_id, ingredient_id=ingredient.ingredient_id, unit_cost=cost, moq=moq, pack_size=pack, lead_time_days=lead, shelf_life_days=shelf_life, unit=ingredient.base_unit, version=(latest.version + 1 if latest else 1), active=True, source="import", source_import_id=job.import_id, source_profile_id=sheet["profile_id"], source_row_hash=content))
+            self.session.add(SupplierIngredientTermModel(constraint_id=str(uuid4()), store_id=job.store_id, supplier_id=supplier.supplier_id, ingredient_id=ingredient.ingredient_id, unit_cost=cost, moq=moq, pack_size=pack, lead_time_days=lead, unit_price_status="declared", lead_time_status="declared", shelf_life_days=shelf_life, unit=ingredient.base_unit, version=(latest.version + 1 if latest else 1), active=True, source="import", source_import_id=job.import_id, source_profile_id=sheet["profile_id"], source_row_hash=content))
             self.summary.supplier_terms_created += 1
 
     def _persist_calendar_features(self, job, sheet):

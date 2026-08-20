@@ -542,7 +542,10 @@ def test_rule_mapper_uses_configured_threshold():
     lenient = map_sheet_rules(profile, confidence_threshold=0.7)
     assert strict.confidence == lenient.confidence == 0.775
     assert strict.requires_review
-    assert not lenient.requires_review
+    # Confidence can be sufficient, but a lot-level inventory mapping without
+    # snapshot date, unit and stable batch identity is not safe to process.
+    assert lenient.requires_review
+    assert any("batch_id" in warning for warning in lenient.warnings)
 
 
 def test_audit_payload_does_not_contain_rows_or_api_key(client):

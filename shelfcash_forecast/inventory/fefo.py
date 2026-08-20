@@ -96,8 +96,11 @@ def is_expired(
     return lot.expiry_date <= simulation_date
 
 
-def fefo_sort_key(lot: InventoryLot) -> tuple[date, date, str]:
-    return (lot.expiry_date or date.max, lot.received_date, lot.lot_id)
+def fefo_sort_key(lot: InventoryLot) -> tuple[date, int, date, str]:
+    """Expiry is authoritative; unknown receipt time has no invented age."""
+    if lot.received_date is None:
+        return (lot.expiry_date or date.max, 1, date.max, lot.lot_id)
+    return (lot.expiry_date or date.max, 0, lot.received_date, lot.lot_id)
 
 
 def consume_fefo(

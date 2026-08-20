@@ -31,6 +31,8 @@ persists a safe issue, and writes one aggregate failure audit.
 | `calendar_features` | calendar_features |
 | `business_constraints` | store_settings |
 
+For lot-level inventory semantics, see [Inventory snapshot and supplier-term integrity](INVENTORY_SNAPSHOT_IMPORT.md). In particular, `inventory` imports are observations and `purchase_history` remains record-only.
+
 Unknown sheets confirmed as skipped write no business rows.
 
 ## Deterministic identity and resolution

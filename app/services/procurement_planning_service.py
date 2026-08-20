@@ -3,7 +3,7 @@ from collections import defaultdict
 from datetime import date, timedelta
 from decimal import Decimal, ROUND_CEILING
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 
 from app.core.exceptions import PlanningError, ValidationError
 from app.core.units import canonical_unit_name, convert_quantity, normalize_unit, unit_dimension
@@ -133,13 +133,17 @@ class ProcurementPlanningService:
         return plans,recommended["strategy"] if recommended else None
 
     def _lots(self,store,ingredient,cutoff):
-        rows=list(self.session.scalars(select(InventoryLotModel).where(InventoryLotModel.store_id==store,
-            InventoryLotModel.ingredient_id==ingredient,InventoryLotModel.received_date<=cutoff)))
+        rows=list(self.session.scalars(select(InventoryLotModel).where(
+            InventoryLotModel.store_id==store,
+            InventoryLotModel.ingredient_id==ingredient,
+            or_(InventoryLotModel.received_date_status!="declared", InventoryLotModel.received_date<=cutoff),
+        )))
         result=[]
         for lot in rows:
             movements=list(self.session.scalars(select(InventoryMovementModel).where(InventoryMovementModel.lot_id==lot.lot_id)))
             balance=sum((D(x.quantity_delta) for x in movements if x.occurred_at.date()<=cutoff),D(0))
-            if balance>0:result.append({"lot_id":lot.lot_id,"quantity":balance,"expiry_date":lot.expiry_date,"received_date":lot.received_date})
+            if balance>0:result.append({"lot_id":lot.lot_id,"quantity":balance,"expiry_date":lot.expiry_date,
+                                        "received_date":lot.received_date if lot.received_date_status=="declared" else None})
         return result
 
     def _open_inbound(self,store,cutoff):
@@ -158,7 +162,9 @@ class ProcurementPlanningService:
 
     def _terms(self,store,ingredient):return list(self.session.scalars(select(SupplierIngredientTermModel).join(SupplierModel).where(
         SupplierIngredientTermModel.store_id==store,SupplierIngredientTermModel.ingredient_id==ingredient,
-        SupplierIngredientTermModel.active.is_(True),SupplierModel.active.is_(True))))
+        SupplierIngredientTermModel.active.is_(True),SupplierModel.active.is_(True),
+        SupplierIngredientTermModel.unit_price_status=="declared",
+        SupplierIngredientTermModel.lead_time_status=="declared")))
     def _select_term(self,terms,cutoff,need):
         required=date.fromisoformat(need) if need else date.max
         return sorted(terms,key=lambda x:((self._delivery_date(x,cutoff)[0] is None),

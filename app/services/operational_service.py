@@ -74,6 +74,7 @@ class OperationalService:
                 items.append({"lot_id":x.lot_id,"ingredient_id":x.ingredient_id,"ingredient":ing.ingredient if ing else None,
                     "sku":ing.sku if ing else None,"on_hand":bal,"usable_quantity":max(Decimal(0),bal-expiring-expired),
                     "expiring_quantity":expiring,"expired_quantity":expired,"unit":x.unit,"unit_cost":x.unit_cost,"batch_code":x.batch_code,"received_date":x.received_date,
+                    "received_date_status":x.received_date_status,
                     "expiry_date":x.expiry_date,"supplier_id":x.supplier_id,"supplier":sup.supplier if sup else None,
                     "status":status,"last_counted_at":x.last_counted_at,"version":x.version})
             return self._wrap(items,page,size,total)
