@@ -8,11 +8,14 @@ import time
 from collections import defaultdict
 from typing import Any
 
+from pydantic import ValidationError as PydanticValidationError
 from shelfcash_forecast.decision_intelligence.contracts import DecisionGraph
 from shelfcash_forecast.decision_intelligence.retrieval import StructuredLocalRetriever, build_retrieval_context
 
+from app.core.logging_context import get_request_id
 from app.decision_intelligence.adapter import ShelfCashDecisionIntelligenceAdapter
-from app.decision_intelligence.contracts import Citation, DecisionBriefFacts, DecisionExplanationResponse, ExplanationClaim
+from app.decision_intelligence.contracts import Citation, DecisionBriefFacts, DecisionExplanationResponse, DecisionNarrativeLLMResponse, ExplanationClaim
+from app.llm.tasks import LLMFailureStage, LLMTask
 
 logger = logging.getLogger("shelfcash.decision_narrative")
 
@@ -207,6 +210,8 @@ def aggregate_evidence(brief: DecisionBriefFacts, retrieved_items) -> list[dict[
             for code in item.payload.get("reason_codes", []):
                 if code in REASON_TEXT:
                     records.append({"evidence_id": item.evidence_id, "type": "PROCUREMENT_REASON", "ingredient_id": item.entities.get("ingredient_id"), "code": code, "meaning": REASON_TEXT[code]})
+        elif item.evidence_type == "inventory_risk":
+            records.append({"evidence_id": item.evidence_id, "type": "RISK", **item.payload})
     return records
 
 
@@ -224,9 +229,12 @@ class DecisionNarrativeProvider:
 
     def _qwen_or_fallback(self, brief, question, language, detail_level, fallback):
         started = time.monotonic()
+        request_id = get_request_id()
         raw = None
+        failure_stage = LLMFailureStage.UNKNOWN.value
+        request_context: dict[str, Any] = {"decision_run_id": brief.decision_run_id}
         try:
-            logger.info("decision_narrative_started decision_run_id=%s provider=openrouter_qwen", brief.decision_run_id)
+            logger.info("decision_narrative_started request_id=%s decision_run_id=%s task=%s", request_id, brief.decision_run_id, LLMTask.DECISION_NARRATIVE.value)
             evidence = self.deterministic._evidence(brief)
             resolved_question = question or ("Why is this plan recommended?" if language == "en" else "Tại sao kế hoạch này được đề xuất?")
             retrieved = StructuredLocalRetriever().retrieve(resolved_question, evidence, DecisionGraph(request_id=brief.decision_run_id, nodes=[], edges=[]), context=build_retrieval_context(resolved_question, evidence, recommended_strategy=(brief.recommendation.strategy or "").upper() or None))
@@ -243,22 +251,56 @@ class DecisionNarrativeProvider:
             if loop and loop.is_running():
                 import concurrent.futures
                 with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                    raw = pool.submit(lambda: asyncio.run(self.llm_provider.generate_json(SYSTEM_PROMPT, payload, max_new_tokens=getattr(self.settings, "decision_narrative_max_new_tokens", 2000)))).result()
+                    raw = pool.submit(lambda: asyncio.run(self.llm_provider.generate_json(
+                        SYSTEM_PROMPT, payload, task=LLMTask.DECISION_NARRATIVE,
+                        request_context=request_context,
+                    ))).result()
             else:
-                raw = asyncio.run(self.llm_provider.generate_json(SYSTEM_PROMPT, payload, max_new_tokens=getattr(self.settings, "decision_narrative_max_new_tokens", 2000)))
+                raw = asyncio.run(self.llm_provider.generate_json(
+                    SYSTEM_PROMPT, payload, task=LLMTask.DECISION_NARRATIVE,
+                    request_context=request_context,
+                ))
 
-            logger.info("decision_narrative_qwen_completed decision_run_id=%s provider=openrouter_qwen", brief.decision_run_id)
-            response = self._guard(raw, structured, evidence.items, brief, language, detail_level, retrieved.intent)
-            logger.info("decision_narrative_grounding_passed decision_run_id=%s provider=openrouter_qwen duration_ms=%d", brief.decision_run_id, int((time.monotonic() - started) * 1000))
+            logger.info("decision_narrative_qwen_completed request_id=%s decision_run_id=%s task=%s", request_id, brief.decision_run_id, LLMTask.DECISION_NARRATIVE.value)
+            try:
+                typed_raw = DecisionNarrativeLLMResponse.model_validate(raw)
+            except PydanticValidationError as exc:
+                failure_stage = LLMFailureStage.SCHEMA_VALIDATION.value
+                raise ValueError("narrative_schema_validation_failed") from exc
+            try:
+                response = self._guard(typed_raw.model_dump(mode="json"), structured, evidence.items, brief, language, detail_level, retrieved.intent)
+            except Exception:
+                failure_stage = LLMFailureStage.GROUNDING.value
+                raise
+            logger.info("decision_narrative_grounding_passed request_id=%s decision_run_id=%s task=%s duration_ms=%d", request_id, brief.decision_run_id, LLMTask.DECISION_NARRATIVE.value, int((time.monotonic() - started) * 1000))
             return response
         except Exception as exc:
-            logger.warning("decision_narrative_grounding_failed decision_run_id=%s provider=openrouter_qwen reason=%s error=%s", brief.decision_run_id, type(exc).__name__, str(exc))
-            logger.warning("decision_narrative_fallback decision_run_id=%s provider=openrouter_qwen reason=%s duration_ms=%d", brief.decision_run_id, type(exc).__name__, int((time.monotonic() - started) * 1000))
+            details = getattr(exc, "details", {})
+            if failure_stage == LLMFailureStage.UNKNOWN.value and isinstance(details, dict):
+                failure_stage = str(details.get("failure_stage") or failure_stage)
+            details = details if isinstance(details, dict) else {}
+            metadata = request_context.get("openrouter_metadata", {})
+            metadata = metadata if isinstance(metadata, dict) else {}
+            task_profile = getattr(self.llm_provider, "task_profile", None)
+            profile = task_profile(LLMTask.DECISION_NARRATIVE) if callable(task_profile) else None
+            configured_model = details.get("configured_model") or getattr(profile, "model", None)
+            resolved_model = details.get("resolved_model") or metadata.get("resolved_model")
+            resolved_provider = details.get("resolved_provider") or metadata.get("resolved_provider")
+            logger.warning(
+                "decision_narrative_failed request_id=%s decision_run_id=%s task=%s configured_model=%s resolved_model=%s resolved_provider=%s failure_stage=%s reason=%s",
+                request_id, brief.decision_run_id, LLMTask.DECISION_NARRATIVE.value, configured_model, resolved_model,
+                resolved_provider, failure_stage, type(exc).__name__,
+            )
+            logger.warning(
+                "decision_narrative_fallback request_id=%s decision_run_id=%s task=%s configured_model=%s resolved_provider=%s failure_stage=%s duration_ms=%d",
+                request_id, brief.decision_run_id, LLMTask.DECISION_NARRATIVE.value, configured_model, resolved_provider,
+                failure_stage, int((time.monotonic() - started) * 1000),
+            )
             update_dict: dict[str, Any] = {"provider": "deterministic_fallback"}
             if raw is not None:
                 update_dict["raw_response"] = raw
             else:
-                update_dict["raw_response"] = {"error": str(exc), "reason": type(exc).__name__, "details": getattr(exc, "details", None)}
+                update_dict["raw_response"] = {"failure_stage": failure_stage, "reason": type(exc).__name__}
             return fallback.model_copy(update=update_dict)
 
     def _guard(self, raw, structured, evidence_items, brief, language, detail_level, intent):
@@ -269,12 +311,17 @@ class DecisionNarrativeProvider:
         allowed_ids = set(structured_by_id)
         claims = []
         citation_ids = set()
+        used = raw.get("used_evidence_ids")
+        if not isinstance(used, list) or not set(used) <= allowed_ids:
+            raise ValueError("unsupported_used_evidence_id")
+        claimed_evidence_ids = set()
         for claim in raw["claims"]:
             if not isinstance(claim, dict) or not isinstance(claim.get("text"), str):
                 raise ValueError("malformed_claim")
             ids = claim.get("evidence_ids")
             if not isinstance(ids, list) or not ids or not set(ids) <= allowed_ids:
                 raise ValueError("unsupported_evidence_id")
+            claimed_evidence_ids.update(ids)
             supported_types = {structured_by_id[evidence_id]["type"] for evidence_id in ids}
             if claim.get("type") not in supported_types:
                 raise ValueError("unsupported_claim_type")
@@ -285,9 +332,8 @@ class DecisionNarrativeProvider:
             claims.append(ExplanationClaim(type=claim["type"], value=claim["text"], evidence_ids=claim_source_ids))
             for evidence_id in ids:
                 citation_ids.update(structured_by_id[evidence_id].get("evidence_ids", [evidence_id]))
-            used = raw.get("used_evidence_ids", list(citation_ids))
-            if not isinstance(used, list) or not set(used) <= allowed_ids:
-                raise ValueError("unsupported_used_evidence_id")
+        if set(used) != claimed_evidence_ids:
+            raise ValueError("used_evidence_ids_mismatch")
         citations = [Citation(evidence_id=item.evidence_id, label=item.text, source_type=item.source_object) for item in evidence_items if item.evidence_id in citation_ids]
         entities = {"ingredient_ids": sorted({item.entities["ingredient_id"] for item in evidence_items if item.evidence_id in citation_ids and item.entities.get("ingredient_id")}), "supplier_ids": sorted({item.entities["supplier_id"] for item in evidence_items if item.evidence_id in citation_ids and item.entities.get("supplier_id")})}
         return DecisionExplanationResponse(source="openrouter_qwen", language=language, detail_level=detail_level, summary=raw["answer"], why_this_plan=[raw["answer"]], main_risks=brief.critic.warnings, tradeoffs=[], important_assumptions=["Narrative is grounded only in the persisted decision package."], decision_run_id=brief.decision_run_id, answer=raw["answer"], intent=str(intent).upper(), entities=entities, claims=claims, citations=citations, grounded=True, provider="openrouter_qwen", raw_response=raw)
@@ -313,12 +359,12 @@ class DecisionNarrativeProvider:
     def _validate_supported_concepts(text: str, items: list[dict]):
         lowered = text.lower()
         required = {
-            ("tồn an toàn", "safety stock"): lambda: any(item["type"] == "SAFETY_STOCK" for item in items),
+            ("tồn an toàn", "safety stock"): lambda: any(item.get("code") == "SAFETY_STOCK_PROTECTION" for item in items),
             ("moq", "đặt tối thiểu"): lambda: any(item["type"] == "MOQ" or item.get("code") == "MOQ_CONSTRAINT" for item in items),
             ("hạn dùng", "hết hạn"): lambda: any(item["type"] == "EXPIRY" or item.get("code") == "EXPIRING_INVENTORY" for item in items),
             ("lead time", "thời gian giao"): lambda: any(item["type"] == "LEAD_TIME" or item.get("code") == "LEAD_TIME_PRESSURE" for item in items),
-            ("ngân sách", "budget"): lambda: any(item["type"] == "BUDGET" for item in items),
-            ("rủi ro", "xác suất thiếu"): lambda: any(item["type"] == "RISK" for item in items),
+            ("ngân sách", "budget"): lambda: any(item["type"] == "BUDGET" or item.get("code") == "BUDGET_CONSTRAINT" for item in items),
+            ("rủi ro", "xác suất thiếu"): lambda: any(item["type"] == "RISK" or item.get("code") == "STOCKOUT_RISK" for item in items),
         }
         for phrases, is_supported in required.items():
             if any(phrase in lowered for phrase in phrases) and not is_supported():

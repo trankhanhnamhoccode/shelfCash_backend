@@ -17,7 +17,16 @@ FastAPI backend nhận Excel từ React, profile workbook, đề xuất mapping 
 
 Luồng xử lý là `API → ImportService → IngestionPipeline → Excel profiler / Rule mapper / LLMProvider → Normalizer / Validator → SQLite + JSON result`. Repository lưu trạng thái import trong SQLite; file upload và kết quả nằm trong `runtime/`. Mapping luôn được validate theo canonical schema. Pipeline chỉ gửi `SheetProfile` và tối đa 8 sample rows vào Qwen, không gửi toàn bộ workbook.
 
-`OpenRouterQwenProvider` kết nối trực tiếp với OpenRouter API (`qwen/qwen3.5-9b`). Khi `OPENROUTER_API_KEY` được cấu hình, Qwen hỗ trợ gợi ý mapping Excel và diễn giải quyết định (Decision Narrative). Khi không có API key hoặc upstream gặp sự cố, hệ thống tự động sử dụng cơ chế fallback rule-based / deterministic an toàn.
+`OpenRouterLLMGateway` kết nối trực tiếp với OpenRouter API. Hiện tại cả Excel mapping và Decision Narrative đều dùng `qwen/qwen3.5-9b`, nhưng chọn model theo task profile để có thể đổi từng task bằng cấu hình sau này. Cả hai request dùng strict JSON Schema, `provider.require_parameters=true`, reasoning tắt explicit và vẫn để OpenRouter auto-route. Gateway opt-in OpenRouter router metadata để log provider/model thực tế, finish reason và token usage; không log API key hay payload. Khi không có API key hoặc upstream gặp sự cố, hệ thống tự động sử dụng cơ chế fallback rule-based / deterministic an toàn.
+
+Task profiles mặc định:
+
+`OPENROUTER_MODEL` is retained for legacy configuration and health output only; runtime routing uses the two task-specific model variables below.
+
+| Task | Model config | Max output | Timeout |
+| --- | --- | ---: | ---: |
+| Excel mapping | `OPENROUTER_MAPPING_MODEL` | 1200 | 60s |
+| Decision narrative/Q&A | `OPENROUTER_NARRATIVE_MODEL` | 800 | 60s |
 
 ## Chạy local
 

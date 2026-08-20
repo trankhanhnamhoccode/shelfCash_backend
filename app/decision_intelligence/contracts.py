@@ -69,6 +69,20 @@ class Citation(_Contract):
     evidence_id: str; label: str; source_type: str
 
 
+class DecisionNarrativeClaim(_Contract):
+    type: str
+    text: str
+    evidence_ids: list[str]
+
+
+class DecisionNarrativeLLMResponse(_Contract):
+    """The strict, provider-facing contract before grounding validation."""
+
+    answer: str
+    claims: list[DecisionNarrativeClaim]
+    used_evidence_ids: list[str]
+
+
 class DecisionExplanationResponse(_Contract):
     # Legacy fields are retained for existing clients.
     source: str; language: str; detail_level: str; summary: str

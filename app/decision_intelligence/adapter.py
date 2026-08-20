@@ -39,6 +39,14 @@ class ShelfCashDecisionIntelligenceAdapter:
         for index, demand in enumerate(brief.ingredient_demand):
             target_date = demand.target_date.isoformat() if hasattr(demand.target_date, "isoformat") else str(demand.target_date)
             collector.add(layer="M3", evidence_type="ingredient_demand", source_object="DecisionRun.package_json", source_path=f"package.ingredient_demand[ingredient_id={demand.ingredient_id};target_date={target_date}]", semantics="quantile", entities={"store_id": brief.store_id, "ingredient_id": demand.ingredient_id, "target_date": target_date}, payload={"target_date": target_date, "p25": demand.p25, "p50": demand.p50, "p75": demand.p75, "unit": demand.unit}, text=f"Persisted ingredient demand for {demand.ingredient_name or demand.ingredient_id} on {target_date}: P50={demand.p50} {demand.unit or ''}.")
+        risk_payload = {
+            "stockout_probability": brief.risk.stockout_probability,
+            "expected_fill_rate": brief.risk.expected_fill_rate,
+            "shortage_quantity": brief.risk.shortage_quantity,
+            "waste_quantity": brief.risk.waste_quantity,
+        }
+        if any(value is not None for value in risk_payload.values()):
+            collector.add(layer="M5", evidence_type="inventory_risk", source_object="DecisionRun.package_json", source_path="package.inventory_risk / package.business_metrics", semantics="persisted_metric", entities={"store_id": brief.store_id}, payload=risk_payload, text="Persisted inventory risk metrics for the recommended decision.")
         return collector.package()
 
     def _response(self, brief, language, detail_level, intent, items, *, no_feasible=False):

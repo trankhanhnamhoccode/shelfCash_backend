@@ -7,6 +7,7 @@ from app.decision_intelligence.contracts import (
     ProcurementRowBrief, RecommendationBrief, RiskBrief,
 )
 from app.decision_intelligence.narrative import DecisionNarrativeProvider, aggregate_evidence
+from app.llm.tasks import LLMTask
 
 
 class MockQwen:
@@ -17,7 +18,7 @@ class MockQwen:
         self.calls = []
 
     async def generate_json(self, system, payload, **kwargs):
-        self.calls.append(payload)
+        self.calls.append({"payload": payload, "kwargs": kwargs})
         return self.response(payload)
 
 
@@ -47,10 +48,21 @@ def test_qwen_narrative_accepts_supported_quantity():
     assert result.raw_response["answer"] == "Kế hoạch ghi nhận đặt 60 lít Sữa tươi."
 
 
+def test_narrative_uses_semantic_task_and_rejects_raw_schema_failure():
+    malformed = MockQwen(lambda _: {"answer": "missing required fields", "claims": []})
+    result = DecisionNarrativeProvider(malformed, settings()).explain(
+        brief(), question="Sữa tươi", language="vi", detail_level="simple",
+    )
+
+    assert malformed.calls
+    assert malformed.calls[0]["kwargs"]["task"] is LLMTask.DECISION_NARRATIVE
+    assert result.provider == "deterministic_fallback"
+
+
 def test_qwen_unsupported_number_and_entity_fall_back():
     def response(payload):
         order = next(item for item in payload["evidence"] if item["type"] == "PROCUREMENT_QUANTITY")
-        return {"answer": "Nhập 70 lít Chuối.", "claims": [{"type": "PROCUREMENT_QUANTITY", "text": "Nhập 70 lít Chuối.", "evidence_ids": [order["evidence_id"]]}]}
+        return {"answer": "Nhập 70 lít Chuối.", "claims": [{"type": "PROCUREMENT_QUANTITY", "text": "Nhập 70 lít Chuối.", "evidence_ids": [order["evidence_id"]]}], "used_evidence_ids": [order["evidence_id"]]}
     result = DecisionNarrativeProvider(MockQwen(response), settings()).explain(brief(), question="Sữa tươi", language="vi", detail_level="simple")
     assert result.provider == "deterministic_fallback"
 
@@ -58,8 +70,23 @@ def test_qwen_unsupported_number_and_entity_fall_back():
 def test_qwen_unsupported_safety_stock_cause_falls_back():
     def response(payload):
         order = next(item for item in payload["evidence"] if item["type"] == "PROCUREMENT_QUANTITY")
-        return {"answer": "Cần nhập để duy trì tồn an toàn.", "claims": [{"type": "PROCUREMENT_QUANTITY", "text": "Cần nhập để duy trì tồn an toàn.", "evidence_ids": [order["evidence_id"]]}]}
+        return {"answer": "Cần nhập để duy trì tồn an toàn.", "claims": [{"type": "PROCUREMENT_QUANTITY", "text": "Cần nhập để duy trì tồn an toàn.", "evidence_ids": [order["evidence_id"]]}], "used_evidence_ids": [order["evidence_id"]]}
     result = DecisionNarrativeProvider(MockQwen(response), settings()).explain(brief(), question="Sữa tươi", language="vi", detail_level="simple")
+    assert result.provider == "deterministic_fallback"
+
+
+def test_qwen_mismatched_used_evidence_ids_falls_back():
+    def response(payload):
+        order = next(item for item in payload["evidence"] if item["type"] == "PROCUREMENT_QUANTITY")
+        return {
+            "answer": "Order 60 litres of milk.",
+            "claims": [{"type": "PROCUREMENT_QUANTITY", "text": "Order 60 litres of milk.", "evidence_ids": [order["evidence_id"]]}],
+            "used_evidence_ids": [],
+        }
+
+    result = DecisionNarrativeProvider(MockQwen(response), settings()).explain(
+        brief(), question="milk", language="en", detail_level="simple",
+    )
     assert result.provider == "deterministic_fallback"
 
 
@@ -78,3 +105,14 @@ def test_daily_aggregation_is_deterministic():
     assert summary["p50_total"] == sum(range(2, 9))
     assert summary["peak_date"] == "2026-08-26"
     assert len([item for item in aggregated if item["type"] == "DEMAND_DAILY"]) == 7
+
+
+def test_aggregate_evidence_keeps_persisted_risk_as_groundable_risk_record():
+    facts = brief()
+    facts = facts.model_copy(update={"risk": RiskBrief(shortage_quantity=4.0)})
+    source = DecisionNarrativeProvider(MockQwen(lambda _: {}), settings()).deterministic
+    evidence = source._evidence(facts)
+    aggregated = aggregate_evidence(facts, evidence.items)
+
+    risk = next(item for item in aggregated if item["type"] == "RISK")
+    assert risk["shortage_quantity"] == 4.0

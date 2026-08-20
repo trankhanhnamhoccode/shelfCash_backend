@@ -16,10 +16,30 @@ class Settings(BaseSettings):
     port: int = 8000
     openrouter_api_key: str = ""
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
+    # Retained for legacy configuration and health output. Runtime task routing
+    # is controlled only by the two task-specific model settings below.
     openrouter_model: str = "qwen/qwen3.5-9b"
-    openrouter_timeout_seconds: int = 90
-    openrouter_max_new_tokens: int = 2000
-    decision_narrative_max_new_tokens: int = 2000
+    openrouter_timeout_seconds: int = 60
+    openrouter_max_new_tokens: int = 1200
+    openrouter_mapping_model: str = "qwen/qwen3.5-9b"
+    openrouter_mapping_timeout_seconds: float = 60
+    openrouter_mapping_max_tokens: int = 1200
+    openrouter_mapping_temperature: float = 0.0
+    openrouter_mapping_reasoning_enabled: bool = False
+    openrouter_mapping_structured_output: bool = True
+    openrouter_mapping_strict_schema: bool = True
+    openrouter_mapping_require_parameters: bool = True
+    openrouter_narrative_model: str = "qwen/qwen3.5-9b"
+    openrouter_narrative_timeout_seconds: float = 60
+    openrouter_narrative_max_tokens: int = 800
+    openrouter_narrative_temperature: float = 0.0
+    openrouter_narrative_reasoning_enabled: bool = False
+    openrouter_narrative_structured_output: bool = True
+    openrouter_narrative_strict_schema: bool = True
+    openrouter_narrative_require_parameters: bool = True
+    # Retained for callers/configuration that used the old setting. Narrative
+    # requests now use OPENROUTER_NARRATIVE_MAX_TOKENS.
+    decision_narrative_max_new_tokens: int = 800
     rule_confidence_threshold: float = 0.82
     max_files_per_request: int = 10
     max_file_size_mb: int = 12

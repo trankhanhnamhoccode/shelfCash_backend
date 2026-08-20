@@ -11,7 +11,8 @@ from app.decision_intelligence.contracts import (
     ProcurementRowBrief, RecommendationBrief, RiskBrief,
 )
 from app.decision_intelligence.narrative import DecisionNarrativeProvider
-from app.llm.openrouter_qwen import OpenRouterQwenProvider
+from app.llm.openrouter_qwen import OpenRouterLLMGateway, OpenRouterQwenProvider
+from app.llm.tasks import LLMFailureStage, LLMTask
 from app.main import create_app
 from app.schemas.llm import SheetProfile, MappingSuggestion
 from tests.conftest import migrate_database
@@ -44,6 +45,135 @@ def test_provider_health_unconfigured():
         "available": False,
     }
     assert provider.available is False
+
+
+def test_gateway_exposes_independent_task_profiles():
+    settings = Settings(
+        openrouter_api_key="mock-key",
+        openrouter_model="qwen/qwen3.5-9b",
+        openrouter_mapping_model="qwen/qwen3.5-9b",
+        openrouter_mapping_max_tokens=1200,
+        openrouter_mapping_timeout_seconds=60,
+        openrouter_narrative_model="qwen/qwen3.5-9b",
+        openrouter_narrative_max_tokens=800,
+        openrouter_narrative_timeout_seconds=60,
+    )
+    provider = OpenRouterLLMGateway(settings)
+    mapping = provider.task_profile(LLMTask.EXCEL_MAPPING)
+    narrative = provider.task_profile(LLMTask.DECISION_NARRATIVE)
+
+    assert mapping.model == narrative.model == "qwen/qwen3.5-9b"
+    assert (mapping.max_tokens, mapping.timeout_seconds) == (1200, 60)
+    assert (narrative.max_tokens, narrative.timeout_seconds) == (800, 60)
+    assert not mapping.reasoning_enabled and not narrative.reasoning_enabled
+    assert mapping.structured_output and mapping.strict_schema and mapping.require_parameters
+    assert narrative.structured_output and narrative.strict_schema and narrative.require_parameters
+
+
+@pytest.mark.asyncio
+async def test_task_requests_use_strict_schema_reasoning_off_and_required_parameters(monkeypatch):
+    provider = OpenRouterLLMGateway(Settings(openrouter_api_key="mock-key"))
+    sent: list[dict] = []
+
+    async def mock_post(url, json, **kwargs):
+        sent.append(json)
+        return httpx.Response(
+            200,
+            json={"model": "qwen/qwen3.5-9b", "provider": "mock-provider", "choices": [{"finish_reason": "stop", "message": {"content": "{}"}}]},
+            request=httpx.Request("POST", url),
+        )
+
+    client = await provider._get_client()
+    assert client.headers["X-OpenRouter-Metadata"] == "enabled"
+    monkeypatch.setattr(client, "post", mock_post)
+    await provider.generate_json("mapping", {}, task=LLMTask.EXCEL_MAPPING)
+    await provider.generate_json("narrative", {}, task=LLMTask.DECISION_NARRATIVE)
+
+    mapping, narrative = sent
+    for body, task in ((mapping, LLMTask.EXCEL_MAPPING), (narrative, LLMTask.DECISION_NARRATIVE)):
+        assert body["reasoning"] == {"effort": "none"}
+        assert body["provider"] == {"require_parameters": True}
+        assert body["response_format"]["type"] == "json_schema"
+        assert body["response_format"]["json_schema"]["strict"] is True
+        assert body["response_format"]["json_schema"]["name"] == task.value
+    assert "column_mapping" in mapping["response_format"]["json_schema"]["schema"]["properties"]
+    assert "used_evidence_ids" in narrative["response_format"]["json_schema"]["schema"]["properties"]
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_http_400_does_not_retry_without_structured_output(monkeypatch):
+    provider = OpenRouterLLMGateway(Settings(openrouter_api_key="mock-key"))
+    calls = 0
+
+    async def mock_post(url, json, **kwargs):
+        nonlocal calls
+        calls += 1
+        assert json["response_format"]["type"] == "json_schema"
+        return httpx.Response(400, json={"error": {"message": "unsupported schema"}}, request=httpx.Request("POST", url))
+
+    client = await provider._get_client()
+    monkeypatch.setattr(client, "post", mock_post)
+    with pytest.raises(LLMProviderError) as exc_info:
+        await provider.generate_json("system", {}, task=LLMTask.EXCEL_MAPPING)
+    assert calls == 1
+    assert exc_info.value.details["failure_stage"] == LLMFailureStage.STRUCTURED_OUTPUT_FAILURE.value
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_invalid_json_is_not_repaired_and_is_classified(monkeypatch):
+    provider = OpenRouterLLMGateway(Settings(openrouter_api_key="mock-key"))
+
+    async def mock_post(url, json, **kwargs):
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": '{"broken": }'}}]},
+            request=httpx.Request("POST", url),
+        )
+
+    client = await provider._get_client()
+    monkeypatch.setattr(client, "post", mock_post)
+    with pytest.raises(LLMProviderError) as exc_info:
+        await provider.generate_json("system", {}, task=LLMTask.EXCEL_MAPPING)
+    assert exc_info.value.details["failure_stage"] == LLMFailureStage.JSON_PARSE.value
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_transient_5xx_retries_once_and_logs_response_metadata(monkeypatch, caplog):
+    provider = OpenRouterLLMGateway(Settings(openrouter_api_key="mock-key"))
+    calls = 0
+    caplog.set_level("INFO", logger="shelfcash.llm")
+
+    async def no_sleep(_):
+        return None
+
+    async def mock_post(url, json, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return httpx.Response(503, request=httpx.Request("POST", url))
+        return httpx.Response(
+            200,
+            json={
+                "model": "qwen/qwen3.5-9b",
+                "openrouter_metadata": {"strategy": "auto", "attempt": 1, "endpoints": {"available": [{"provider": "metadata-provider", "model": "qwen/qwen3.5-9b", "selected": True}]}},
+                "usage": {"prompt_tokens": 11, "completion_tokens": 7, "total_tokens": 18, "completion_tokens_details": {"reasoning_tokens": 0}},
+                "choices": [{"finish_reason": "stop", "native_finish_reason": "eos", "message": {"content": "{}"}}],
+            },
+            request=httpx.Request("POST", url),
+        )
+
+    client = await provider._get_client()
+    monkeypatch.setattr(client, "post", mock_post)
+    monkeypatch.setattr("app.llm.openrouter_qwen.asyncio.sleep", no_sleep)
+    assert await provider.generate_json("system", {}, task=LLMTask.EXCEL_MAPPING) == {}
+    assert calls == 2
+    assert "resolved_provider=metadata-provider" in caplog.text
+    assert "routing_strategy=auto" in caplog.text
+    assert "prompt_tokens=11" in caplog.text
+    await provider.close()
 
 
 @pytest.mark.asyncio
@@ -98,7 +228,7 @@ async def test_generate_json_auth_failure(monkeypatch):
 
     with pytest.raises(LLMProviderError) as exc_info:
         await provider.generate_json("system", {})
-    assert exc_info.value.details["reason"] == "OPENROUTER_AUTH_FAILED"
+    assert exc_info.value.details["failure_stage"] == LLMFailureStage.HTTP.value
     assert exc_info.value.http_status == 401
     await provider.close()
 
@@ -120,7 +250,7 @@ async def test_generate_json_insufficient_credits(monkeypatch):
 
     with pytest.raises(LLMProviderError) as exc_info:
         await provider.generate_json("system", {})
-    assert exc_info.value.details["reason"] == "OPENROUTER_INSUFFICIENT_CREDITS"
+    assert exc_info.value.details["failure_stage"] == LLMFailureStage.HTTP.value
     await provider.close()
 
 
@@ -128,8 +258,11 @@ async def test_generate_json_insufficient_credits(monkeypatch):
 async def test_generate_json_rate_limit(monkeypatch):
     settings = Settings(openrouter_api_key="mock-key")
     provider = OpenRouterQwenProvider(settings)
+    calls = 0
 
     async def mock_post(url, json, **kwargs):
+        nonlocal calls
+        calls += 1
         return httpx.Response(
             429,
             json={"error": {"message": "Rate limit exceeded"}},
@@ -141,7 +274,8 @@ async def test_generate_json_rate_limit(monkeypatch):
 
     with pytest.raises(LLMProviderError) as exc_info:
         await provider.generate_json("system", {})
-    assert exc_info.value.details["reason"] == "OPENROUTER_RATE_LIMITED"
+    assert calls == 2
+    assert exc_info.value.details["failure_stage"] == LLMFailureStage.HTTP.value
     await provider.close()
 
 
@@ -149,8 +283,11 @@ async def test_generate_json_rate_limit(monkeypatch):
 async def test_generate_json_timeout(monkeypatch):
     settings = Settings(openrouter_api_key="mock-key")
     provider = OpenRouterQwenProvider(settings)
+    calls = 0
 
     async def mock_post(url, json, **kwargs):
+        nonlocal calls
+        calls += 1
         raise httpx.TimeoutException("Read timed out")
 
     client = await provider._get_client()
@@ -158,7 +295,27 @@ async def test_generate_json_timeout(monkeypatch):
 
     with pytest.raises(LLMProviderError) as exc_info:
         await provider.generate_json("system", {})
-    assert exc_info.value.details["reason"] == "OPENROUTER_TIMEOUT"
+    assert calls == 2
+    assert exc_info.value.details["failure_stage"] == LLMFailureStage.TIMEOUT.value
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_generate_json_network_error_retries_once(monkeypatch):
+    provider = OpenRouterQwenProvider(Settings(openrouter_api_key="mock-key"))
+    calls = 0
+
+    async def mock_post(url, json, **kwargs):
+        nonlocal calls
+        calls += 1
+        raise httpx.ConnectError("network unavailable", request=httpx.Request("POST", url))
+
+    client = await provider._get_client()
+    monkeypatch.setattr(client, "post", mock_post)
+    with pytest.raises(LLMProviderError) as exc_info:
+        await provider.generate_json("system", {})
+    assert calls == 2
+    assert exc_info.value.details["failure_stage"] == LLMFailureStage.NETWORK.value
     await provider.close()
 
 

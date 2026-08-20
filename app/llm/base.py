@@ -1,6 +1,8 @@
 from abc import ABC, abstractmethod
 from typing import Any
 
+from app.llm.tasks import LLMTask
+
 
 class LLMProvider(ABC):
     @property
@@ -13,7 +15,14 @@ class LLMProvider(ABC):
     @abstractmethod
     async def map_sheet(self, profile, canonical_schemas, rule_suggestion): ...
 
-    async def generate_json(self, system: str, payload: dict, *, max_new_tokens: int | None = None, response_schema: dict[str, Any] | None = None) -> dict[str, Any]:
+    async def generate_json(
+        self,
+        system: str,
+        payload: dict,
+        *,
+        task: LLMTask = LLMTask.EXCEL_MAPPING,
+        request_context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         raise RuntimeError("JSON generation is unavailable")
 
     async def load(self) -> None:
