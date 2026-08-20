@@ -358,6 +358,8 @@ async def test_map_sheet_success(monkeypatch):
     assert result.source == "llm"
     assert result.confidence == 0.95
     assert not result.requires_review
+    assert isinstance(result.raw_response, str)
+    assert result.raw_response.startswith('{"sheet_type": "sales_history"')
     await provider.close()
 
 

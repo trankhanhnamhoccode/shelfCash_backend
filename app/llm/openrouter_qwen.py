@@ -305,6 +305,10 @@ class OpenRouterLLMGateway(LLMProvider):
                 task=task, profile=profile, metadata=self._metadata(data, choice),
             )
 
+        # Preserve exactly what the model emitted for the public raw_response
+        # field. Parsing below is only the internal validation path.
+        if request_context is not None:
+            request_context["openrouter_raw_content"] = raw_text
         metadata = self._metadata(data, choice)
         try:
             content = raw_text.strip()
@@ -372,7 +376,7 @@ class OpenRouterLLMGateway(LLMProvider):
                 request_context=request_context,
             )
             suggestion = self._validate_mapping_result(raw, profile)
-            suggestion.raw_response = raw
+            suggestion.raw_response = request_context.get("openrouter_raw_content", raw)
             return suggestion
         except Exception as exc:
             stage = self._failure_stage(exc)
@@ -395,7 +399,10 @@ class OpenRouterLLMGateway(LLMProvider):
                 fallback.source = "rule_fallback"
                 fallback.requires_review = True
                 fallback.warnings.append(f"LLM mapping failed ({stage}); rule suggestion retained")
-                fallback.raw_response = {"failure_stage": stage, "reason": type(exc).__name__}
+                fallback.raw_response = request_context.get(
+                    "openrouter_raw_content",
+                    {"failure_stage": stage, "reason": type(exc).__name__},
+                )
                 return fallback
             raise LLMUnavailableError() from exc
 

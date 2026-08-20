@@ -273,7 +273,7 @@ class DecisionNarrativeProvider:
                 failure_stage = LLMFailureStage.GROUNDING.value
                 raise
             logger.info("decision_narrative_grounding_passed request_id=%s decision_run_id=%s task=%s duration_ms=%d", request_id, brief.decision_run_id, LLMTask.DECISION_NARRATIVE.value, int((time.monotonic() - started) * 1000))
-            return response
+            return response.model_copy(update={"raw_response": request_context.get("openrouter_raw_content", raw)})
         except Exception as exc:
             details = getattr(exc, "details", {})
             if failure_stage == LLMFailureStage.UNKNOWN.value and isinstance(details, dict):
@@ -297,7 +297,10 @@ class DecisionNarrativeProvider:
                 failure_stage, int((time.monotonic() - started) * 1000),
             )
             update_dict: dict[str, Any] = {"provider": "deterministic_fallback"}
-            if raw is not None:
+            raw_content = request_context.get("openrouter_raw_content")
+            if raw_content is not None:
+                update_dict["raw_response"] = raw_content
+            elif raw is not None:
                 update_dict["raw_response"] = raw
             else:
                 update_dict["raw_response"] = {"failure_stage": failure_stage, "reason": type(exc).__name__}
