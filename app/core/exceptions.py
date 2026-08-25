@@ -18,6 +18,13 @@ class ValidationError(ShelfCashError):
     http_status = 422
 
 
+class InventorySnapshotError(ValidationError):
+    """Fail-closed errors for immutable, date-only snapshot observations."""
+    def __init__(self, code: str, message: str, details=None, *, http_status: int = 422):
+        self.code, self.http_status = code, http_status
+        super().__init__(message, details)
+
+
 class StoreNotFoundError(ShelfCashError):
     code = "STORE_NOT_FOUND"
     default_message = "Không tìm thấy cửa hàng."
@@ -154,4 +161,3 @@ class LLMProviderError(ShelfCashError):
     def __init__(self, message: str | None = None, details: dict[str, Any] | None = None, *, http_status: int = 502):
         self.http_status = http_status
         super().__init__(message or self.default_message, details)
-

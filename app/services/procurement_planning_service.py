@@ -3,12 +3,14 @@ from collections import defaultdict
 from datetime import date, timedelta
 from decimal import Decimal, ROUND_CEILING
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 
 from app.core.exceptions import PlanningError, ValidationError
+from app.core.business_time import local_business_date, planning_start_date
 from app.core.units import canonical_unit_name, convert_quantity, normalize_unit, unit_dimension
 from app.models.business import (InventoryLotModel, InventoryMovementModel,
     SupplierIngredientTermModel, SupplierModel, IngredientModel)
+from app.models.store import StoreModel
 from app.models.operations import PurchaseOrderLineModel, PurchaseOrderModel
 from app.services.budget_resolver import BudgetResolver
 from app.services.inventory_simulation_service import InventorySimulationService
@@ -24,8 +26,14 @@ class ProcurementPlanningService:
     def build(self,store_id,forecast,demand_rows,strategies,use_open_purchase_orders=True,budget_override=None,strategy_source="explicit"):
         by_ingredient=defaultdict(list)
         for row in demand_rows:by_ingredient[row.ingredient_id].append(row)
-        inventory={ingredient:self._lots(store_id,ingredient,forecast.cutoff_date) for ingredient in by_ingredient}
-        existing_inbound=self._open_inbound(store_id,forecast.cutoff_date) if use_open_purchase_orders else defaultdict(list)
+        cutoff_date=forecast.cutoff_date
+        planning_start=planning_start_date(cutoff_date)
+        demand_dates={row.target_date for row in demand_rows}
+        if demand_dates and min(demand_dates)!=planning_start:
+            raise PlanningError("FORECAST_HORIZON_MISMATCH","Forecast demand must start on the first planning day.",
+                {"cutoff_date":cutoff_date.isoformat(),"planning_start_date":planning_start.isoformat(),"forecast_target_min":min(demand_dates).isoformat()})
+        inventory={ingredient:self._lots(store_id,ingredient,cutoff_date) for ingredient in by_ingredient}
+        existing_inbound=self._open_inbound(store_id,cutoff_date) if use_open_purchase_orders else defaultdict(list)
         horizon_end=max((row.target_date for row in demand_rows),default=forecast.cutoff_date)
         resolved_budget=BudgetResolver(self.session).resolve(store_id,forecast.cutoff_date,budget_override,horizon_end)
         budget=resolved_budget.limit;warnings=[] if budget is not None else ["BUDGET_NOT_CONFIGURED","RESERVED_INVENTORY_NOT_AVAILABLE"]
@@ -37,16 +45,18 @@ class ProcurementPlanningService:
                 unit=rows[0].unit;demands=[{"date":x.target_date,"quantity":D(getattr(x,quantile))} for x in rows]
                 baseline[ingredient_id]=self.simulator.simulate(ingredient_id,unit,demands,inventory[ingredient_id],existing_inbound.get(ingredient_id,[]))
                 terms=self._terms(store_id,ingredient_id)
-                term=self._select_term(terms,forecast.cutoff_date,baseline[ingredient_id].get("first_shortage_date"))
-                configured_safety=self.constraints.resolve_quantity(store_id,"safety_stock",ingredient_id,unit,forecast.cutoff_date)
+                term=self._select_term(terms,planning_start,baseline[ingredient_id].get("first_shortage_date"))
+                configured_safety=self.constraints.resolve_quantity(store_id,"safety_stock",ingredient_id,unit,cutoff_date)
                 safety=D(0) if configured_safety is None else D(configured_safety)
-                maximum=self.constraints.resolve_quantity(store_id,"maximum_stock",ingredient_id,unit,forecast.cutoff_date)
-                minimum=self.constraints.resolve_quantity(store_id,"minimum_stock",ingredient_id,unit,forecast.cutoff_date)
-                reorder_point=self.constraints.resolve_quantity(store_id,"reorder_point",ingredient_id,unit,forecast.cutoff_date)
-                service_level=self._resolve_service_level(store_id,ingredient_id,forecast.cutoff_date)
-                shelf_life_days=self.constraints.resolve_duration_days(store_id,"shelf_life_target",ingredient_id,forecast.cutoff_date)
+                maximum=self.constraints.resolve_quantity(store_id,"maximum_stock",ingredient_id,unit,cutoff_date)
+                minimum=self.constraints.resolve_quantity(store_id,"minimum_stock",ingredient_id,unit,cutoff_date)
+                reorder_point=self.constraints.resolve_quantity(store_id,"reorder_point",ingredient_id,unit,cutoff_date)
+                service_level=self._resolve_service_level(store_id,ingredient_id,cutoff_date)
+                shelf_life_days=self.constraints.resolve_duration_days(store_id,"shelf_life_target",ingredient_id,cutoff_date)
                 target_ending=max(safety,D(0) if minimum is None else D(minimum))
-                reorder_trigger,current_reorder_triggered=self._reorder_trigger(baseline[ingredient_id],inventory[ingredient_id],reorder_point,forecast.cutoff_date)
+                # The trace records when the EOD snapshot already crossed a
+                # reorder point; it is not an executable order date.
+                reorder_trigger,current_reorder_triggered=self._reorder_trigger(baseline[ingredient_id],inventory[ingredient_id],reorder_point,cutoff_date)
                 fallback="ZERO_WITH_WARNING" if configured_safety is None else None
                 if configured_safety is None: plan_warnings.append("SAFETY_STOCK_NOT_CONFIGURED")
                 constraint_trace[ingredient_id]={"configured_safety_stock":None if configured_safety is None else str(configured_safety),
@@ -69,10 +79,10 @@ class ProcurementPlanningService:
                 if shelf_life_days is not None and terms and raw>0:
                     term=min(terms,key=lambda candidate:self._shelf_life_candidate_rank(candidate,raw,ingredient_id,unit,
                         demands,inventory[ingredient_id],existing_inbound.get(ingredient_id,[]),baseline[ingredient_id],
-                        forecast.cutoff_date,safety,minimum,int(shelf_life_days)))
+                        planning_start,safety,minimum,int(shelf_life_days)))
                 if term is None:
                     if raw>0:violations.append({"code":"SUPPLIER_TERM_NOT_FOUND","ingredient_id":ingredient_id})
-                    lines.append(self._empty_line(ingredient_id,forecast.cutoff_date,unit,raw,reasons,["SUPPLIER_TERM_NOT_FOUND"]));continue
+                    lines.append(self._empty_line(ingredient_id,planning_start,unit,raw,reasons,["SUPPLIER_TERM_NOT_FOUND"]));continue
                 try:raw_term=convert_quantity(raw,unit,term.unit)
                 except ValidationError as exc:raise PlanningError("SUPPLIER_TERM_INVALID","Supplier unit không tương thích.",exc.details) from exc
                 order=D(0);packs=0
@@ -81,7 +91,7 @@ class ProcurementPlanningService:
                     if order<D(term.moq):
                         packs=int((D(term.moq)/D(term.pack_size)).to_integral_value(rounding=ROUND_CEILING));order=D(packs)*D(term.pack_size);reasons.append("MOQ_ROUNDING")
                     if order>raw_term:reasons.append("PACK_SIZE_ROUNDING")
-                arrival,delivery_adjusted=self._delivery_date(term,forecast.cutoff_date)
+                arrival,delivery_adjusted=self._delivery_date(term,planning_start)
                 if arrival is None:
                     line_warnings.append("SUPPLIER_DELIVERY_UNAVAILABLE");reasons.append("SUPPLIER_DELIVERY_UNAVAILABLE")
                     violations.append({"code":"SUPPLIER_DELIVERY_UNAVAILABLE","ingredient_id":ingredient_id,"supplier_id":term.supplier_id})
@@ -99,7 +109,7 @@ class ProcurementPlanningService:
                 inbound_base=convert_quantity(order,term.unit,unit)
                 if inbound_base and arrival is not None:proposed[ingredient_id].append({"date":arrival,"quantity":inbound_base,"lot_id":f"proposed:{strategy}:{ingredient_id}"})
                 cost=int(order*D(term.unit_cost));excess=order-raw_term
-                lines.append({"ingredient_id":ingredient_id,"supplier_id":term.supplier_id,"order_date":min(forecast.cutoff_date,reorder_trigger or forecast.cutoff_date),
+                lines.append({"ingredient_id":ingredient_id,"supplier_id":term.supplier_id,"order_date":planning_start,
                     "supplier_term_id":term.constraint_id,
                     "expected_arrival_date":arrival,"raw_required_quantity":raw_term,"order_quantity":order,"unit":term.unit,
                     "pack_count":packs,"unit_cost":term.unit_cost,"line_cost":cost,"moq":D(term.moq),"pack_size":D(term.pack_size),
@@ -133,12 +143,19 @@ class ProcurementPlanningService:
         return plans,recommended["strategy"] if recommended else None
 
     def _lots(self,store,ingredient,cutoff):
+        store_record=self.session.get(StoreModel,store)
+        timezone_name=store_record.timezone if store_record else "Asia/Ho_Chi_Minh"
         rows=list(self.session.scalars(select(InventoryLotModel).where(InventoryLotModel.store_id==store,
-            InventoryLotModel.ingredient_id==ingredient,InventoryLotModel.received_date<=cutoff)))
+            InventoryLotModel.ingredient_id==ingredient,or_(InventoryLotModel.received_date.is_(None),InventoryLotModel.received_date<=cutoff))))
         result=[]
         for lot in rows:
             movements=list(self.session.scalars(select(InventoryMovementModel).where(InventoryMovementModel.lot_id==lot.lot_id)))
-            balance=sum((D(x.quantity_delta) for x in movements if x.occurred_at.date()<=cutoff),D(0))
+            def effective_date(movement):
+                if movement.source=="inventory_snapshot" and movement.source_id:
+                    try:return date.fromisoformat(movement.source_id)
+                    except ValueError:pass
+                return local_business_date(movement.occurred_at,timezone_name)
+            balance=sum((D(x.quantity_delta) for x in movements if effective_date(x)<=cutoff),D(0))
             if balance>0:result.append({"lot_id":lot.lot_id,"quantity":balance,"expiry_date":lot.expiry_date,"received_date":lot.received_date})
         return result
 

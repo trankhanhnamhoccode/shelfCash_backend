@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import math
-from datetime import timedelta
 
 import numpy as np
 from scipy.optimize import Bounds, LinearConstraint, milp
@@ -19,6 +18,7 @@ from shelfcash_core.optimization.model_data import (
     build_problem_data,
     expected_daily_demand,
     shortage_cost_per_target_unit,
+    supplier_arrival_date,
 )
 from shelfcash_core.optimization.expiry import resolve_inbound_expiry
 from shelfcash_core.optimization.infeasibility import diagnose_infeasibility
@@ -123,9 +123,11 @@ def _no_order_diagnostics(
         elif not matching:
             reason = "NO_PURCHASE_NO_VALID_SUPPLIER"
         elif not eligible:
+            # Keep diagnostics on the same delivery-calendar semantics as
+            # the solver, FEFO re-simulation, and Critic.
             arrivals = [
-                offer.order_date + timedelta(days=offer.lead_time_days)
-                for offer in matching
+                arrival for offer in matching
+                if (arrival := supplier_arrival_date(offer)) is not None
             ]
             reason = (
                 "NO_PURCHASE_ARRIVES_TOO_LATE"

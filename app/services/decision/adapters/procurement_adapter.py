@@ -12,6 +12,8 @@ from app.services.budget_resolver import BudgetResolver
 from app.services.business_constraint_resolver import BusinessConstraintResolver
 from app.services.shortage_economics import build_shortage_economics
 from app.services.procurement_planning_service import ProcurementPlanningService
+from app.core.business_time import planning_end_date, planning_start_date
+from app.core.exceptions import PlanningError
 from app.models.operations import ForecastResidualModel
 from app.models.business import ProductModel
 from app.services.decision.adapters.bom_adapter import CoreBomAdapter
@@ -45,15 +47,28 @@ class CoreProcurementAdapter:
         rows_by_ingredient = defaultdict(list)
         for row in demand_rows:
             rows_by_ingredient[row.ingredient_id].append(row)
-        decision_date = forecast.cutoff_date
-        horizon_end = max(row.target_date for row in demand_rows)
+        # Core's ``decision_date`` means its first simulated/order day, not
+        # the historical as-of date.  Inventory remains read at the EOD
+        # cutoff below.
+        cutoff_date = forecast.cutoff_date
+        decision_date = planning_start_date(cutoff_date)
+        horizon_end = planning_end_date(cutoff_date, forecast.horizon_days)
+        demand_dates = {row.target_date for row in demand_rows}
+        if min(demand_dates) != decision_date or max(demand_dates) != horizon_end:
+            raise PlanningError(
+                "FORECAST_HORIZON_MISMATCH",
+                "Forecast demand must exactly cover the planning horizon.",
+                {"cutoff_date": cutoff_date.isoformat(), "planning_start_date": decision_date.isoformat(),
+                 "planning_end_date": horizon_end.isoformat(),
+                 "forecast_target_min": min(demand_dates).isoformat(), "forecast_target_max": max(demand_dates).isoformat()},
+            )
         lots = []
         offers = []
         inbound = []
-        open_inbound = self.legacy_state._open_inbound(store_id, decision_date) if use_open_purchase_orders else {}
+        open_inbound = self.legacy_state._open_inbound(store_id, cutoff_date) if use_open_purchase_orders else {}
         for ingredient_id, rows in rows_by_ingredient.items():
             unit = rows[0].unit
-            for row in self.legacy_state._lots(store_id, ingredient_id, decision_date):
+            for row in self.legacy_state._lots(store_id, ingredient_id, cutoff_date):
                 lots.append(InventoryLot(
                     lot_id=row["lot_id"], store_id=store_id, ingredient_id=ingredient_id,
                     quantity_remaining=float(row["quantity"]), unit=unit,

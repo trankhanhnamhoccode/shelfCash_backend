@@ -28,8 +28,10 @@ def is_expired(
     return lot.expiry_date <= simulation_date
 
 
-def fefo_sort_key(lot: InventoryLot) -> tuple[date, date, str]:
-    return (lot.expiry_date or date.max, lot.received_date, lot.lot_id)
+def fefo_sort_key(lot: InventoryLot) -> tuple[date, int, date, str]:
+    # Unknown receipt dates are never replaced with a snapshot date.  They
+    # sort after known receipt dates for equal expiry, then use stable lot ID.
+    return (lot.expiry_date or date.max, lot.received_date is None, lot.received_date or date.max, lot.lot_id)
 
 
 def consume_fefo(

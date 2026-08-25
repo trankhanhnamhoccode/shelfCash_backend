@@ -26,6 +26,10 @@ def test_planner_moq_pack_supplier_budget_strategies_and_resimulation(session_fa
     assert by["protected"]["budget_trace"]["source"] == "request_override"
     assert recommended=="balanced" and by["balanced"]["projected_shortage_quantity"]==0
     assert by["balanced"]["shelf_life_trace"] == {}
+    # A zero-lead supplier may arrive on the first planning day, but not on
+    # the EOD historical cutoff (2026-08-03).
+    assert by["balanced"]["lines"][0]["order_date"] == date(2026,8,4)
+    assert by["balanced"]["lines"][0]["expected_arrival_date"] == date(2026,8,4)
 
 
 def _projection(unit, daily):

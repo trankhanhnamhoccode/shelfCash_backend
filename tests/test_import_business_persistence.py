@@ -399,8 +399,8 @@ def test_row_issue_policies_atomic_partial_and_preview(client):
 
 
 def test_remaining_canonical_fields_are_persisted(client):
-    inventory = b"day,ingredient,qty,unit,warehouse\n2026-01-01,Milk,10,l,Cold Room\n"
-    assert upload_confirm_process(client, inventory, {"day":"snapshot_date","ingredient":"ingredient_name","qty":"on_hand","unit":"unit","warehouse":"warehouse_name"}, "inventory")[1].status_code == 200
+    inventory = b"day,ingredient,qty,unit,batch,warehouse\n2026-01-01,Milk,10,l,MILK-001,Cold Room\n"
+    assert upload_confirm_process(client, inventory, {"day":"snapshot_date","ingredient":"ingredient_name","qty":"on_hand","unit":"unit","batch":"batch_id","warehouse":"warehouse_name"}, "inventory")[1].status_code == 200
     usage = b"day,ingredient,qty,unit,source,waste\n2026-01-02,Milk,2,l,pos,0.25\n"
     assert upload_confirm_process(client, usage, {"day":"date","ingredient":"ingredient_name","qty":"quantity_used","unit":"unit","source":"source","waste":"waste_quantity"}, "usage_history")[1].status_code == 200
     recipe = b"product,ingredient,qty,unit,yield_qty,yield_unit,version,effective\nLatte,Milk,1,l,2,cup,1,2026-01-01\n"
@@ -515,7 +515,7 @@ def test_supplier_packaging_import_converts_only_package_size(client):
     mapping = {
         "supplier": "supplier_name", "ingredient": "ingredient_name",
         "moq": "minimum_order_quantity", "order": "order_unit",
-        "pack": "package_size", "base": "package_base_unit",
+        "pack": "package_size", "base": "package_base_unit", "price": "unit_price", "lead": "lead_time_days",
         "lead": "lead_time_days", "cost": "unit_price",
     }
     csv = (
@@ -557,10 +557,11 @@ def test_supplier_package_size_converts_to_existing_ingredient_base(client):
         "supplier": "supplier_name", "ingredient": "ingredient_name",
         "moq": "minimum_order_quantity", "order": "order_unit",
         "pack": "package_size", "base": "package_base_unit",
+        "price": "unit_price", "lead": "lead_time_days",
     }
     csv = (
-        b"supplier,ingredient,moq,order,pack,base\n"
-        b"ABC,Flour,2,bag,5000,g\n"
+        b"supplier,ingredient,moq,order,pack,base,price,lead\n"
+        b"ABC,Flour,2,bag,5000,g,0,0\n"
     )
     _, response = upload_confirm_process(
         client, csv, mapping, "supplier_constraints"

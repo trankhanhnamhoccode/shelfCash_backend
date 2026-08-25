@@ -20,6 +20,7 @@ dist/
 *.egg-info/
 runtime/uploads/*
 !runtime/uploads/.gitkeep
+runtime/live_uploads/*
 runtime/results/*
 !runtime/results/.gitkeep
 runtime/*.db

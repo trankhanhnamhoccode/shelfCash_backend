@@ -1,7 +1,7 @@
 CANONICAL_SCHEMAS = {
     "inventory": {
-        "fields": ["snapshot_date", "ingredient_name", "on_hand", "unit", "expiry_date", "batch_id", "warehouse_name"],
-        "core_fields": ["ingredient_name", "on_hand"],
+        "fields": ["snapshot_date", "ingredient_name", "batch_id", "on_hand", "unit", "received_date", "expiry_date", "supplier_name", "warehouse_name"],
+        "core_fields": ["snapshot_date", "ingredient_name", "batch_id", "on_hand", "unit"],
     },
     "sales_history": {
         "fields": ["date", "product_name", "quantity_sold", "unit", "selling_price", "revenue", "is_stockout", "promotion_name"],

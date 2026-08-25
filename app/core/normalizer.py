@@ -4,7 +4,7 @@ from typing import Any
 
 import pandas as pd
 
-DATE_FIELDS = {"date", "snapshot_date", "expiry_date", "effective_date", "purchase_date"}
+DATE_FIELDS = {"date", "snapshot_date", "received_date", "expiry_date", "effective_date", "purchase_date"}
 BOOLEAN_FIELDS = {"is_stockout", "is_weekend", "is_holiday", "is_store_closed", "is_promotion"}
 UNIT_FIELDS = {"unit", "ingredient_unit", "yield_unit", "package_base_unit"}
 NUMERIC_FIELDS = {

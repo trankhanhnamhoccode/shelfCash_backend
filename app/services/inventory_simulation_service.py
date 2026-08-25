@@ -53,4 +53,5 @@ class InventorySimulationService:
 
     @staticmethod
     def _fefo(lot):
-        return (lot.get("expiry_date") or date.max,lot.get("received_date") or date.min,str(lot.get("lot_id")))
+        received=lot.get("received_date")
+        return (lot.get("expiry_date") or date.max,received is None,received or date.max,str(lot.get("lot_id")))

@@ -43,6 +43,13 @@ def test_core_decision_package_is_persisted_and_reloaded(client):
     }
     assert package["ingredient_demand"][0]["p50"] == 2.0
     assert package["ingredient_demand"][0]["target_date"] == "2026-08-04"
+    # The forecast cutoff is an EOD snapshot.  Core ``decision_date`` and
+    # exact FEFO must both begin on forecast day one, never on the cutoff.
+    assert package["inventory_risk"]["simulation_start_date"] == "2026-08-04"
+    assert package["inventory_risk"]["simulation_end_date"] == "2026-08-04"
+    order = package["recommended_plan"]["items"][0]
+    assert order["order_date"] == "2026-08-04"
+    assert order["arrival_date"] == "2026-08-04"  # explicit zero lead time
     with sf() as s:
         s.get(RecipeLineModel, "decision-line").quantity = Decimal("2")
         s.commit()

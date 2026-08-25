@@ -247,7 +247,7 @@ class InventoryLotModel(Base):
         UniqueConstraint("source_import_id", "source_profile_id", "source_row_hash", name="uq_inventory_lot_provenance"),
         CheckConstraint("initial_quantity >= 0", name="ck_inventory_lot_quantity"),
         CheckConstraint("unit_cost IS NULL OR unit_cost >= 0", name="ck_inventory_lot_cost"),
-        CheckConstraint("expiry_date IS NULL OR expiry_date >= received_date", name="ck_inventory_lot_dates"),
+        CheckConstraint("expiry_date IS NULL OR received_date IS NULL OR expiry_date >= received_date", name="ck_inventory_lot_dates"),
         CheckConstraint("version >= 1", name="ck_inventory_lot_version"),
         CheckConstraint(UNIT_CHECK, name="ck_inventory_lot_unit"),
         Index("ix_inventory_lots_store_ingredient", "store_id", "ingredient_id"),
@@ -260,7 +260,8 @@ class InventoryLotModel(Base):
     supplier_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("suppliers.supplier_id"))
     batch_code: Mapped[str | None] = mapped_column(String(128))
     warehouse_name: Mapped[str | None] = mapped_column(String(255))
-    received_date: Mapped[date] = mapped_column(Date, nullable=False)
+    received_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    received_date_status: Mapped[str] = mapped_column(String(32), nullable=False, default="legacy_unknown")
     expiry_date: Mapped[date | None] = mapped_column(Date)
     initial_quantity: Mapped[Decimal] = mapped_column(Numeric(20, 6), nullable=False)
     unit: Mapped[str] = mapped_column(String(16), nullable=False)
