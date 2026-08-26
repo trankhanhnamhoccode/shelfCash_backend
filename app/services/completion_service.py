@@ -375,7 +375,7 @@ class CompletionService:
        if batch_code is not None:
         lot=s.scalar(select(InventoryLotModel).where(InventoryLotModel.store_id==store,InventoryLotModel.ingredient_id==line.ingredient_id,InventoryLotModel.batch_code==batch_code))
        if lot is None:
-        lot_id=str(uuid4());lot=InventoryLotModel(lot_id=lot_id,store_id=store,ingredient_id=line.ingredient_id,supplier_id=po.supplier_id,batch_code=batch_code,received_date=receipt_date,expiry_date=lot_in.expiry_date,initial_quantity=qty,unit=line.unit,unit_cost=line.unit_cost,source="purchase_order",version=1);s.add(lot);s.flush()
+        lot_id=str(uuid4());lot=InventoryLotModel(lot_id=lot_id,store_id=store,ingredient_id=line.ingredient_id,supplier_id=po.supplier_id,batch_code=batch_code,received_date=receipt_date,received_date_status="declared",expiry_date=lot_in.expiry_date,initial_quantity=qty,unit=line.unit,unit_cost=line.unit_cost,source="purchase_order",version=1);s.add(lot);s.flush()
        else:
         conflicts=[]
         if lot.unit!=line.unit:conflicts.append("unit")

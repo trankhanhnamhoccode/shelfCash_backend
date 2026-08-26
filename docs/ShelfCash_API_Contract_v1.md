@@ -292,6 +292,7 @@ BACKEND_NOT_CONFIGURED
   "unit": "lít",
   "unit_cost": 32000,
   "received_date": "2026-07-25",
+  "received_date_status": "declared",
   "expiry_date": "2026-08-03",
   "supplier_id": "654175b2-d265-46c9-ad2b-cab520e7c29c",
   "supplier": "ABC Food",

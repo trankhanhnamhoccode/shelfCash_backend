@@ -234,6 +234,11 @@ def test_purchase_order_budget_and_inventory_state_machine(client, session_facto
         lot = s.scalar(select(InventoryLotModel))
         assert po_line.shelf_life_days == 5
         assert lot.expiry_date == date.today() + timedelta(days=2)
+        assert lot.received_date == date.fromisoformat(receive_body["received_at"][:10])
+        assert lot.received_date_status == "declared"
+    inventory = client.get("/api/v1/stores/STORE_001/inventory").json()["items"]
+    assert inventory[0]["received_date"] == receive_body["received_at"][:10]
+    assert inventory[0]["received_date_status"] == "declared"
 
 
 def test_inventory_count_adjustment_atomic_version_and_replay(client, session_factory):
