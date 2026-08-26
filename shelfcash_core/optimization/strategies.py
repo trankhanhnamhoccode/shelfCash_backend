@@ -16,7 +16,7 @@ def default_strategy_profiles() -> list[StrategyProfile]:
             waste_penalty=3,
             cash_penalty=1,
             cvar_weight=0,
-            minimum_acceptable_fill_rate=0.80,
+            minimum_acceptable_fill_rate=0.60,
             maximum_acceptable_stockout_probability=0.35,
         ),
         StrategyProfile(
@@ -26,7 +26,7 @@ def default_strategy_profiles() -> list[StrategyProfile]:
             waste_penalty=1,
             cash_penalty=0.2,
             cvar_weight=0.25,
-            minimum_acceptable_fill_rate=0.90,
+            minimum_acceptable_fill_rate=0.60,
             maximum_acceptable_stockout_probability=0.15,
         ),
         StrategyProfile(

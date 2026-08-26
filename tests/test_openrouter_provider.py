@@ -317,6 +317,36 @@ async def test_generate_json_timeout(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_generate_json_reports_token_limit_and_preserves_raw_content(monkeypatch):
+    provider = OpenRouterQwenProvider(Settings(openrouter_api_key="mock-key"))
+    partial_json = '{"partial": '
+
+    async def mock_post(url, json, **kwargs):
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{
+                    "finish_reason": "length",
+                    "native_finish_reason": "max_tokens",
+                    "message": {"content": partial_json},
+                }],
+                "usage": {"completion_tokens": 800, "total_tokens": 900},
+            },
+            request=httpx.Request("POST", url),
+        )
+
+    client = await provider._get_client()
+    monkeypatch.setattr(client, "post", mock_post)
+    context = {}
+    with pytest.raises(LLMProviderError) as exc_info:
+        await provider.generate_json("system", {}, request_context=context)
+    assert exc_info.value.details["failure_stage"] == LLMFailureStage.TOKEN_LIMIT.value
+    assert context["openrouter_raw_content"] == partial_json
+    assert context["openrouter_metadata"]["finish_reason"] == "length"
+    await provider.close()
+
+
+@pytest.mark.asyncio
 async def test_generate_json_network_error_retries_once(monkeypatch):
     provider = OpenRouterQwenProvider(Settings(openrouter_api_key="mock-key"))
     calls = 0

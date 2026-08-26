@@ -22,7 +22,7 @@ from app.decision_intelligence.contracts import (
     WhatIfRiskChange,
     WhatIfStrategyChange,
 )
-from app.llm.tasks import LLMTask
+from app.llm.tasks import LLMFailureStage, LLMTask
 
 
 class WhatIfEvidenceFact(BaseModel):
@@ -237,6 +237,9 @@ class WhatIfNarrativeProvider:
         fallback = self.deterministic_fallback(decision_run_id, facts)
         if not self.llm_provider or not self.llm_provider.available:
             return fallback
+        raw = None
+        request_context: dict[str, Any] = {"decision_run_id": decision_run_id, "what_if": True}
+        failure_stage = LLMFailureStage.UNKNOWN.value
         try:
             payload = {
                 "intent": "WHAT_IF",
@@ -253,12 +256,41 @@ class WhatIfNarrativeProvider:
                 "You narrate grounded What-if results in concise Vietnamese. "
                 "Use intervention wording only when the cited evidence includes both the mutation and its computed outcome.", payload,
                 task=LLMTask.DECISION_NARRATIVE,
-                request_context={"decision_run_id": decision_run_id, "what_if": True},
+                request_context=request_context,
             ))
-            typed = DecisionNarrativeLLMResponse.model_validate(raw)
-            return self._guard(decision_run_id, typed, facts)
-        except Exception:
-            return fallback
+            try:
+                typed = DecisionNarrativeLLMResponse.model_validate(raw)
+            except ValidationError as exc:
+                failure_stage = LLMFailureStage.SCHEMA_VALIDATION.value
+                raise ValueError("what_if_narrative_schema_validation_failed") from exc
+            response = self._guard(decision_run_id, typed, facts)
+            return response.model_copy(update={
+                "raw_response": request_context.get("openrouter_raw_content", raw),
+                "llm_diagnostics": {
+                    "status": "success",
+                    "failure_stage": None,
+                    "metadata": request_context.get("openrouter_metadata", {}),
+                },
+            })
+        except Exception as exc:
+            details = getattr(exc, "details", {})
+            if failure_stage == LLMFailureStage.UNKNOWN.value and isinstance(details, dict):
+                failure_stage = str(details.get("failure_stage") or failure_stage)
+            raw_response = request_context.get("openrouter_raw_content", raw)
+            if raw_response is None:
+                raw_response = request_context.get("openrouter_raw_response")
+            return fallback.model_copy(update={
+                "raw_response": raw_response,
+                "llm_diagnostics": {
+                    "status": "failed",
+                    "failure_stage": failure_stage,
+                    "error_type": type(exc).__name__,
+                    "error_message": str(exc),
+                    "http_status": getattr(exc, "http_status", None),
+                    "details": details if isinstance(details, dict) else {},
+                    "metadata": request_context.get("openrouter_metadata", {}),
+                },
+            })
 
     def _guard(self, decision_run_id, raw, facts) -> DecisionExplanationResponse:
         by_id = {item.evidence_id: item for item in facts.evidence}

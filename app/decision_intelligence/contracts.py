@@ -57,6 +57,11 @@ class AssistantSummary(_Contract):
     warning_summary: str | None = None
     source: Literal["llm", "deterministic_fallback"]
     grounded: bool
+    # Exact model output is retained separately from the validated summary.
+    raw_response: dict[str, Any] | str | None = None
+    # Transport, parsing and validation outcome. This intentionally remains
+    # public so callers can distinguish a real Qwen answer from a fallback.
+    llm_diagnostics: dict[str, Any] | None = None
 
 
 class RiskBrief(_Contract):
@@ -204,6 +209,7 @@ class DecisionExplanationResponse(_Contract):
     grounded: bool; provider: str
     authority: Literal["HYPOTHETICAL"] | None = None
     raw_response: dict[str, Any] | str | None = None
+    llm_diagnostics: dict[str, Any] | None = None
 
 
 class WhatIfOrderChange(_Contract):

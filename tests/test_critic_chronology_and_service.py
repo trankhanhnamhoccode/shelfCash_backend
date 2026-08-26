@@ -19,9 +19,15 @@ from shelfcash_core.optimization.contracts import (
 )
 from shelfcash_core.optimization.critic import critique_procurement_plan
 from shelfcash_core.optimization.model_data import supplier_arrival_date
+from shelfcash_core.optimization.strategies import default_strategy_profiles
 
 
 DECISION_DATE = date(2026, 8, 12)  # Wednesday
+
+
+def test_default_lean_fill_rate_threshold_is_60_percent():
+    profiles = {profile.name: profile for profile in default_strategy_profiles()}
+    assert profiles["LEAN"].minimum_acceptable_fill_rate == pytest.approx(0.60)
 
 
 def _offer(*, delivery_days=None, lead_time_days=1):
@@ -178,10 +184,10 @@ def test_protected_service_uses_exact_fill_when_weighted_risk_metrics_are_unavai
 @pytest.mark.parametrize(
     ("name", "floor", "quantity", "passes"),
     [
-        ("BALANCED", .90, 91, True),
-        ("BALANCED", .90, 89, False),
-        ("LEAN", .80, 81, True),
-        ("LEAN", .80, 79, False),
+        ("BALANCED", .60, 61, True),
+        ("BALANCED", .60, 59, False),
+        ("LEAN", .60, 61, True),
+        ("LEAN", .60, 59, False),
     ],
 )
 def test_exact_safety_floor_preserves_lean_and_balanced_policy(name, floor, quantity, passes):

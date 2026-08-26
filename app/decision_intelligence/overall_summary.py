@@ -168,6 +168,12 @@ class OverallSummaryProvider:
                 warning_summary=typed.warning_summary.text if typed.warning_summary else None,
                 source="llm",
                 grounded=True,
+                raw_response=request_context.get("openrouter_raw_content", raw),
+                llm_diagnostics={
+                    "status": "success",
+                    "failure_stage": None,
+                    "metadata": request_context.get("openrouter_metadata", {}),
+                },
             )
         except Exception as exc:
             details = getattr(exc, "details", {})
@@ -183,7 +189,21 @@ class OverallSummaryProvider:
                 getattr(profile, "model", None), metadata.get("resolved_provider"),
                 failure_stage, type(exc).__name__,
             )
-            return fallback
+            raw_response = request_context.get("openrouter_raw_content")
+            if raw_response is None:
+                raw_response = request_context.get("openrouter_raw_response")
+            return fallback.model_copy(update={
+                "raw_response": raw_response,
+                "llm_diagnostics": {
+                    "status": "failed",
+                    "failure_stage": failure_stage,
+                    "error_type": type(exc).__name__,
+                    "error_message": str(exc),
+                    "http_status": getattr(exc, "http_status", None),
+                    "details": details if isinstance(details, dict) else {},
+                    "metadata": metadata,
+                },
+            })
 
     def _run_gateway(self, payload: dict[str, Any], request_context: dict[str, Any]) -> dict[str, Any]:
         coroutine = self.llm_provider.generate_json(

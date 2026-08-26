@@ -425,7 +425,14 @@ class DecisionNarrativeProvider:
                 failure_stage = LLMFailureStage.GROUNDING.value
                 raise
             logger.info("decision_narrative_grounding_passed request_id=%s decision_run_id=%s task=%s duration_ms=%d", request_id, brief.decision_run_id, LLMTask.DECISION_NARRATIVE.value, int((time.monotonic() - started) * 1000))
-            return response.model_copy(update={"raw_response": request_context.get("openrouter_raw_content", raw)})
+            return response.model_copy(update={
+                "raw_response": request_context.get("openrouter_raw_content", raw),
+                "llm_diagnostics": {
+                    "status": "success",
+                    "failure_stage": None,
+                    "metadata": request_context.get("openrouter_metadata", {}),
+                },
+            })
         except Exception as exc:
             details = getattr(exc, "details", {})
             if failure_stage == LLMFailureStage.UNKNOWN.value and isinstance(details, dict):
@@ -448,12 +455,25 @@ class DecisionNarrativeProvider:
                 request_id, brief.decision_run_id, LLMTask.DECISION_NARRATIVE.value, configured_model, resolved_provider,
                 failure_stage, int((time.monotonic() - started) * 1000),
             )
-            update_dict: dict[str, Any] = {"provider": "deterministic_fallback"}
+            update_dict: dict[str, Any] = {
+                "provider": "deterministic_fallback",
+                "llm_diagnostics": {
+                    "status": "failed",
+                    "failure_stage": failure_stage,
+                    "error_type": type(exc).__name__,
+                    "error_message": str(exc),
+                    "http_status": getattr(exc, "http_status", None),
+                    "details": details,
+                    "metadata": metadata,
+                },
+            }
             raw_content = request_context.get("openrouter_raw_content")
             if raw_content is not None:
                 update_dict["raw_response"] = raw_content
             elif raw is not None:
                 update_dict["raw_response"] = raw
+            elif request_context.get("openrouter_raw_response") is not None:
+                update_dict["raw_response"] = request_context["openrouter_raw_response"]
             else:
                 update_dict["raw_response"] = {"failure_stage": failure_stage, "reason": type(exc).__name__}
             return fallback.model_copy(update=update_dict)

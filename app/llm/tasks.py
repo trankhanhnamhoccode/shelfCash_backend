@@ -15,6 +15,7 @@ class LLMTask(str, Enum):
 class LLMFailureStage(str, Enum):
     HTTP = "HTTP"
     TIMEOUT = "TIMEOUT"
+    TOKEN_LIMIT = "TOKEN_LIMIT"
     NETWORK = "NETWORK"
     EMPTY_RESPONSE = "EMPTY_RESPONSE"
     CONTENT_EXTRACTION = "CONTENT_EXTRACTION"

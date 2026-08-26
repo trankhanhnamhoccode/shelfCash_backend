@@ -145,6 +145,15 @@ class OpenRouterLLMGateway(LLMProvider):
             return str(details["failure_stage"])
         return LLMFailureStage.UNKNOWN.value
 
+    @staticmethod
+    def _is_token_limit(metadata: dict[str, Any]) -> bool:
+        """Recognize provider truncation before attempting to parse partial JSON."""
+        reasons = {
+            str(metadata.get(key) or "").strip().lower()
+            for key in ("finish_reason", "native_finish_reason")
+        }
+        return bool(reasons & {"length", "max_tokens", "max_token", "token_limit"})
+
     def _provider_error(
         self,
         message: str,
@@ -255,6 +264,8 @@ class OpenRouterLLMGateway(LLMProvider):
         assert response is not None
         duration_ms = int((time.monotonic() - started) * 1000)
         if response.status_code >= 400:
+            if request_context is not None:
+                request_context["openrouter_raw_response"] = response.text
             try:
                 error_data = response.json()
                 error_metadata = self._metadata(error_data) if isinstance(error_data, dict) else {}
@@ -270,8 +281,11 @@ class OpenRouterLLMGateway(LLMProvider):
                 message, status = f"OpenRouter upstream server error ({response.status_code})", 502
             else:
                 message, status = f"OpenRouter HTTP error ({response.status_code})", response.status_code
+            response_text = response.text.lower()
             stage = (
-                LLMFailureStage.STRUCTURED_OUTPUT_FAILURE
+                LLMFailureStage.TOKEN_LIMIT
+                if response.status_code == 400 and any(token in response_text for token in ("max_tokens", "token limit", "context length", "token quota"))
+                else LLMFailureStage.STRUCTURED_OUTPUT_FAILURE
                 if response.status_code == 400 and profile.structured_output
                 else LLMFailureStage.HTTP
             )
@@ -285,6 +299,8 @@ class OpenRouterLLMGateway(LLMProvider):
         try:
             data = response.json()
         except Exception as exc:
+            if request_context is not None:
+                request_context["openrouter_raw_response"] = response.text
             raise self._provider_error(
                 "OpenRouter returned an invalid response envelope", stage=LLMFailureStage.JSON_PARSE,
                 task=task, profile=profile,
@@ -319,6 +335,13 @@ class OpenRouterLLMGateway(LLMProvider):
         if request_context is not None:
             request_context["openrouter_raw_content"] = raw_text
         metadata = self._metadata(data, choice)
+        if request_context is not None:
+            request_context["openrouter_metadata"] = metadata
+        if self._is_token_limit(metadata):
+            raise self._provider_error(
+                "OpenRouter completion reached its token limit", stage=LLMFailureStage.TOKEN_LIMIT,
+                task=task, profile=profile, metadata=metadata,
+            )
         try:
             content = raw_text.strip()
             if content.startswith("```"):
@@ -350,8 +373,6 @@ class OpenRouterLLMGateway(LLMProvider):
         # schema/grounding fallback log the provider selected for the successful
         # OpenRouter generation without adding transport metadata to the API
         # response or raw business payload.
-        if request_context is not None:
-            request_context["openrouter_metadata"] = metadata
         return parsed
 
     async def map_sheet(self, profile, canonical_schemas: dict, rule_suggestion: MappingSuggestion) -> MappingSuggestion:
