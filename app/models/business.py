@@ -274,7 +274,9 @@ class InventoryLotModel(Base):
     reconciliation_key: Mapped[str | None] = mapped_column(String(64))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now)
-    last_counted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Latest business date on which this lot was physically counted.  The
+    # full timestamped audit trail remains in inventory_movements.
+    snapshot_date: Mapped[date | None] = mapped_column(Date)
 
 
 class InventoryMovementModel(Base):

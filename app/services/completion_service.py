@@ -158,7 +158,7 @@ class CompletionService:
     before=Decimal(s.scalar(select(func.coalesce(func.sum(InventoryMovementModel.quantity_delta),0)).where(InventoryMovementModel.store_id==store,InventoryMovementModel.lot_id==lot.lot_id)))
     if kind=="inventory_count":
      target=convert_quantity(line.counted_quantity,line.unit,lot.unit);delta=target-before;occurred=body.counted_at;mtype="physical_count_adjustment"
-     lot.last_counted_at=body.counted_at
+     lot.snapshot_date=body.counted_at.date()
     else:
      if line.reason not in allowed:raise ValidationError("reason không hợp lệ.")
      delta=convert_quantity(line.quantity_delta,line.unit,lot.unit)

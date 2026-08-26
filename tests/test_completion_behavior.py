@@ -253,6 +253,7 @@ def test_inventory_count_adjustment_atomic_version_and_replay(client, session_fa
         headers={"Idempotency-Key": "count-1"})
     assert counted.status_code == 201
     assert counted.json()["adjustments"][0]["quantity_delta"] == "-1.000000"
+    assert client.get("/api/v1/stores/STORE_001/inventory").json()["items"][0]["snapshot_date"] == now.date().isoformat()
     adjusted = client.post("/api/v1/stores/STORE_001/inventory-adjustments",
         json={"occurred_at": now.isoformat(), "reference": "WASTE-1", "lines": [{
             "lot_id": "lot-1", "expected_version": 2,

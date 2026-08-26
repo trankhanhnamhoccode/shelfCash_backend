@@ -344,7 +344,7 @@ remaining_budget
   "supplier_id": "654175b2-d265-46c9-ad2b-cab520e7c29c",
   "supplier": "ABC Food",
   "status": "expiring",
-  "last_counted_at": "2026-07-28T09:00:00+07:00",
+  "snapshot_date": "2026-07-28",
   "version": 3
 }
 ```

@@ -244,6 +244,7 @@ class ImportBusinessPersistenceService:
                     source_profile_id=sheet["profile_id"], source_row_hash=row_hash,
                     reconciliation_key=None, version=1,
                     warehouse_name=row.get("warehouse_name"),
+                    snapshot_date=snapshot_date,
                 )
                 self.inventory.add_lot(lot)
                 self.session.flush()
@@ -265,6 +266,9 @@ class ImportBusinessPersistenceService:
                     raise InventorySnapshotError("INVENTORY_SNAPSHOT_DUPLICATE_BATCH","A different snapshot already exists for this batch/date.",{"batch_id":batch,"snapshot_date":snapshot_date.isoformat()},http_status=409)
                 delta = target - self.inventory.calculate_lot_balance(job.store_id, lot.lot_id)
                 movement_type = "physical_count_adjustment"
+            # A successful snapshot is the latest physical-count date for the
+            # lot, including when its quantity did not require a movement.
+            lot.snapshot_date = snapshot_date
             if delta:
                 self.inventory.add_movement(InventoryMovementModel(
                     movement_id=str(uuid4()), store_id=job.store_id, lot_id=lot.lot_id,

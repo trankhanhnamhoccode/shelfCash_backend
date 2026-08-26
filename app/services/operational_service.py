@@ -75,7 +75,7 @@ class OperationalService:
                     "sku":ing.sku if ing else None,"on_hand":bal,"usable_quantity":max(Decimal(0),bal-expiring-expired),
                     "expiring_quantity":expiring,"expired_quantity":expired,"unit":x.unit,"unit_cost":x.unit_cost,"batch_code":x.batch_code,"received_date":x.received_date,
                     "expiry_date":x.expiry_date,"supplier_id":x.supplier_id,"supplier":sup.supplier if sup else None,
-                    "status":status,"last_counted_at":x.last_counted_at,"version":x.version})
+                    "status":status,"snapshot_date":x.snapshot_date,"version":x.version})
             return self._wrap(items,page,size,total)
     def movements(self,store,page,size,lot=None,ingredient=None,mtype=None):
         with self.factory() as s:

@@ -181,6 +181,7 @@ def test_inventory_snapshot_reconciliation(client):
     assert response.status_code == 200
     with client.app.state.session_factory() as session:
         assert session.scalar(select(func.count()).select_from(InventoryLotModel)) == 1
+        assert session.scalar(select(InventoryLotModel.snapshot_date)) == date(2026, 1, 3)
         movements = list(session.scalars(select(InventoryMovementModel).order_by(InventoryMovementModel.created_at)))
         assert [item.movement_type for item in movements] == ["opening_balance", "physical_count_adjustment"]
         assert sum(item.quantity_delta for item in movements) == Decimal("12.000000")
