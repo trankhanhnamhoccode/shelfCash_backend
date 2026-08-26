@@ -542,7 +542,26 @@ def test_rule_mapper_uses_configured_threshold():
     lenient = map_sheet_rules(profile, confidence_threshold=0.7)
     assert strict.confidence == lenient.confidence == 0.775
     assert strict.requires_review
-    assert not lenient.requires_review
+    assert lenient.requires_review  # incomplete inventory core fields always require review
+
+
+def test_rule_mapper_maps_inventory_received_date_without_confusing_snapshot_date():
+    profile = SheetProfile(
+        file_name="inventory.csv",
+        sheet_name="inventory",
+        header_row_zero_based=0,
+        row_count=1,
+        column_count=6,
+        columns=["Ngày kiểm kê", "Ngày nhận hàng", "Nguyên liệu", "Mã lô", "Tồn kho", "ĐVT"],
+        dtypes={},
+        sample_rows=[],
+    )
+
+    suggestion = map_sheet_rules(profile)
+
+    assert suggestion.sheet_type == "inventory"
+    assert suggestion.column_mapping["Ngày kiểm kê"] == "snapshot_date"
+    assert suggestion.column_mapping["Ngày nhận hàng"] == "received_date"
 
 
 def test_audit_payload_does_not_contain_rows_or_api_key(client):

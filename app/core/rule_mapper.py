@@ -36,6 +36,7 @@ ALIASES = {
     "unit": ["don vi", "dv", "dvt", "unit"],
     "date": ["ngay", "ngay gd", "date"],
     "snapshot_date": ["ngay kiem ke", "snapshot date"],
+    "received_date": ["ngay nhap kho", "ngay nhan hang", "ngay nhan kho", "ngay ve kho", "received date", "receipt date", "goods received date"],
     "on_hand": ["ton kho", "sl cuoi ngay", "so luong ton", "on hand", "quantity on hand"],
     "batch_id": ["ma lo", "batch", "lot code"],
     "expiry_date": ["hsd", "han dung", "expiry date"],

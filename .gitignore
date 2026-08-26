@@ -36,3 +36,4 @@ artifacts/
 *.pt
 *.pth
 *.h5
+run.txt

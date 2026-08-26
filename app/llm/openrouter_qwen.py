@@ -358,7 +358,11 @@ class OpenRouterLLMGateway(LLMProvider):
         system = (
             "You map Excel sheet profiles to canonical schemas. Return exactly one JSON object, "
             "with sheet_type, confidence, column_mapping, warnings, errors. Map every source column "
-            "to a valid schema field or null. Never add source columns."
+            "to a valid schema field or null. Never add source columns. For inventory sheets, map a "
+            "column that means goods-received/warehouse-receipt date (for example received date, receipt "
+            "date, ngày nhập kho, ngày nhận hàng, or ngày về kho) to received_date. Do not map the "
+            "inventory snapshot/count date to received_date; it belongs to snapshot_date. If no receipt-date "
+            "column exists, leave received_date unmapped rather than inventing a value."
         )
         user_payload = {
             "profile": profile.model_dump(mode="json"),
