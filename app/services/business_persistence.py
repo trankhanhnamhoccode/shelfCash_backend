@@ -358,7 +358,10 @@ class ImportBusinessPersistenceService:
         for index, row in enumerate(sheet["rows"]):
             ingredient = self._ingredient(job.store_id, row)
             supplier = self._supplier(job.store_id, row.get("supplier_name"))
-            day = self._date(row.get("purchase_date"), "purchase_date")
+            # ``received_date`` is the preferred explicit receipt date for
+            # new purchase-history sheets. ``purchase_date`` remains a
+            # backwards-compatible legacy fallback for existing uploads.
+            day = self._date(row.get("received_date") or row.get("purchase_date"), "received_date")
             quantity = convert_quantity(self._decimal(row.get("quantity_received"), "quantity_received"), row.get("unit"), ingredient.base_unit)
             cost = row.get("unit_price")
             cost = None if cost is None else int(self._decimal(cost, "unit_price"))

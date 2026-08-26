@@ -182,6 +182,8 @@ def validate_mapping(sheet_type: str, columns: list[str], mapping: dict[str, str
     missing = sorted(set(CANONICAL_SCHEMAS[sheet_type]["core_fields"]) - mapped)
     if missing:
         warnings.append(f"Missing core fields: {missing}")
+    if sheet_type == "purchase_history" and not ({"purchase_date", "received_date"} & mapped):
+        warnings.append("Missing core fields: ['received_date_or_purchase_date']")
     return warnings, errors
 
 

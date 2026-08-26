@@ -10,6 +10,19 @@ def validate_records(sheet_type: str, records: list[dict[str, Any]]) -> dict[str
     errors = []
     for index, record in enumerate(records):
         missing = [field for field in core if record.get(field) is None or record.get(field) == ""]
+        if sheet_type == "purchase_history" and not (
+            record.get("received_date") or record.get("purchase_date")
+        ):
+            errors.append({
+                "sheet": record.get("_source_sheet"),
+                "row": index + 1,
+                "row_number": record.get("_source_excel_row", index + 1),
+                "field": "received_date",
+                "code": "RECEIPT_DATE_MISSING",
+                "message": "Purchase history requires received_date or purchase_date.",
+                "raw_value": None,
+                "remediation": "Map the goods-received date to received_date, or provide purchase_date for legacy files.",
+            })
         if sheet_type == "recipes":
             try:
                 record["recipe_version"] = normalize_recipe_version(record.get("recipe_version"))

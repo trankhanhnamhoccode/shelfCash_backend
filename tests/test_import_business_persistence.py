@@ -195,6 +195,23 @@ def test_purchase_dedup_does_not_change_inventory(client):
     with client.app.state.session_factory() as session:
         assert session.scalar(select(func.count()).select_from(PurchaseReceiptModel)) == 1
         assert session.scalar(select(func.count()).select_from(InventoryLotModel)) == 0
+
+
+def test_purchase_history_received_date_is_persisted_as_receipt_date(client):
+    csv = b"received,ingredient,qty,unit,supplier,batch\n2026-01-03,Sugar,5,kg,ABC,B1\n"
+    mapping = {
+        "received": "received_date", "ingredient": "ingredient_name",
+        "qty": "quantity_received", "unit": "unit",
+        "supplier": "supplier_name", "batch": "batch_id",
+    }
+
+    _, response = upload_confirm_process(client, csv, mapping, "purchase_history")
+
+    assert response.status_code == 200, response.text
+    with client.app.state.session_factory() as session:
+        receipt = session.scalar(select(PurchaseReceiptModel))
+        assert receipt.receipt_date.isoformat() == "2026-01-03"
+        assert session.scalar(select(func.count()).select_from(InventoryLotModel)) == 0
         assert session.scalar(select(func.count()).select_from(InventoryMovementModel)) == 0
 
 

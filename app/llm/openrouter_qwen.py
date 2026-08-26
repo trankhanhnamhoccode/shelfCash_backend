@@ -362,7 +362,9 @@ class OpenRouterLLMGateway(LLMProvider):
             "column that means goods-received/warehouse-receipt date (for example received date, receipt "
             "date, ngày nhập kho, ngày nhận hàng, or ngày về kho) to received_date. Do not map the "
             "inventory snapshot/count date to received_date; it belongs to snapshot_date. If no receipt-date "
-            "column exists, leave received_date unmapped rather than inventing a value."
+            "column exists, leave received_date unmapped rather than inventing a value. For purchase_history "
+            "sheets, map a goods-received/receipt date to received_date; map a purchase or invoice date to "
+            "purchase_date."
         )
         user_payload = {
             "profile": profile.model_dump(mode="json"),

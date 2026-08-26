@@ -45,6 +45,12 @@ resolved ingredient/supplier, quantity, canonical unit, cost, expiry and batch.
 Thus exact receipts across imports are skipped while real batch/date/value
 changes remain distinct.
 
+For `purchase_history`, map the actual goods-received date to `received_date`.
+Legacy files may continue to use `purchase_date`; it is used only when
+`received_date` is absent. The effective date is persisted as
+`purchase_receipts.receipt_date`; this history import remains record-only and
+does not create or update an inventory lot.
+
 Ingredient resolution is ID/SKU/alias/exact normalized name/create; product is
 ID/SKU/name/create; supplier is ID/name/create. Writes always use the import
 job’s store. There is no fuzzy or Qwen entity matching.
