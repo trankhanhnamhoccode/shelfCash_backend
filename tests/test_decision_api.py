@@ -6,7 +6,8 @@ from sqlalchemy import func, select
 
 from app.models.business import (IngredientModel, InventoryLotModel, InventoryMovementModel,
     ProductModel, RecipeLineModel, RecipeVersionModel, SupplierIngredientTermModel, SupplierModel)
-from app.models.operations import ForecastPredictionModel, ForecastRunModel
+from app.models.operations import ForecastPredictionModel, ForecastResidualModel, ForecastRunModel
+from app.services.decision.adapters.procurement_adapter import CoreProcurementAdapter
 from app.models.decision import DecisionRunModel
 from app.models.planning import IngredientDemandPredictionModel, ProcurementPlanModel
 
@@ -104,3 +105,41 @@ def test_core_decision_package_is_persisted_and_reloaded(client):
     assert no_feasible.status_code == 200
     assert no_feasible.json()["hypothetical"]["recommendation"]["available"] is False
     assert no_feasible.json()["comparison"]["recommendation_changed"] is True
+
+
+def test_stochastic_residual_selection_deduplicates_repeated_forecast_runs(client):
+    sf = client.app.state.session_factory
+    origin = date(2026, 8, 12)
+    target = date(2026, 8, 13)
+    with sf() as s:
+        s.add_all([
+            ForecastRunModel(
+                forecast_run_id="residual-old", store_id="STORE_001", cutoff_date=origin,
+                horizon_days=1, quantiles_json="[]", scope_json="{}", use_latest_calendar=True,
+                status="completed", engine_status="test", request_hash="old", model_version="test-model",
+                warnings_json="[]", created_at=datetime(2026, 8, 12, 8, tzinfo=timezone.utc),
+                completed_at=datetime(2026, 8, 12, 8, tzinfo=timezone.utc),
+            ),
+            ForecastRunModel(
+                forecast_run_id="residual-new", store_id="STORE_001", cutoff_date=origin,
+                horizon_days=1, quantiles_json="[]", scope_json="{}", use_latest_calendar=True,
+                status="completed", engine_status="test", request_hash="new", model_version="test-model",
+                warnings_json="[]", created_at=datetime(2026, 8, 12, 9, tzinfo=timezone.utc),
+                completed_at=datetime(2026, 8, 12, 9, tzinfo=timezone.utc),
+            ),
+        ])
+        for run_id, residual_id, p50 in (
+            ("residual-old", "residual-old-value", Decimal("2")),
+            ("residual-new", "residual-new-value", Decimal("3")),
+        ):
+            s.add(ForecastResidualModel(
+                residual_id=residual_id, store_id="STORE_001", forecast_run_id=run_id,
+                product_id="residual-product", target_date=target, horizon=1,
+                actual_value=Decimal("5"), predicted_p25=Decimal("1"), predicted_p50=p50,
+                predicted_p75=Decimal("6"), residual=Decimal("2"), forecast_origin=origin,
+                model_version="test-model", created_at=datetime(2026, 8, 13, tzinfo=timezone.utc),
+            ))
+        s.commit()
+        residuals = CoreProcurementAdapter._canonical_residuals("STORE_001", "test-model", s)
+
+    assert [item.residual_id for item in residuals] == ["residual-new-value"]

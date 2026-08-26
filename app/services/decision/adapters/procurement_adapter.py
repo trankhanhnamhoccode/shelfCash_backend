@@ -14,7 +14,7 @@ from app.services.shortage_economics import build_shortage_economics
 from app.services.procurement_planning_service import ProcurementPlanningService
 from app.core.business_time import planning_end_date, planning_start_date
 from app.core.exceptions import PlanningError
-from app.models.operations import ForecastResidualModel
+from app.models.operations import ForecastResidualModel, ForecastRunModel
 from app.models.business import ProductModel
 from app.services.decision.adapters.bom_adapter import CoreBomAdapter
 from shelfcash_core.inventory.contracts import (
@@ -36,6 +36,42 @@ class CoreProcurementAdapter:
     weights.  Persisted walk-forward OOS residuals are used only for optional
     fixed-plan risk evaluation, never as stochastic optimizer input.
     """
+
+    @staticmethod
+    def _canonical_residuals(store_id, model_version, session):
+        """Return one newest residual per out-of-sample observation.
+
+        Forecast runs are immutable audit records and users may legitimately
+        rerun the same cutoff.  The residual table therefore keeps rows per
+        forecast run, while scenario generation requires each logical OOS
+        observation only once.
+        """
+        candidates = session.execute(
+            select(ForecastResidualModel)
+            .join(ForecastRunModel,
+                  ForecastRunModel.forecast_run_id == ForecastResidualModel.forecast_run_id)
+            .where(
+                ForecastResidualModel.store_id == store_id,
+                ForecastResidualModel.model_version == model_version,
+            )
+            .order_by(
+                ForecastRunModel.completed_at.desc(),
+                ForecastRunModel.created_at.desc(),
+                ForecastResidualModel.created_at.desc(),
+                ForecastResidualModel.forecast_run_id.desc(),
+            )
+        ).scalars()
+        canonical = []
+        seen = set()
+        for residual in candidates:
+            key = (
+                residual.forecast_origin, residual.target_date, residual.horizon,
+                residual.store_id, residual.product_id,
+            )
+            if key not in seen:
+                canonical.append(residual)
+                seen.add(key)
+        return canonical
 
     def __init__(self, session):
         self.session = session
@@ -110,10 +146,9 @@ class CoreProcurementAdapter:
         }
         if engine_mode == "stochastic" and predictions and forecast.model_version:
             # Do not mix calibration residuals across forecast model versions.
-            residuals = list(self.session.scalars(select(ForecastResidualModel).where(
-                ForecastResidualModel.store_id == store_id,
-                ForecastResidualModel.model_version == forecast.model_version,
-            )))
+            residuals = self._canonical_residuals(
+                store_id, forecast.model_version, self.session
+            )
             if residuals:
                 frame = pd.DataFrame([{"forecast_origin": r.forecast_origin, "target_date": r.target_date, "horizon": r.horizon,
                     "store_id": r.store_id, "product_id": r.product_id, "actual": float(r.actual_value), "p25": float(r.predicted_p25),
