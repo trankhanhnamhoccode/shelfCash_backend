@@ -117,6 +117,8 @@ def test_qwen_receives_precomputed_facts_and_accepts_grounded_intervention_claim
     assert response.source == "openrouter_qwen"
     assert response.grounded is True
     assert gateway.payload["intent"] == "WHAT_IF"
+    assert gateway.payload["communication_plan"]["mutation"]
+    assert gateway.payload["communication_plan"]["primary_outcome"]
     assert all("calculate" not in str(item).lower() for item in gateway.payload["evidence"])
 
 

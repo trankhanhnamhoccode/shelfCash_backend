@@ -50,9 +50,11 @@ class _Gateway:
     def __init__(self, factory):
         self.factory = factory
         self.calls = 0
+        self.payload = None
 
     async def generate_json(self, _system, payload, **_kwargs):
         self.calls += 1
+        self.payload = payload
         return self.factory(payload)
 
 
@@ -90,6 +92,8 @@ def test_overall_summary_accepts_grounded_observation_and_derived_comparison():
     assert summary.source == "llm"
     assert summary.grounded is True
     assert "1,05" in summary.summary
+    assert gateway.payload["communication_plan"]["decision"]
+    assert gateway.payload["communication_plan"]["main_attention"] == []
 
 
 def test_overall_summary_falls_back_for_malformed_or_unsupported_causal_output():

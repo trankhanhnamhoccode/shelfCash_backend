@@ -76,7 +76,7 @@ class OpenRouterLLMGateway(LLMProvider):
         return OpenRouterTaskProfile(
             model=configured_model,
             temperature=float(getattr(self.settings, f"{prefix}_temperature", 0.0)),
-            max_tokens=int(getattr(self.settings, f"{prefix}_max_tokens", 1200 if task is LLMTask.EXCEL_MAPPING else 600 if task is LLMTask.PLAN_SUMMARY else 800)),
+            max_tokens=int(getattr(self.settings, f"{prefix}_max_tokens", 1800 if task is LLMTask.EXCEL_MAPPING else 900 if task is LLMTask.PLAN_SUMMARY else 1200)),
             timeout_seconds=float(getattr(self.settings, f"{prefix}_timeout_seconds", 60)),
             reasoning_enabled=bool(getattr(self.settings, f"{prefix}_reasoning_enabled", False)),
             structured_output=bool(getattr(self.settings, f"{prefix}_structured_output", True)),

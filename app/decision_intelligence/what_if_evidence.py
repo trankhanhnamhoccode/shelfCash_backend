@@ -23,6 +23,7 @@ from app.decision_intelligence.contracts import (
     WhatIfStrategyChange,
 )
 from app.llm.tasks import LLMFailureStage, LLMTask
+from app.decision_intelligence.communication_plan import what_if_communication_plan
 
 
 class WhatIfEvidenceFact(BaseModel):
@@ -241,11 +242,19 @@ class WhatIfNarrativeProvider:
         request_context: dict[str, Any] = {"decision_run_id": decision_run_id, "what_if": True}
         failure_stage = LLMFailureStage.UNKNOWN.value
         try:
+            plan = what_if_communication_plan([item.model_dump(mode="json") for item in facts.evidence])
+            selected_ids = set(plan.evidence_ids)
+            selected = [item.model_dump(mode="json") for item in facts.evidence if item.evidence_id in selected_ids]
             payload = {
                 "intent": "WHAT_IF",
                 "language": "vi",
                 "detail_level": "simple",
-                "evidence": [item.model_dump(mode="json") for item in facts.evidence],
+                "communication_plan": {
+                    "mutation": plan.decision,
+                    "primary_outcome": plan.main_attention[:1],
+                    "secondary_outcome": plan.main_attention[1:] + plan.supporting,
+                },
+                "evidence": selected,
                 "instruction": (
                     "Describe only this hypothetical simulation. Do not calculate values or infer mechanisms. "
                     "Treat a strategy_override as a user-requested scenario, never as an optimizer selection. "
@@ -253,8 +262,13 @@ class WhatIfNarrativeProvider:
                 ),
             }
             raw = _run_async(self.llm_provider.generate_json(
-                "You narrate grounded What-if results in concise Vietnamese. "
-                "Use intervention wording only when the cited evidence includes both the mutation and its computed outcome.", payload,
+                """Bạn diễn giải kết quả What-if của ShelfCash thành tiếng Việt ngắn gọn cho quản lý cửa hàng.
+Đây là tình huống giả định do người dùng yêu cầu, không phải strategy optimizer tự chọn. Chỉ dùng
+What-if facts được cung cấp; không tính lại, không suy luận cơ chế hay nguyên nhân ngoài facts.
+Nếu COMMUNICATION_PLAN có mutation và primary_outcome, hãy ưu tiên cấu trúc tự nhiên "Nếu [mutation],
+[primary outcome]." Secondary outcome chỉ thêm tối đa một câu khi quan trọng. Chỉ dùng baseline,
+hypothetical value và delta khi facts đã có đủ cả ba. Không lộ machine code, UUID, internal type,
+model hay implementation. Giữ claims/evidence IDs đúng schema và chỉ trả JSON.""", payload,
                 task=LLMTask.DECISION_NARRATIVE,
                 request_context=request_context,
             ))
@@ -294,8 +308,8 @@ class WhatIfNarrativeProvider:
 
     def _guard(self, decision_run_id, raw, facts) -> DecisionExplanationResponse:
         by_id = {item.evidence_id: item for item in facts.evidence}
-        used = raw.used_evidence_ids
-        if not set(used) <= set(by_id):
+        model_used = raw.used_evidence_ids
+        if not set(model_used) <= set(by_id):
             raise ValueError("unsupported_used_evidence_id")
         claims, cited = [], set()
         for claim in raw.claims:
@@ -310,8 +324,7 @@ class WhatIfNarrativeProvider:
             _validate_risk_language(claim.text, items)
             cited.update(claim.evidence_ids)
             claims.append(ExplanationClaim(type=claim.type, value=claim.text, evidence_ids=claim.evidence_ids))
-        if set(used) != cited:
-            raise ValueError("used_evidence_ids_mismatch")
+        used = cited
         # `answer` is public narrative too; it may not smuggle a number or a
         # mechanism that the structured claims did not contain.
         answer_items = [by_id[item_id] for item_id in used]
@@ -422,6 +435,8 @@ def _validate_mechanism_language(text: str):
 def _validate_raw_machine_code(text: str):
     if re.search(r"\b[A-Z][A-Z0-9]+(?:_[A-Z0-9]+)+\b", text):
         raise ValueError("raw_machine_code_in_narrative")
+    if re.search(r"\b[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}\b", text, re.IGNORECASE):
+        raise ValueError("uuid_in_narrative")
 
 
 def _validate_risk_language(text: str, items: list[WhatIfEvidenceFact]):

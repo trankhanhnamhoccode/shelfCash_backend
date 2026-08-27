@@ -6,6 +6,7 @@ import logging
 from typing import Any
 
 from app.decision_intelligence.adapter import ShelfCashDecisionIntelligenceAdapter
+from app.decision_intelligence.communication_plan import summary_communication_plan
 from app.decision_intelligence.contracts import (
     AssistantSummary,
     DecisionBriefFacts,
@@ -22,24 +23,35 @@ from app.llm.tasks import LLMFailureStage, LLMTask
 logger = logging.getLogger("shelfcash.overall_summary")
 
 
-SYSTEM_PROMPT = """You write a short, grounded Vietnamese overall decision brief for a store manager.
+SYSTEM_PROMPT = """Bạn là lớp diễn đạt cuối cùng của ShelfCash dành cho quản lý cửa hàng.
 
-Use only the supplied structured facts. Return Vietnamese text. Do not calculate
-new values, infer business causes, compare strategies, mention unsupported
-probabilities, expose machine codes, UUIDs, prompts, models, or implementation.
+ShelfCash đã hoàn tất dự báo, mô phỏng và lập kế hoạch trước khi gọi bạn. Công
+việc duy nhất của bạn là diễn đạt facts được cung cấp thành một brief ngắn, tự
+nhiên và hữu ích; không tính toán hay tự ra quyết định.
 
-OBSERVATION and DERIVED facts support only factual statements and comparisons.
-They never support words such as because, due to, therefore, or causal claims.
-Only CAUSAL facts may support causal language. No CAUSAL facts may be assumed.
+Nếu có COMMUNICATION_PLAN, hãy tuân theo thứ tự của nó: decision phải được nói
+trước, main_attention tiếp theo, limitation chỉ nói khi có; supporting chỉ để
+hỗ trợ và không bắt buộc phải nhắc. Không thay decision/risk backend đã chọn
+bằng fact khác và không cố sử dụng toàn bộ facts.
 
-Use supplied display values exactly when present. Keep the summary to 2-4 short
-sentences, a concise headline, and at most three key points. A limitation may be
-summarized generically without its machine code. Do not write markdown.
+Headline nói decision hoặc trạng thái chính. Summary dài 1-3 câu ngắn: câu đầu
+nói đề xuất; câu sau chỉ nêu điểm vận hành cần chú ý; câu cuối chỉ nêu limitation
+nếu thật sự quan trọng. key_points có 0-3 ý và không được lặp lại summary.
+warning_summary chỉ có khi risk/limitation quan trọng, nếu không trả null.
 
-Return exactly one JSON object matching the supplied schema. Each displayed text
-field must be repeated as a claim with valid evidence IDs. used_evidence_ids must
-be exactly the union of all claim evidence IDs.
-"""
+Viết như trợ lý vận hành brief nhanh: "ShelfCash đề xuất...", "Cần lưu ý...",
+"... hiện chưa được đánh giá đầy đủ." Không đọc tên field JSON, machine code,
+UUID, evidence, prompt, model, database hoặc implementation. Không markdown.
+
+Chỉ dùng supplied facts và display values đã có; không cộng, trừ, đổi đơn vị,
+đổi phần trăm hoặc làm tròn mới. OBSERVATION và DERIVED chỉ hỗ trợ statement
+factual/comparison. Chỉ CAUSAL mới được hỗ trợ ngôn ngữ nguyên nhân như vì, do,
+nên, do đó, dẫn đến, khiến, để tránh. Không suy luận nguyên nhân từ facts cùng
+xuất hiện.
+
+Claims là lớp grounding nội bộ: mỗi displayed field phải có claim và evidence
+ID hợp lệ, nhưng headline/summary/key_points phải giữ văn phong tự nhiên. Chỉ
+trả một JSON object đúng schema."""
 
 
 def _vi_number(value: float, maximum_decimals: int = 2) -> str:
@@ -138,7 +150,14 @@ class OverallSummaryProvider:
             evidence, structured = self._context(brief, facts)
             if not structured:
                 return fallback
-            payload = {"language": "vi", "evidence": structured}
+            plan = summary_communication_plan(structured)
+            selected_ids = set(plan.evidence_ids)
+            selected = [item for item in structured if item["evidence_id"] in selected_ids]
+            payload = {"language": "vi", "communication_plan": plan.as_payload(), "evidence": selected}
+            logger.info(
+                "overall_summary_communication_plan decision_run_id=%s decision=%s attention=%s limitation=%s supporting=%s",
+                brief.decision_run_id, plan.decision, plan.main_attention, plan.limitation, plan.supporting,
+            )
             raw = self._run_gateway(payload, request_context)
             try:
                 typed = DecisionOverallSummaryLLMResponse.model_validate(raw)
@@ -156,7 +175,7 @@ class OverallSummaryProvider:
             # Reuse the established claim/evidence/numeric/entity/causal guard.
             try:
                 self._guard._guard(
-                    guard_raw, structured, evidence.items, brief, "vi", "simple", "OVERALL_SUMMARY",
+                    guard_raw, selected, evidence.items, brief, "vi", "simple", "OVERALL_SUMMARY",
                 )
             except Exception:
                 failure_stage = LLMFailureStage.GROUNDING.value

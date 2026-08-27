@@ -67,6 +67,29 @@ def test_qwen_unsupported_number_and_entity_fall_back():
     assert result.provider == "deterministic_fallback"
 
 
+def test_qwen_uuid_leakage_falls_back():
+    def response(payload):
+        order = next(item for item in payload["evidence"] if item["type"] == "PROCUREMENT_QUANTITY")
+        text = "Kế hoạch đề xuất nhập 60 lít Sữa tươi cho 123e4567-e89b-12d3-a456-426614174000."
+        return {"answer": text, "claims": [{"type": "PROCUREMENT_QUANTITY", "text": text, "evidence_ids": [order["evidence_id"]]}], "used_evidence_ids": [order["evidence_id"]]}
+
+    assert DecisionNarrativeProvider(MockQwen(response), settings()).explain(
+        brief(), question="Sữa tươi", language="vi", detail_level="simple",
+    ).provider == "deterministic_fallback"
+
+
+def test_narrative_payload_has_answer_first_communication_plan():
+    gateway = MockQwen(lambda payload: {
+        "answer": "Kế hoạch đề xuất nhập 60 lít Sữa tươi.",
+        "claims": [{"type": "PROCUREMENT_QUANTITY", "text": "Kế hoạch đề xuất nhập 60 lít Sữa tươi.", "evidence_ids": [next(item["evidence_id"] for item in payload["evidence"] if item["type"] == "PROCUREMENT_QUANTITY")]}],
+        "used_evidence_ids": [],
+    })
+    result = DecisionNarrativeProvider(gateway, settings()).explain(brief(), question="Bao nhiêu Sữa tươi?", language="vi", detail_level="simple")
+
+    assert result.provider == "openrouter_qwen"
+    assert gateway.calls[0]["payload"]["communication_plan"]["answer_with"]
+
+
 def test_qwen_unsupported_safety_stock_cause_falls_back():
     def response(payload):
         order = next(item for item in payload["evidence"] if item["type"] == "PROCUREMENT_QUANTITY")
@@ -75,7 +98,7 @@ def test_qwen_unsupported_safety_stock_cause_falls_back():
     assert result.provider == "deterministic_fallback"
 
 
-def test_qwen_mismatched_used_evidence_ids_falls_back():
+def test_qwen_canonicalizes_used_evidence_ids_from_grounded_claims():
     def response(payload):
         order = next(item for item in payload["evidence"] if item["type"] == "PROCUREMENT_QUANTITY")
         return {
@@ -87,7 +110,8 @@ def test_qwen_mismatched_used_evidence_ids_falls_back():
     result = DecisionNarrativeProvider(MockQwen(response), settings()).explain(
         brief(), question="milk", language="en", detail_level="simple",
     )
-    assert result.provider == "deterministic_fallback"
+    assert result.provider == "openrouter_qwen"
+    assert result.claims[0].evidence_ids
 
 
 def test_qwen_malformed_and_unavailable_fall_back():

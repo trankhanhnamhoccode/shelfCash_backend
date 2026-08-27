@@ -18,6 +18,7 @@ from app.decision_intelligence.adapter import (
     ingredient_scoped_semantic_facts,
 )
 from app.decision_intelligence.contracts import Citation, DecisionBriefFacts, DecisionExplanationResponse, DecisionNarrativeLLMResponse, ExplanationClaim
+from app.decision_intelligence.communication_plan import narrative_communication_plan
 from app.decision_intelligence.semantic_evidence import DecisionSemanticEvidenceBuilder, SemanticFact
 from app.llm.tasks import LLMFailureStage, LLMTask
 
@@ -132,6 +133,20 @@ hoặc các kết luận tương tự nếu EVIDENCE không trực tiếp hỗ t
 Không thêm ID không dùng và không dùng ID không tồn tại trong EVIDENCE.
 
 20. Không viết chain-of-thought, quá trình suy luận hoặc giải thích cách bạn tạo câu trả lời.
+
+STYLE / ANSWER-FIRST:
+
+Khi có đủ evidence để trả lời, trả lời trực tiếp ngay ở câu đầu. Không mở đầu bằng
+"Theo thông tin được cung cấp", "Dữ liệu cho thấy", "Hệ thống ghi nhận" hoặc
+"Dựa trên kết quả". Hãy viết như trợ lý vận hành brief nhanh: "Kế hoạch đề xuất
+nhập...", "Ngày cần chú ý là...", "... có thể thiếu từ...".
+
+Nếu COMMUNICATION_PLAN được cung cấp, answer_with/decision là facts trả lời chính
+và phải được ưu tiên; supporting chỉ dùng khi cần. Khi hỏi tại sao/vì sao, chỉ trả
+lời nguyên nhân ngay câu đầu nếu answer_with có PROCUREMENT_REASON hoặc CAUSAL
+fact. Nếu không có causal fact, giữ nguyên câu "Chưa đủ dữ liệu để xác nhận nguyên
+nhân này." Không đọc JSON thành câu, không lặp cùng số liệu, và với
+target.scope=one_ingredient_only chỉ nói nguyên liệu đó.
 
 OUTPUT:
 
@@ -386,7 +401,23 @@ class DecisionNarrativeProvider:
             if not structured:
                 raise ValueError("no_retrieved_evidence")
             logger.info("decision_narrative_retrieval_completed decision_run_id=%s evidence_count=%d intent=%s target_ingredient_id=%s", brief.decision_run_id, len(structured), intent, ingredient_id)
-            payload = {"question": resolved_question, "language": language, "detail_level": detail_level, "evidence": structured}
+            plan = narrative_communication_plan(structured, str(intent))
+            selected_ids = set(plan.evidence_ids)
+            selected = [item for item in structured if item["evidence_id"] in selected_ids]
+            payload = {
+                "question": resolved_question, "language": language, "detail_level": detail_level,
+                "communication_plan": {
+                    "answer_with": plan.decision,
+                    "main_attention": plan.main_attention,
+                    "limitation": plan.limitation,
+                    "supporting": plan.supporting,
+                },
+                "evidence": selected,
+            }
+            logger.info(
+                "decision_narrative_communication_plan decision_run_id=%s intent=%s answer_with=%s attention=%s limitation=%s supporting=%s",
+                brief.decision_run_id, intent, plan.decision, plan.main_attention, plan.limitation, plan.supporting,
+            )
             if ingredient_id:
                 payload["target"] = {
                     "ingredient_name": _ingredient_display_name(brief, ingredient_id),
@@ -418,7 +449,7 @@ class DecisionNarrativeProvider:
                 raise ValueError("narrative_schema_validation_failed") from exc
             try:
                 response = self._guard(
-                    typed_raw.model_dump(mode="json"), structured, evidence.items, brief,
+                    typed_raw.model_dump(mode="json"), selected, evidence.items, brief,
                     language, detail_level, intent, target_ingredient_id=ingredient_id,
                 )
             except Exception:
@@ -494,8 +525,8 @@ class DecisionNarrativeProvider:
                     raise ValueError("target_evidence_entity_mismatch")
         claims = []
         citation_ids = set()
-        used = raw.get("used_evidence_ids")
-        if not isinstance(used, list) or not set(used) <= allowed_ids:
+        model_used = raw.get("used_evidence_ids")
+        if not isinstance(model_used, list) or not set(model_used) <= allowed_ids:
             raise ValueError("unsupported_used_evidence_id")
         claimed_evidence_ids = set()
         for claim in raw["claims"]:
@@ -523,9 +554,19 @@ class DecisionNarrativeProvider:
             claims.append(ExplanationClaim(type=claim["type"], value=claim["text"], evidence_ids=claim_source_ids))
             for evidence_id in ids:
                 citation_ids.update(structured_by_id[evidence_id].get("evidence_ids", [evidence_id]))
-        if set(used) != claimed_evidence_ids:
-            raise ValueError("used_evidence_ids_mismatch")
+        # The model must not reference an unknown ID, but Python owns the
+        # mechanically-derived union. This avoids asking a 9B model to do
+        # bookkeeping while retaining per-claim grounding validation.
+        used = claimed_evidence_ids
         self._validate_public_text(raw["answer"])
+        answer_items = [structured_by_id[evidence_id] for evidence_id in used]
+        self._validate_numbers(raw["answer"], answer_items)
+        self._validate_entities(raw["answer"], answer_items, brief)
+        self._validate_target_entity(raw["answer"], answer_items, brief, target_ingredient_id)
+        self._validate_supported_concepts(raw["answer"], answer_items)
+        self._validate_causal_language(raw["answer"], answer_items)
+        self._validate_strategy_selection_language(raw["answer"], answer_items)
+        self._validate_baseline_language(raw["answer"], answer_items)
         citations = [Citation(evidence_id=item.evidence_id, label=item.text, source_type=item.source_object) for item in evidence_items if item.evidence_id in citation_ids]
         entities = {"ingredient_ids": sorted({item.entities["ingredient_id"] for item in evidence_items if item.evidence_id in citation_ids and item.entities.get("ingredient_id")}), "supplier_ids": sorted({item.entities["supplier_id"] for item in evidence_items if item.evidence_id in citation_ids and item.entities.get("supplier_id")})}
         return DecisionExplanationResponse(source="openrouter_qwen", language=language, detail_level=detail_level, summary=raw["answer"], why_this_plan=[raw["answer"]], main_risks=brief.critic.warnings, tradeoffs=[], important_assumptions=["Narrative is grounded only in the persisted decision package."], decision_run_id=brief.decision_run_id, answer=raw["answer"], intent=str(intent).upper(), entities=entities, claims=claims, citations=citations, grounded=True, provider="openrouter_qwen", raw_response=raw)
@@ -585,6 +626,8 @@ class DecisionNarrativeProvider:
         """Machine codes are evidence identifiers, never manager-facing prose."""
         if re.search(r"\b[A-Z][A-Z0-9]+(?:_[A-Z0-9]+)+\b", text):
             raise ValueError("raw_machine_code_in_narrative")
+        if re.search(r"\b[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}\b", text, re.IGNORECASE):
+            raise ValueError("uuid_in_narrative")
 
     @staticmethod
     def _validate_supported_concepts(text: str, items: list[dict]):
