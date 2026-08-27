@@ -156,7 +156,10 @@ class ProcurementPlanningService:
                     except ValueError:pass
                 return local_business_date(movement.occurred_at,timezone_name)
             balance=sum((D(x.quantity_delta) for x in movements if effective_date(x)<=cutoff),D(0))
-            if balance>0:result.append({"lot_id":lot.lot_id,"quantity":balance,"expiry_date":lot.expiry_date,"received_date":lot.received_date})
+            if balance>0:
+                ingredient_model=self.session.get(IngredientModel,ingredient)
+                result.append({"lot_id":lot.lot_id,"quantity":balance,"expiry_date":lot.expiry_date,"received_date":lot.received_date,
+                    "expiry_tracking_mode":ingredient_model.expiry_tracking_mode if ingredient_model else "unknown"})
         return result
 
     def _open_inbound(self,store,cutoff):
@@ -170,7 +173,8 @@ class ProcurementPlanningService:
             if remaining>0 and ingredient:
                 try:quantity=convert_quantity(remaining,line.unit,ingredient.base_unit)
                 except ValidationError as exc:raise PlanningError("INVENTORY_LOT_UNIT_INVALID","Open PO unit không tương thích.",exc.details) from exc
-                result[line.ingredient_id].append({"date":po.delivery_date,"quantity":quantity,"lot_id":f"po:{po.po_id}:{line.po_line_id}","shelf_life_days":line.shelf_life_days})
+                result[line.ingredient_id].append({"date":po.delivery_date,"quantity":quantity,"lot_id":f"po:{po.po_id}:{line.po_line_id}","shelf_life_days":line.shelf_life_days,
+                    "expiry_tracking_mode":ingredient.expiry_tracking_mode})
         return result
 
     def _terms(self,store,ingredient):return list(self.session.scalars(select(SupplierIngredientTermModel).join(SupplierModel).where(

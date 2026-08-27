@@ -40,9 +40,10 @@ class CatalogRepository:
     def resolve_alias(self, store_id: str, alias: str) -> IngredientModel | None:
         return self.session.scalar(select(IngredientModel).join(IngredientAliasModel).where(IngredientAliasModel.store_id == store_id, IngredientAliasModel.normalized_alias == normalize_name(alias), IngredientModel.store_id == store_id))
 
-    def add_ingredient(self, store_id: str, name: str, base_unit: str, sku: str | None = None, source: str = "manual") -> IngredientModel:
+    def add_ingredient(self, store_id: str, name: str, base_unit: str, sku: str | None = None, source: str = "manual", expiry_tracking_mode: str | None = None) -> IngredientModel:
         self._require_store(store_id)
-        item = IngredientModel(ingredient_id=_id(), store_id=store_id, ingredient=display_name(name), normalized_name=normalize_name(name), sku=sku, base_unit=normalize_unit(base_unit), source=source)
+        item = IngredientModel(ingredient_id=_id(), store_id=store_id, ingredient=display_name(name), normalized_name=normalize_name(name), sku=sku, base_unit=normalize_unit(base_unit), source=source,
+            expiry_tracking_mode=expiry_tracking_mode or "unknown", expiry_tracking_source="declared" if expiry_tracking_mode is not None else "inferred")
         self.session.add(item)
         return item
 

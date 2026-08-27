@@ -74,9 +74,10 @@ def _decision(item: EligibleOffer, packs: int) -> ProcurementDecisionLine:
         purchase_cost=quantity * offer.unit_price,
         delivery_cost=offer.delivery_cost,
         shelf_life_days=offer.shelf_life_days,
-        projected_expiry_date=resolve_inbound_expiry(
+        expiry_tracking_mode=offer.expiry_tracking_mode,
+        projected_expiry_date=(None if offer.expiry_tracking_mode == "not_required" else resolve_inbound_expiry(
             arrival_date=item.arrival_date, shelf_life_days=offer.shelf_life_days
-        ),
+        )),
         emergency=offer.emergency,
     )
 

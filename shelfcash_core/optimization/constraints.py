@@ -78,7 +78,7 @@ def validate_plan_constraints(
             violations.append(f"DELIVERY_COST:{line.offer_id}")
         if line.shelf_life_days != offer.shelf_life_days:
             violations.append(f"SHELF_LIFE:{line.offer_id}")
-        expected_expiry = resolve_inbound_expiry(
+        expected_expiry = None if offer.expiry_tracking_mode == "not_required" else resolve_inbound_expiry(
             arrival_date=line.arrival_date, shelf_life_days=offer.shelf_life_days
         )
         if line.projected_expiry_date != expected_expiry:

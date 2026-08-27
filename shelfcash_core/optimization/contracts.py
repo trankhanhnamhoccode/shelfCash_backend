@@ -49,6 +49,7 @@ class SupplierOffer(StrictOptimizationContract):
             "zero means usable on arrival_date only."
         ),
     )
+    expiry_tracking_mode: Literal["required", "not_required", "unknown"] = "unknown"
     available: bool = True
     order_cutoff_date: date | None = None
     emergency: bool = False
@@ -109,6 +110,7 @@ class ProcurementDecisionLine(StrictOptimizationContract):
         ),
     )
     projected_expiry_date: date | None = None
+    expiry_tracking_mode: Literal["required", "not_required", "unknown"] = "unknown"
     emergency: bool = False
 
     @model_validator(mode="after")

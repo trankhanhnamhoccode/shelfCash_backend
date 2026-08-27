@@ -19,6 +19,7 @@ class InventoryLot(StrictInventoryContract):
     unit: str = Field(min_length=1)
     received_date: date | None = None
     expiry_date: date | None = None
+    expiry_tracking_mode: Literal["required", "not_required", "unknown"] = "unknown"
     unit_cost: float | None = Field(default=None, ge=0)
     location: str | None = None
     supplier_id: str | None = None
@@ -39,6 +40,7 @@ class InboundDelivery(StrictInventoryContract):
     unit: str = Field(min_length=1)
     arrival_date: date
     expiry_date: date | None = None
+    expiry_tracking_mode: Literal["required", "not_required", "unknown"] = "unknown"
     unit_cost: float | None = Field(default=None, ge=0)
     location: str | None = None
     arrival_condition: Literal["normal", "arrived_expired_realization"] = "normal"

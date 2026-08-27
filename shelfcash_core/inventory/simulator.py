@@ -285,7 +285,8 @@ def simulate_inventory(
                 )
                 if arrived_expired:
                     warnings.add("ARRIVED_EXPIRED")
-                if isinstance(delivery, PlannedInboundDelivery) and delivery.expiry_date is None:
+                if (isinstance(delivery, PlannedInboundDelivery) and delivery.expiry_date is None
+                        and delivery.expiry_tracking_mode != "not_required"):
                     warnings.add("PLANNED_PURCHASE_SHELF_LIFE_NOT_CONFIGURED")
                 current_lots.append(
                     InventoryLot(
@@ -296,6 +297,7 @@ def simulate_inventory(
                         unit=delivery.unit,
                         received_date=delivery.arrival_date,
                         expiry_date=delivery.expiry_date,
+                        expiry_tracking_mode=delivery.expiry_tracking_mode,
                         unit_cost=delivery.unit_cost,
                         location=delivery.location,
                         supplier_id=delivery.supplier_id,
@@ -319,7 +321,7 @@ def simulate_inventory(
             expired_quantity = 0.0
             for lot in current_lots:
                 expired = is_expired(lot, simulation_date, policy)
-                if lot.expiry_date is None:
+                if lot.expiry_tracking_mode != "not_required" and lot.expiry_date is None:
                     warnings.add("UNKNOWN_EXPIRY_PLACED_LAST")
                 if expired:
                     expired_quantity += lot.quantity_remaining

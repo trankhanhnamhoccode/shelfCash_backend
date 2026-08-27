@@ -39,6 +39,7 @@ class CatalogApiService:
         return {
             "ingredient_id": model.ingredient_id, "store_id": model.store_id,
             "ingredient": model.ingredient, "sku": model.sku, "base_unit": model.base_unit,
+            "expiry_tracking_mode": model.expiry_tracking_mode, "expiry_tracking_source": model.expiry_tracking_source,
             "aliases": aliases, "active": model.active, "version": model.version,
             "created_at": model.created_at, "updated_at": model.updated_at,
         }
@@ -85,7 +86,7 @@ class CatalogApiService:
                         return json.loads(replay.record.response_body_json)
                 catalog = CatalogRepository(session)
                 if kind == "ingredient":
-                    model = catalog.add_ingredient(body["store_id"], body["ingredient"], normalize_unit(body["base_unit"]), sku=self._sku(body.get("sku")), source="manual")
+                    model = catalog.add_ingredient(body["store_id"], body["ingredient"], normalize_unit(body["base_unit"]), sku=self._sku(body.get("sku")), source="manual", expiry_tracking_mode=body.get("expiry_tracking_mode"))
                     model.active = body["active"]; model.version = 1
                     session.flush()
                     response = self._ingredient_dict(model, [])
@@ -127,6 +128,8 @@ class CatalogApiService:
                     model.ingredient = display_name(changes["ingredient"]); model.normalized_name = normalize_name(changes["ingredient"]); changed.append("ingredient")
                 if "sku" in changes: model.sku = self._sku(changes["sku"]); changed.append("sku")
                 if "active" in changes: model.active = changes["active"]; changed.append("active")
+                if "expiry_tracking_mode" in changes:
+                    model.expiry_tracking_mode = changes["expiry_tracking_mode"]; model.expiry_tracking_source = "declared"; changed.append("expiry_tracking_mode")
                 model.version += 1; model.updated_at = datetime.now(timezone.utc)
                 session.flush()
                 aliases = list(session.scalars(select(IngredientAliasModel.alias).where(IngredientAliasModel.store_id == store_id, IngredientAliasModel.ingredient_id == ingredient_id).order_by(IngredientAliasModel.normalized_alias)))

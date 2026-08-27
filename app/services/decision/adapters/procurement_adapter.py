@@ -15,7 +15,7 @@ from app.services.procurement_planning_service import ProcurementPlanningService
 from app.core.business_time import planning_end_date, planning_start_date
 from app.core.exceptions import PlanningError
 from app.models.operations import ForecastResidualModel, ForecastRunModel
-from app.models.business import ProductModel
+from app.models.business import IngredientModel, ProductModel
 from app.services.decision.adapters.bom_adapter import CoreBomAdapter
 from shelfcash_core.inventory.contracts import (
     InboundDelivery, InventoryDemandLine, InventoryDemandScenario, InventoryLot,
@@ -87,6 +87,10 @@ class CoreProcurementAdapter:
         # the historical as-of date.  Inventory remains read at the EOD
         # cutoff below.
         cutoff_date = forecast.cutoff_date
+        ingredient_modes = {
+            row.ingredient_id: row.expiry_tracking_mode
+            for row in self.session.scalars(select(IngredientModel).where(IngredientModel.store_id == store_id))
+        }
         decision_date = planning_start_date(cutoff_date)
         horizon_end = planning_end_date(cutoff_date, forecast.horizon_days)
         demand_dates = {row.target_date for row in demand_rows}
@@ -109,6 +113,7 @@ class CoreProcurementAdapter:
                     lot_id=row["lot_id"], store_id=store_id, ingredient_id=ingredient_id,
                     quantity_remaining=float(row["quantity"]), unit=unit,
                     received_date=row["received_date"], expiry_date=row.get("expiry_date"),
+                    expiry_tracking_mode=ingredient_modes.get(ingredient_id, "unknown"),
                     source_type="initial_inventory",
                 ))
             for index, row in enumerate(open_inbound.get(ingredient_id, [])):
@@ -119,6 +124,7 @@ class CoreProcurementAdapter:
                     unit=unit, arrival_date=row["date"] + timedelta(days=supplier_delay_days), expiry_date=resolve_inbound_expiry(
                         arrival_date=row["date"] + timedelta(days=supplier_delay_days), shelf_life_days=row.get("shelf_life_days")
                     ),
+                    expiry_tracking_mode=ingredient_modes.get(ingredient_id, "unknown"),
                     provenance={"expiry_source": "purchase_order_line.shelf_life_days" if row.get("shelf_life_days") is not None else "not_configured"},
                 ))
             for term in self.legacy_state._terms(store_id, ingredient_id):
@@ -129,6 +135,7 @@ class CoreProcurementAdapter:
                     unit_price=float(term.unit_cost), minimum_order_quantity=float(term.moq),
                     lead_time_days=term.lead_time_days + supplier_delay_days, available=True,
                     shelf_life_days=term.shelf_life_days,
+                    expiry_tracking_mode=ingredient_modes.get(ingredient_id, "unknown"),
                     available_delivery_days=(
                         None if term.available_delivery_days is None
                         else json.loads(term.available_delivery_days)

@@ -21,7 +21,7 @@ def decisions_to_planned_inbound(
     deliveries: list[PlannedInboundDelivery] = []
     suffix = f"-{scenario_id}" if scenario_id else ""
     for index, line in enumerate(decisions):
-        expiry = resolve_inbound_expiry(
+        expiry = None if line.expiry_tracking_mode == "not_required" else resolve_inbound_expiry(
             arrival_date=line.arrival_date, shelf_life_days=line.shelf_life_days
         )
         deliveries.append(
@@ -37,6 +37,7 @@ def decisions_to_planned_inbound(
                 unit=line.unit,
                 arrival_date=line.arrival_date,
                 expiry_date=expiry,
+                expiry_tracking_mode=line.expiry_tracking_mode,
                 unit_cost=line.unit_price,
                 provenance={
                     "realization_type": "optimizer_fixed_lead_time",
@@ -70,7 +71,7 @@ def decisions_to_scenario_planned_inbound(
                 ingredient_id=line.ingredient_id,
                 rng=rng,
             )
-            official_expiry = resolve_inbound_expiry(
+            official_expiry = None if line.expiry_tracking_mode == "not_required" else resolve_inbound_expiry(
                 arrival_date=lead_time.arrival_date, shelf_life_days=line.shelf_life_days
             )
             shelf_life = shelf_life_model.realize(
@@ -94,6 +95,7 @@ def decisions_to_scenario_planned_inbound(
                     unit=line.unit,
                     arrival_date=lead_time.arrival_date,
                     expiry_date=shelf_life.effective_expiry_date,
+                    expiry_tracking_mode=line.expiry_tracking_mode,
                     unit_cost=line.unit_price,
                     arrival_condition=(
                         "arrived_expired_realization" if arrived_expired else "normal"

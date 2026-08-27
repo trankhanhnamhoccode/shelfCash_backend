@@ -1,6 +1,6 @@
 CANONICAL_SCHEMAS = {
     "inventory": {
-        "fields": ["snapshot_date", "ingredient_name", "batch_id", "on_hand", "unit", "received_date", "expiry_date", "supplier_name", "warehouse_name"],
+        "fields": ["snapshot_date", "ingredient_name", "batch_id", "on_hand", "unit", "received_date", "expiry_date", "expiry_tracking_mode", "supplier_name", "warehouse_name"],
         "core_fields": ["snapshot_date", "ingredient_name", "batch_id", "on_hand", "unit"],
     },
     "sales_history": {
@@ -23,11 +23,11 @@ CANONICAL_SCHEMAS = {
         },
     },
     "purchase_history": {
-        "fields": ["purchase_date", "received_date", "ingredient_name", "quantity_received", "unit", "unit_price", "total_cost", "supplier_name", "expiry_date", "batch_id", "purchase_order_id", "source", "external_record_id"],
+        "fields": ["purchase_date", "received_date", "ingredient_name", "quantity_received", "unit", "unit_price", "total_cost", "supplier_name", "expiry_date", "expiry_tracking_mode", "batch_id", "purchase_order_id", "source", "external_record_id"],
         "core_fields": ["ingredient_name", "quantity_received"],
     },
     "supplier_constraints": {
-        "fields": ["supplier_name", "ingredient_name", "minimum_order_quantity", "order_unit", "package_size", "package_base_unit", "lead_time_days", "shelf_life_days", "unit_price", "available_delivery_days"],
+        "fields": ["supplier_name", "ingredient_name", "minimum_order_quantity", "order_unit", "package_size", "package_base_unit", "lead_time_days", "shelf_life_days", "expiry_tracking_mode", "unit_price", "available_delivery_days"],
         "core_fields": ["supplier_name", "ingredient_name", "minimum_order_quantity", "order_unit", "package_size", "package_base_unit"],
     },
     "calendar_features": {

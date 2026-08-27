@@ -40,6 +40,7 @@ ALIASES = {
     "on_hand": ["ton kho", "sl cuoi ngay", "so luong ton", "on hand", "quantity on hand"],
     "batch_id": ["ma lo", "batch", "lot code"],
     "expiry_date": ["hsd", "han dung", "expiry date"],
+    "expiry_tracking_mode": ["expiry tracking mode", "theo doi han su dung", "quan ly han su dung", "expiry required"],
     "warehouse_name": ["vi tri", "warehouse", "location"],
     "product_name": ["san pham", "ten mon", "ten mon sku", "ten mon combo", "mon ban", "product", "product name"],
     "quantity_sold": ["so luong ban", "sl ban", "slx", "quantity sold"],

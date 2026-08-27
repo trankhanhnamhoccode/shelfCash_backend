@@ -41,6 +41,8 @@ class IngredientModel(Base):
         Index("ix_ingredients_normalized_name", "normalized_name"),
         CheckConstraint("version >= 1", name="ck_ingredients_version"),
         Index("ix_ingredients_store_active", "store_id", "active"),
+        CheckConstraint("expiry_tracking_mode IN ('required','not_required','unknown')", name="ck_ingredients_expiry_tracking_mode"),
+        CheckConstraint("expiry_tracking_source IN ('declared','inferred')", name="ck_ingredients_expiry_tracking_source"),
     )
     ingredient_id: Mapped[str] = mapped_column(String(36), primary_key=True)
     store_id: Mapped[str] = mapped_column(String(128), ForeignKey("stores.store_id"), index=True, nullable=False)
@@ -48,6 +50,9 @@ class IngredientModel(Base):
     normalized_name: Mapped[str] = mapped_column(String(255), nullable=False)
     sku: Mapped[str | None] = mapped_column(String(128))
     base_unit: Mapped[str] = mapped_column(String(16), nullable=False)
+    # Canonical material metadata; lots only carry dates and quantities.
+    expiry_tracking_mode: Mapped[str] = mapped_column(String(16), nullable=False, default="unknown", server_default="unknown")
+    expiry_tracking_source: Mapped[str] = mapped_column(String(16), nullable=False, default="inferred", server_default="inferred")
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     source: Mapped[str] = mapped_column(String(32), nullable=False, default="manual")
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")

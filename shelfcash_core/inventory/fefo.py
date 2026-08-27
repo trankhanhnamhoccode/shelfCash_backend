@@ -16,6 +16,8 @@ def is_expired(
     simulation_date: date,
     policy: InventorySimulationPolicy,
 ) -> bool:
+    if lot.expiry_tracking_mode == "not_required":
+        return False
     if lot.expiry_date is None:
         if policy.unknown_expiry == "reject":
             raise UnknownExpiryError(
@@ -31,6 +33,9 @@ def is_expired(
 def fefo_sort_key(lot: InventoryLot) -> tuple[date, int, date, str]:
     # Unknown receipt dates are never replaced with a snapshot date.  They
     # sort after known receipt dates for equal expiry, then use stable lot ID.
+    if lot.expiry_tracking_mode == "not_required":
+        # Non-perishable material depletes FIFO, independent of expiry data.
+        return (date.min, lot.received_date is None, lot.received_date or date.max, lot.lot_id)
     return (lot.expiry_date or date.max, lot.received_date is None, lot.received_date or date.max, lot.lot_id)
 
 
@@ -49,7 +54,7 @@ def consume_fefo(
     traces: list[LotConsumptionTrace] = []
     warnings: set[str] = set()
     for lot in sorted(lots, key=fefo_sort_key):
-        if lot.expiry_date is None:
+        if lot.expiry_tracking_mode != "not_required" and lot.expiry_date is None:
             if policy.unknown_expiry == "reject":
                 raise UnknownExpiryError(
                     f"Lot {lot.lot_id} thiếu expiry_date.",

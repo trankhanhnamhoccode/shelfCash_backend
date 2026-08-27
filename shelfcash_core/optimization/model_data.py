@@ -158,7 +158,7 @@ def build_problem_data(request: OptimizationRequest) -> OptimizationProblemData:
         key = (lot.store_id, lot.ingredient_id)
         if key not in target_units:
             continue
-        expired_at_start = lot.expiry_date is not None and (
+        expired_at_start = lot.expiry_tracking_mode != "not_required" and lot.expiry_date is not None and (
             lot.expiry_date < request.decision_date
             if request.inventory_policy.expiry_inclusive
             else lot.expiry_date <= request.decision_date
@@ -166,11 +166,11 @@ def build_problem_data(request: OptimizationRequest) -> OptimizationProblemData:
         if expired_at_start:
             warnings.add("AGGREGATE_MODEL_EXCLUDED_PRESTART_EXPIRED_LOT")
             continue
-        if lot.expiry_date is None:
+        if lot.expiry_tracking_mode != "not_required" and lot.expiry_date is None:
             warnings.add("AGGREGATE_MODEL_COUNTS_UNKNOWN_EXPIRY_LOT")
         quantity = lot.quantity_remaining * factor(key, lot.unit)
         initial_quantity[key] += quantity
-        if lot.expiry_date is not None:
+        if lot.expiry_tracking_mode != "not_required" and lot.expiry_date is not None:
             expiry_bucket_quantities[(key, lot.expiry_date)] += quantity
 
     existing_inbound: defaultdict[tuple[InventoryKey, date], float] = defaultdict(float)
@@ -180,9 +180,9 @@ def build_problem_data(request: OptimizationRequest) -> OptimizationProblemData:
         if key in target_units and request.decision_date <= delivery.arrival_date <= request.planning_end_date:
             quantity = delivery.quantity * factor(key, delivery.unit)
             existing_inbound[(key, delivery.arrival_date)] += quantity
-            if delivery.expiry_date is None:
+            if delivery.expiry_tracking_mode != "not_required" and delivery.expiry_date is None:
                 warnings.add("INBOUND_EXPIRY_NOT_EVALUATED")
-            else:
+            elif delivery.expiry_tracking_mode != "not_required":
                 existing_inbound_expiry_buckets.append(ExistingInboundExpiryBucket(
                     key=key, arrival_date=delivery.arrival_date,
                     expiry_date=delivery.expiry_date, quantity=quantity,
@@ -213,12 +213,12 @@ def build_problem_data(request: OptimizationRequest) -> OptimizationProblemData:
                 arrival_date=arrival,
                 factor_to_target=conversion,
                 pack_quantity_target=offer.pack_size * conversion,
-                expiry_date=resolve_inbound_expiry(
+                expiry_date=(None if offer.expiry_tracking_mode == "not_required" else resolve_inbound_expiry(
                     arrival_date=arrival, shelf_life_days=offer.shelf_life_days
-                ),
+                )),
             )
         )
-        if offer.shelf_life_days is None:
+        if offer.shelf_life_days is None and offer.expiry_tracking_mode != "not_required":
             warnings.add("PLANNED_PURCHASE_SHELF_LIFE_NOT_CONFIGURED")
 
     raw_weights = [scenario.probability_weight for scenario in request.demand_scenarios]

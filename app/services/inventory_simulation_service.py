@@ -22,11 +22,12 @@ class InventorySimulationService:
                 if index in received_events or event["date"]>day:continue
                 qty=D(event["quantity"]);inbound_qty+=qty
                 working.append({"lot_id":event.get("lot_id",f"inbound:{len(working)}"),"quantity":qty,
-                    "expiry_date":event.get("expiry_date"),"received_date":day})
+                    "expiry_date":event.get("expiry_date"),"received_date":day,
+                    "expiry_tracking_mode":event.get("expiry_tracking_mode","unknown")})
                 received_events.add(index)
             expired=D(0)
             for lot in working:
-                if lot.get("expiry_date") is not None and lot["expiry_date"]<day and lot["quantity"]>0:
+                if lot.get("expiry_tracking_mode","unknown") != "not_required" and lot.get("expiry_date") is not None and lot["expiry_date"]<day and lot["quantity"]>0:
                     expired+=lot["quantity"];lot["quantity"]=D(0)
             demand=D(demand_row["quantity"]);remaining=demand;consumed=[]
             for lot in sorted(working,key=self._fefo):
@@ -41,7 +42,7 @@ class InventorySimulationService:
                 "fulfilled_quantity":str(fulfilled),"shortage_quantity":str(shortage),"expired_quantity":str(expired),
                 "waste_quantity":str(expired),"ending_inventory":str(ending),"consumed_lots":consumed})
         ending=sum((x["quantity"] for x in working),D(0));fill=D(1) if total_demand==0 else total_fulfilled/total_demand
-        at_risk=sum((x["quantity"] for x in working if x.get("expiry_date") and demands and x["expiry_date"]<=max(d["date"] for d in demands)),D(0))
+        at_risk=sum((x["quantity"] for x in working if x.get("expiry_tracking_mode","unknown") != "not_required" and x.get("expiry_date") and demands and x["expiry_date"]<=max(d["date"] for d in demands)),D(0))
         avg=(total_demand/D(len(demands))) if demands else D(0)
         return {"ingredient_id":ingredient_id,"unit":unit,"opening_inventory":daily[0]["opening_inventory"] if daily else "0",
             "inbound_quantity":str(sum((D(x["quantity"]) for x in inbound),D(0))),"demand_quantity":str(total_demand),
@@ -54,4 +55,6 @@ class InventorySimulationService:
     @staticmethod
     def _fefo(lot):
         received=lot.get("received_date")
+        if lot.get("expiry_tracking_mode","unknown") == "not_required":
+            return (date.min,received is None,received or date.max,str(lot.get("lot_id")))
         return (lot.get("expiry_date") or date.max,received is None,received or date.max,str(lot.get("lot_id")))

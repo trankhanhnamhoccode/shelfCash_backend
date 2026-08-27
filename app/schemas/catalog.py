@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
@@ -15,6 +15,7 @@ class IngredientCreate(BaseModel):
     sku: Sku | None = None
     base_unit: Name
     active: bool = True
+    expiry_tracking_mode: Literal["required", "not_required", "unknown"] | None = None
 
 
 class IngredientPatch(BaseModel):
@@ -25,10 +26,11 @@ class IngredientPatch(BaseModel):
     sku: Sku | None = None
     base_unit: Name | None = None
     active: bool | None = None
+    expiry_tracking_mode: Literal["required", "not_required", "unknown"] | None = None
 
     @model_validator(mode="after")
     def has_change(self):
-        if not self.model_fields_set.intersection({"ingredient", "sku", "base_unit", "active"}):
+        if not self.model_fields_set.intersection({"ingredient", "sku", "base_unit", "active", "expiry_tracking_mode"}):
             raise ValueError("At least one update field is required")
         return self
 
@@ -41,6 +43,8 @@ class IngredientResponse(BaseModel):
     base_unit: str
     aliases: list[str]
     active: bool
+    expiry_tracking_mode: Literal["required", "not_required", "unknown"]
+    expiry_tracking_source: Literal["declared", "inferred"]
     version: int
     created_at: datetime
     updated_at: datetime

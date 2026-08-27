@@ -30,6 +30,7 @@ from app.repositories.audit_logs import AuditLogRepository
 from app.repositories.recipes import RecipeRepository
 from app.repositories.stores import StoreRepository
 from app.services.entity_resolution import EntityResolutionService
+from app.services.ingredient_expiry import IngredientExpiryClassificationService
 from app.services.recipe_service import RecipeVersionService
 from app.services.audit_service import AuditService
 
@@ -88,6 +89,7 @@ class ImportBusinessPersistenceService:
         self.session = session
         self.catalog = CatalogRepository(session)
         self.resolve = EntityResolutionService(self.catalog)
+        self.expiry_classification = IngredientExpiryClassificationService(session)
         self.inventory = InventoryRepository(session)
         self.recipes = RecipeVersionService(RecipeRepository(session))
         self.summary = BusinessWriteSummary()
@@ -104,6 +106,15 @@ class ImportBusinessPersistenceService:
             if handler is None:
                 raise ValidationError("Loại sheet chưa được hỗ trợ cho business persistence.", {"sheet_type": kind})
             handler(job, sheet)
+        self.session.flush()
+        for warning in self.expiry_classification.recompute(job.store_id):
+            self.summary.warnings += 1
+            self.session.add(ImportIssueModel(
+                issue_id=str(uuid4()), import_id=job.import_id, profile_id=None,
+                source_row=None, severity="warning", code=warning["code"],
+                message=warning["code"], details_json=json.dumps(warning["details"], ensure_ascii=False),
+                issue_source="ingredient_expiry_classification",
+            ))
         self.session.flush()
         return self.summary.to_dict()
 
@@ -140,10 +151,26 @@ class ImportBusinessPersistenceService:
         if existing:
             if unit:
                 validate_compatible(unit, existing.base_unit)
+            try:
+                self.expiry_classification.declare(existing, row.get("expiry_tracking_mode"))
+            except ValueError as exc:
+                raise ValidationError(str(exc), {"field": "expiry_tracking_mode"}) from None
             return existing
         if not unit:
             raise ValidationError("Ingredient mới phải có unit.", {"field": unit_field})
+        try:
+            declared_mode = row.get("expiry_tracking_mode")
+            if declared_mode not in (None, ""):
+                value = str(declared_mode).strip().lower()
+                if value not in {"required", "not_required", "unknown"}:
+                    raise ValueError("expiry_tracking_mode must be required, not_required, or unknown")
+            else:
+                value = None
+        except ValueError as exc:
+            raise ValidationError(str(exc), {"field": "expiry_tracking_mode"}) from None
         item = self.resolve.ingredient(store_id, name=name, base_unit=normalize_unit(unit), create_if_missing=True)
+        if value is not None:
+            self.expiry_classification.declare(item, value)
         self.summary.ingredients_created += 1
         self.session.flush()
         return item
