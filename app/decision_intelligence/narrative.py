@@ -9,9 +9,6 @@ from collections import defaultdict
 from typing import Any
 
 from pydantic import ValidationError as PydanticValidationError
-from shelfcash_forecast.decision_intelligence.contracts import DecisionGraph
-from shelfcash_forecast.decision_intelligence.retrieval import StructuredLocalRetriever, build_retrieval_context
-
 from app.core.logging_context import get_request_id
 from app.decision_intelligence.adapter import (
     ShelfCashDecisionIntelligenceAdapter,
@@ -19,7 +16,10 @@ from app.decision_intelligence.adapter import (
 )
 from app.decision_intelligence.contracts import Citation, DecisionBriefFacts, DecisionExplanationResponse, DecisionNarrativeLLMResponse, ExplanationClaim
 from app.decision_intelligence.communication_plan import narrative_communication_plan
+from app.decision_intelligence.display import add_numeric_display_contract
+from app.decision_intelligence.narrative_retrieval import retrieve_narrative_evidence
 from app.decision_intelligence.semantic_evidence import DecisionSemanticEvidenceBuilder, SemanticFact
+from app.decision_intelligence.style_examples import retrieve_style_examples
 from app.llm.tasks import LLMFailureStage, LLMTask
 
 logger = logging.getLogger("shelfcash.decision_narrative")
@@ -178,6 +178,15 @@ Nếu không đủ dữ liệu để trả lời nguyên nhân:
 }
 """
 
+SYSTEM_PROMPT += """
+
+STYLE_EXAMPLES ARE NOT EVIDENCE. They only demonstrate tone and sentence structure.
+Never take a number, date, ingredient, supplier, strategy, cause, or factual claim from a
+style example. Never cite an example ID. If an example conflicts with EVIDENCE, EVIDENCE wins.
+COMMUNICATION_PLAN.causal_allowed is authoritative: when false, use no causal connector or
+causal hedge. Every factual claim must be grounded only in EVIDENCE.
+"""
+
 REASON_TEXT = {
     "DEMAND_EXCEEDS_AVAILABLE_SUPPLY": "Nhu cầu dự kiến cao hơn lượng cung sẵn có",
     "LEAD_TIME_PRESSURE": "Thời gian giao hàng tạo áp lực phải đặt sớm",
@@ -313,7 +322,7 @@ def aggregate_evidence(
     for item in retrieved_items:
         if item.evidence_type == "inventory_risk":
             records.append({"evidence_id": item.evidence_id, "type": "RISK", **item.payload, "evidence_ids": [item.evidence_id]})
-    return records
+    return [add_numeric_display_contract(record) for record in records]
 
 
 class DecisionNarrativeProvider:
@@ -373,34 +382,26 @@ class DecisionNarrativeProvider:
                 else self.deterministic._evidence(brief, semantic_facts=semantic_facts)
             )
             resolved_question = question or ("Why is this plan recommended?" if language == "en" else "Tại sao kế hoạch này được đề xuất?")
-            if ingredient_id:
-                # The API target is authoritative.  Do not let question-token
-                # scoring select a different entity or omit target evidence.
-                retrieved_items = evidence.items
-                intent = _ingredient_intent(resolved_question)
-            elif _requests_strategy_comparison(resolved_question):
-                # Strategy questions need all persisted candidates and their
-                # selected-relative deltas; token ranking must not drop one side.
-                retrieved_items = [
-                    item for item in evidence.items
-                    if item.evidence_type in {
-                        "semantic_strategy_candidate_metrics",
-                        "semantic_strategy_comparison",
-                        "semantic_strategy_selection_proof",
-                    }
-                ]
-                intent = "STRATEGY_COMPARISON"
-            else:
-                retrieved = StructuredLocalRetriever().retrieve(resolved_question, evidence, DecisionGraph(request_id=brief.decision_run_id, nodes=[], edges=[]), context=build_retrieval_context(resolved_question, evidence, recommended_strategy=(brief.recommendation.strategy or "").upper() or None))
-                retrieved_items = retrieved.items
-                intent = retrieved.intent
-            structured = aggregate_evidence(
-                brief, retrieved_items, semantic_facts=scoped_facts,
-                include_daily=not ingredient_id or _requests_daily_detail(resolved_question),
+            # Build canonical records locally, then select by intent/type/entity
+            # before Qwen sees them. Retrieval is deterministic business logic,
+            # not model-scored semantic similarity.
+            all_structured = aggregate_evidence(
+                brief, evidence.items, semantic_facts=scoped_facts,
+                include_daily=True,
             )
+            retrieval = retrieve_narrative_evidence(
+                brief, all_structured, question=resolved_question,
+                ingredient_id=ingredient_id, detail_level=detail_level,
+            )
+            structured = retrieval.evidence
+            intent = retrieval.intent
             if not structured:
                 raise ValueError("no_retrieved_evidence")
-            logger.info("decision_narrative_retrieval_completed decision_run_id=%s evidence_count=%d intent=%s target_ingredient_id=%s", brief.decision_run_id, len(structured), intent, ingredient_id)
+            logger.info(
+                "decision_narrative_retrieval_completed decision_run_id=%s intent=%s target_ingredient_id=%s evidence=%s",
+                brief.decision_run_id, intent, retrieval.target_ingredient_id,
+                [(item["evidence_id"], item["type"]) for item in structured],
+            )
             plan = narrative_communication_plan(structured, str(intent))
             selected_ids = set(plan.evidence_ids)
             selected = [item for item in structured if item["evidence_id"] in selected_ids]
@@ -411,16 +412,23 @@ class DecisionNarrativeProvider:
                     "main_attention": plan.main_attention,
                     "limitation": plan.limitation,
                     "supporting": plan.supporting,
+                    "causal_allowed": retrieval.causal_allowed,
                 },
+                "style_examples": retrieve_style_examples(
+                    task="decision_narrative", intent=intent,
+                    case="CAUSAL_AVAILABLE" if retrieval.causal_allowed else "CAUSAL_UNAVAILABLE" if intent == "WHY_PROCUREMENT" else "DEFAULT",
+                    detail_level=detail_level,
+                    limit=2 if intent == "WHY_PROCUREMENT" and not retrieval.causal_allowed else 1,
+                ),
                 "evidence": selected,
             }
             logger.info(
                 "decision_narrative_communication_plan decision_run_id=%s intent=%s answer_with=%s attention=%s limitation=%s supporting=%s",
                 brief.decision_run_id, intent, plan.decision, plan.main_attention, plan.limitation, plan.supporting,
             )
-            if ingredient_id:
+            if retrieval.target_ingredient_id:
                 payload["target"] = {
-                    "ingredient_name": _ingredient_display_name(brief, ingredient_id),
+                    "ingredient_name": _ingredient_display_name(brief, retrieval.target_ingredient_id),
                     "scope": "one_ingredient_only",
                 }
             try:
@@ -450,7 +458,7 @@ class DecisionNarrativeProvider:
             try:
                 response = self._guard(
                     typed_raw.model_dump(mode="json"), selected, evidence.items, brief,
-                    language, detail_level, intent, target_ingredient_id=ingredient_id,
+                    language, detail_level, intent, target_ingredient_id=retrieval.target_ingredient_id,
                 )
             except Exception:
                 failure_stage = LLMFailureStage.GROUNDING.value
@@ -479,7 +487,7 @@ class DecisionNarrativeProvider:
             logger.warning(
                 "decision_narrative_failed request_id=%s decision_run_id=%s task=%s configured_model=%s resolved_model=%s resolved_provider=%s failure_stage=%s reason=%s",
                 request_id, brief.decision_run_id, LLMTask.DECISION_NARRATIVE.value, configured_model, resolved_model,
-                resolved_provider, failure_stage, type(exc).__name__,
+                resolved_provider, failure_stage, f"{type(exc).__name__}:{exc}",
             )
             logger.warning(
                 "decision_narrative_fallback request_id=%s decision_run_id=%s task=%s configured_model=%s resolved_provider=%s failure_stage=%s duration_ms=%d",
@@ -573,6 +581,25 @@ class DecisionNarrativeProvider:
 
     @staticmethod
     def _validate_numbers(text: str, payloads: list[dict]):
+        remaining = text
+        allowed = {
+            mention for payload in payloads
+            for mention in payload.get("allowed_numeric_mentions", [])
+            if isinstance(mention, str)
+        }
+        for mention in sorted(allowed, key=len, reverse=True):
+            remaining = remaining.replace(mention, " ")
+        if re.search(r"(?<![\w-])\d+(?:[.,]\d+)?", remaining):
+            raise ValueError("unsupported_numeric_claim")
+        supplied_ranges = [
+            str(value) for payload in payloads
+            for value in (payload.get("display_values") or {}).values()
+            if "–" in str(value)
+        ]
+        if any(value in text for value in supplied_ranges):
+            if any(marker in text.lower() for marker in ("trung bình", "average", "mean")):
+                raise ValueError("range_semantics_contradicted")
+        return
         numbers = re.findall(r"(?<![\w-])\d+(?:[.,]\d+)?", text)
         supported = {round(float(value), 9) for payload in payloads for value in payload.values() if isinstance(value, (int, float))}
         # Presentation-safe display strings (for example ``14/08`` and

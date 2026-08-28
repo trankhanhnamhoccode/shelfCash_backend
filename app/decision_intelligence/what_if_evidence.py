@@ -24,6 +24,8 @@ from app.decision_intelligence.contracts import (
 )
 from app.llm.tasks import LLMFailureStage, LLMTask
 from app.decision_intelligence.communication_plan import what_if_communication_plan
+from app.decision_intelligence.display import add_numeric_display_contract
+from app.decision_intelligence.style_examples import retrieve_style_examples
 
 
 class WhatIfEvidenceFact(BaseModel):
@@ -188,7 +190,10 @@ def _evidence(
 ) -> list[WhatIfEvidenceFact]:
     def fact(kind, values):
         digest = hashlib.sha256(f"{run_id}|{scenario_key}|{kind}|{json.dumps(values, sort_keys=True, default=str)}".encode()).hexdigest()[:16]
-        return WhatIfEvidenceFact(evidence_id=f"wi-{kind.lower().replace('_', '-')}-{digest}", fact_type=kind, values=values)
+        return WhatIfEvidenceFact(
+            evidence_id=f"wi-{kind.lower().replace('_', '-')}-{digest}", fact_type=kind,
+            values=add_numeric_display_contract({"type": kind, **values}),
+        )
 
     records = [fact("WHAT_IF_MUTATION", mutation.model_dump(mode="json"))]
     records.append(fact("WHAT_IF_FEASIBILITY_CHANGE", {
@@ -254,11 +259,17 @@ class WhatIfNarrativeProvider:
                     "primary_outcome": plan.main_attention[:1],
                     "secondary_outcome": plan.main_attention[1:] + plan.supporting,
                 },
+                "style_examples": retrieve_style_examples(
+                    task="what_if", intent="WHAT_IF",
+                    case="COST_DELTA" if any(item["fact_type"] == "WHAT_IF_PURCHASE_COST_DELTA" for item in selected) else "STRATEGY" if any(item["fact_type"] == "WHAT_IF_STRATEGY_CHANGE" for item in selected) else "DEFAULT",
+                    detail_level="simple",
+                ),
                 "evidence": selected,
                 "instruction": (
                     "Describe only this hypothetical simulation. Do not calculate values or infer mechanisms. "
                     "Treat a strategy_override as a user-requested scenario, never as an optimizer selection. "
-                    "Do not name a supplier unless an evidence fact identifies it, and never expose machine risk codes."
+                    "Do not name a supplier unless an evidence fact identifies it, and never expose machine risk codes. "
+                    "STYLE_EXAMPLES are wording only, never facts or citations; use only EVIDENCE for claims."
                 ),
             }
             raw = _run_async(self.llm_provider.generate_json(
@@ -390,6 +401,16 @@ def _run_async(coro):
 
 
 def _validate_numbers(text: str, items: list[WhatIfEvidenceFact]):
+    remaining = text
+    allowed = {
+        mention for item in items for mention in item.values.get("allowed_numeric_mentions", [])
+        if isinstance(mention, str)
+    }
+    for mention in sorted(allowed, key=len, reverse=True):
+        remaining = remaining.replace(mention, " ")
+    if re.search(r"(?<![\w])[-+]?\d+(?:[.,]\d+)?", remaining):
+        raise ValueError("unsupported_numeric_claim")
+    return
     raw_values = [round(float(value), 9) for item in items for value in item.values.values() if isinstance(value, (int, float))]
     # Vietnamese prose commonly expresses a negative delta through a preceding
     # word such as "giảm" rather than a minus sign.  The direction itself is

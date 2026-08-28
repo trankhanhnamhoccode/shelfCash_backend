@@ -7,7 +7,7 @@ from typing import Any
 
 from app.decision_intelligence.adapter import ShelfCashDecisionIntelligenceAdapter
 from app.decision_intelligence.communication_plan import summary_communication_plan
-from app.decision_intelligence.display import purchase_cost_display, vi_number
+from app.decision_intelligence.display import add_numeric_display_contract, purchase_cost_display, vi_number
 from app.decision_intelligence.contracts import (
     AssistantSummary,
     DecisionBriefFacts,
@@ -19,6 +19,7 @@ from app.decision_intelligence.semantic_evidence import (
     SemanticFactClassification,
     SemanticFactScope,
 )
+from app.decision_intelligence.style_examples import retrieve_style_examples
 from app.llm.tasks import LLMFailureStage, LLMTask
 
 logger = logging.getLogger("shelfcash.overall_summary")
@@ -72,6 +73,8 @@ CAUSAL SAFETY: unless the cited evidence is CAUSAL or PROCUREMENT_REASON, never 
 language: vì, do, bởi, nên, do đó, dẫn đến, khiến, để tránh, nguyên nhân, xuất phát từ.
 This includes hedges such as "có thể do" and "có khả năng do". OBSERVATION and DERIVED
 evidence may describe a state only, never its cause.
+STYLE_EXAMPLES are non-authoritative wording patterns only. Never copy facts from them or cite
+their IDs; all factual text and all claim evidence IDs must come solely from EVIDENCE.
 """
 
 
@@ -168,7 +171,18 @@ class OverallSummaryProvider:
             plan = summary_communication_plan(structured)
             selected_ids = set(plan.evidence_ids)
             selected = [item for item in structured if item["evidence_id"] in selected_ids]
-            payload = {"language": "vi", "communication_plan": plan.as_payload(), "evidence": selected}
+            summary_case = (
+                "NO_FEASIBLE" if not brief.recommendation.available else
+                "FEASIBLE_WITH_RISK" if plan.main_risk else
+                "WITH_LIMITATION" if plan.limitation else "FEASIBLE"
+            )
+            payload = {
+                "language": "vi", "communication_plan": plan.as_payload(), "evidence": selected,
+                "style_examples": retrieve_style_examples(
+                    task="overall_summary", intent="SUMMARY", case=summary_case,
+                    detail_level="simple",
+                ),
+            }
             logger.info(
                 "overall_summary_communication_plan decision_run_id=%s decision=%s main_risk=%s limitation=%s supporting=%s",
                 brief.decision_run_id, plan.decision, plan.main_risk, plan.limitation, plan.supporting,
@@ -274,7 +288,7 @@ class OverallSummaryProvider:
                 **fact.values,
             }
             self._add_display_values(record)
-            records.append(record)
+            records.append(add_numeric_display_contract(record))
         return evidence, records
 
     @staticmethod
