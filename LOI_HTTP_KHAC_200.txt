@@ -1,0 +1,132 @@
+TỔNG HỢP LỖI HTTP KHÁC 200
+============================
+
+Phạm vi: các response lỗi do API FastAPI trả ra. Không liệt kê response thành công
+khác 200 (ví dụ: 201 Created). Mọi lỗi có cấu trúc chung:
+{
+  "code": "...",
+  "message": "...",
+  "details": { ... },
+  "request_id": "..."
+}
+
+Nguồn xử lý tập trung: app/main.py
+
+400 Bad Request
+---------------
+- ExcelIngestionError (mặc định 400): invalid_file_extension, invalid_csv_file,
+  invalid_excel_file, too_many_rows, too_many_sheets, too_many_files.
+
+401 Unauthorized
+----------------
+- unauthorized: API key bị thiếu hoặc không hợp lệ.
+
+404 Not Found
+-------------
+- STORE_NOT_FOUND
+- RESOURCE_NOT_FOUND
+- IMPORT_NOT_FOUND
+- FORECAST_ARTIFACT_NOT_FOUND
+- FORECAST_RUN_NOT_FOUND
+- PLANNING_RUN_NOT_FOUND
+- DECISION_RUN_NOT_FOUND
+- INGREDIENT_DEMAND_INCOMPLETE (trường hợp demand run chưa tồn tại)
+
+409 Conflict
+------------
+- VERSION_CONFLICT
+- DUPLICATE_REQUEST (bao gồm DuplicateResourceError theo implementation hiện tại)
+- IMPORT_PROCESSING
+- BUDGET_EXCEEDED
+- INVALID_STATE_TRANSITION
+- PURCHASE_RECEIPT_DUPLICATE
+- DUPLICATE_SALES_DAILY_RECORD
+- INVENTORY_LOT_METADATA_CONFLICT
+- INVENTORY_SNAPSHOT_DUPLICATE_BATCH
+- RECIPE_NOT_ALLOWED_FOR_COMBO
+- DUPLICATE_PRODUCT_SKU
+- DUPLICATE_PRODUCT_NAME
+- PRODUCT_TYPE_IMMUTABLE
+- PRODUCT_IN_ACTIVE_COMBO
+- SKU_CONFLICT
+- MISSING_SKU_FOR_DUPLICATE_NAME
+- FORECAST_INFERENCE_FAILED (khi request forecast chưa hoàn tất)
+- FORECAST_RUN_NOT_COMPLETED
+- INGREDIENT_DEMAND_INCOMPLETE (khi demand chưa completed/chưa có cho decision)
+- DECISION_ENGINE_LEGACY
+- PROCUREMENT_PLAN_INFEASIBLE (khi plan run failed)
+- PLANNING_PERSISTENCE_INCONSISTENCY (trạng thái completed nhưng dữ liệu thiếu)
+
+413 Payload Too Large
+---------------------
+- file_too_large
+- request_too_large
+
+422 Unprocessable Entity
+------------------------
+- validation_error: lỗi validation của Pydantic/request body/query/path.
+- VALIDATION_ERROR: validation nghiệp vụ chung.
+- MAPPING_INCOMPLETE
+- INSUFFICIENT_TRAINING_DATA
+- FORMULA_VALUE_UNAVAILABLE
+- Inventory snapshot: INVENTORY_BATCH_ID_REQUIRED,
+  INVENTORY_SNAPSHOT_DUPLICATE_BATCH, INVENTORY_SNAPSHOT_FUTURE_DATE,
+  INVENTORY_SNAPSHOT_OUT_OF_ORDER.
+- Business constraint: BUSINESS_CONSTRAINT_TYPE_UNSUPPORTED,
+  BUSINESS_CONSTRAINT_VALUE_INVALID, BUSINESS_CONSTRAINT_UNIT_INVALID,
+  BUSINESS_CONSTRAINT_EFFECTIVE_DATE_INVALID, INGREDIENT_NOT_FOUND.
+- Menu/catalog: CORE_FIELDS_MISSING, COMBO_COMPONENT_PARSE_ERROR,
+  INVALID_PRODUCT_UNIT, COMBO_SELF_REFERENCE, COMBO_COMPONENT_DUPLICATE,
+  INVALID_PRICE, COMBO_COMPONENTS_REQUIRED, COMBO_NESTING_NOT_SUPPORTED,
+  INACTIVE_COMBO_COMPONENT, INVALID_MENU_ITEM_TYPE, INVALID_MENU_STATUS,
+  AMBIGUOUS_PRODUCT_VARIANT.
+- Forecast: FORECAST_INPUT_INVALID.
+- Planning/decision: BUSINESS_CONSTRAINT_AMBIGUOUS,
+  BUSINESS_CONSTRAINT_UNIT_CONVERSION_FAILED,
+  BUSINESS_CONSTRAINT_DIMENSION_MISMATCH, BUSINESS_CONSTRAINT_CORRECTION_BLOCKED,
+  BUSINESS_CONSTRAINT_UNIT_INVALID, BUSINESS_CONSTRAINT_VALUE_INVALID,
+  FORECAST_HORIZON_MISMATCH, INGREDIENT_UNIT_CONVERSION_FAILED,
+  INVENTORY_LOT_UNIT_INVALID, RECIPE_YIELD_INVALID, RECIPE_LINE_INVALID,
+  RECIPE_NOT_FOUND, RECIPE_NOT_EFFECTIVE, OPTIMIZATION_INFEASIBLE,
+  WHAT_IF_EXECUTION_FAILED, DECISION_RUN_INGREDIENT_NOT_FOUND,
+  SUPPLIER_TERM_INVALID.
+
+425 Too Early
+-------------
+- IMPORT_NOT_READY
+
+500 Internal Server Error
+-------------------------
+- INTERNAL_ERROR: exception không được xử lý riêng.
+- FORECAST_ARTIFACT_INVALID
+- FORECAST_FEATURE_TYPE_INVALID
+- FORECAST_INFERENCE_FAILED (lỗi thực thi/persist forecast)
+- FORECAST_PREDICTIONS_MISSING
+- INGREDIENT_DEMAND_INCOMPLETE (completed run nhưng thiếu dữ liệu)
+- PROCUREMENT_PLAN_INFEASIBLE (lỗi thực thi planning)
+- PLANNING_PERSISTENCE_INCONSISTENCY
+
+502 Bad Gateway
+---------------
+- LLM_PROVIDER_ERROR (mặc định). Có thể dùng status HTTP khác từ upstream LLM.
+
+503 Service Unavailable
+-----------------------
+- MODEL_NOT_READY
+- DATABASE_NOT_READY
+- LLM_UNAVAILABLE
+
+504 Gateway Timeout
+-------------------
+- LLM_PROVIDER_ERROR khi OpenRouter/LLM timeout.
+
+Lưu ý
+-------
+- HTTPException bất kỳ cũng được chuẩn hoá về code "http_error" nếu detail không
+  có đủ code/message/details; status code giữ nguyên giá trị được throw.
+- LLMProviderError chuyển tiếp một số status của nhà cung cấp ngoài (ví dụ 4xx/5xx),
+  nên không thể liệt kê đóng toàn bộ status upstream.
+- Các exception lõi (shelfcash_core) thường được service bọc lại thành ForecastError
+  hoặc PlanningError trước khi đi ra API; exception không được bọc sẽ thành 500
+  INTERNAL_ERROR.
+

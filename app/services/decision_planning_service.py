@@ -255,6 +255,7 @@ class DecisionPlanningService:
 
  def get_decision_brief(self,rid):
   from app.decision_intelligence import DecisionBriefBuilder, ShelfCashDecisionIntelligenceAdapter
+  from app.decision_intelligence.ingredient_synthesis import IngredientSynthesisProvider
   from app.decision_intelligence.overall_summary import OverallSummaryProvider
   from app.decision_intelligence.semantic_evidence import DecisionSemanticEvidenceBuilder
   with self.factory() as s:
@@ -267,23 +268,32 @@ class DecisionPlanningService:
     # Older Decision Runs are read-only: provide safe deterministic text, never
     # spend tokens or backfill package_json during GET.
     brief=brief.model_copy(update={"assistant_summary":OverallSummaryProvider(self.llm_provider,self.settings).deterministic_fallback(brief,facts)})
+   if not brief.ingredient_synthesis:
+    package=json.loads(run.package_json)
+    facts=DecisionSemanticEvidenceBuilder().build(brief,package)
+    # Historical runs remain read-only and do not trigger a new provider call.
+    brief=brief.model_copy(update={"ingredient_synthesis":IngredientSynthesisProvider(None,self.settings).synthesize(brief,facts)})
    # Evidence is derived from the same immutable package, never persisted or used by M1-M5.
    return brief.model_copy(update={"evidence":ShelfCashDecisionIntelligenceAdapter().evidence_briefs(brief)})
 
  def _generate_and_persist_overall_summary(self,rid):
   """Generate exactly once after the core Decision Package is committed."""
   from app.decision_intelligence import DecisionBriefBuilder
+  from app.decision_intelligence.contracts import AssistantSummary
   from app.decision_intelligence.overall_summary import OverallSummaryProvider
   from app.decision_intelligence.semantic_evidence import DecisionSemanticEvidenceBuilder
+  from app.decision_intelligence.ingredient_synthesis import IngredientSynthesisProvider
   with self.factory() as s:
    run=s.get(DecisionRunModel,rid)
    if not run:return
    package=json.loads(run.package_json)
-   if isinstance((package.get("assistant") or {}).get("overall_summary"),dict):return
+   assistant=package.get("assistant") if isinstance(package.get("assistant"),dict) else {}
+   if isinstance(assistant.get("overall_summary"),dict) and isinstance(assistant.get("ingredient_synthesis"),list):return
    brief=DecisionBriefBuilder().build(s,run)
    facts=DecisionSemanticEvidenceBuilder().build(brief,package)
-   summary=OverallSummaryProvider(self.llm_provider,self.settings).summarize(brief,facts)
-   package["assistant"]={**(package.get("assistant") if isinstance(package.get("assistant"),dict) else {}),"overall_summary":summary.model_dump(mode="json")}
+   summary=AssistantSummary.model_validate(assistant["overall_summary"]) if isinstance(assistant.get("overall_summary"),dict) else OverallSummaryProvider(self.llm_provider,self.settings).summarize(brief,facts)
+   synthesis=IngredientSynthesisProvider(self.llm_provider,self.settings).synthesize(brief,facts)
+   package["assistant"]={**assistant,"overall_summary":summary.model_dump(mode="json"),"ingredient_synthesis":[item.model_dump(mode="json") for item in synthesis]}
    run.package_json=dump(package)
    s.commit()
 

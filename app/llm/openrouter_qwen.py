@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import random
 import time
 from typing import Any
 
@@ -13,6 +14,7 @@ from app.core.exceptions import LLMProviderError, LLMUnavailableError
 from app.core.logging_context import get_request_id
 from app.core.rule_mapper import finalize_mapping
 from app.decision_intelligence.contracts import (
+    IngredientSynthesisLLMResponse,
     DecisionNarrativeLLMResponse,
     DecisionOverallSummaryLLMResponse,
 )
@@ -63,12 +65,13 @@ class OpenRouterLLMGateway(LLMProvider):
         }
 
     def task_profile(self, task: LLMTask) -> OpenRouterTaskProfile:
-        if task not in (LLMTask.EXCEL_MAPPING, LLMTask.DECISION_NARRATIVE, LLMTask.PLAN_SUMMARY):
+        if task not in (LLMTask.EXCEL_MAPPING, LLMTask.DECISION_NARRATIVE, LLMTask.PLAN_SUMMARY, LLMTask.INGREDIENT_SYNTHESIS):
             raise ValueError(f"Unsupported LLM task: {task}")
         prefix = {
             LLMTask.EXCEL_MAPPING: "openrouter_mapping",
             LLMTask.DECISION_NARRATIVE: "openrouter_narrative",
             LLMTask.PLAN_SUMMARY: "openrouter_summary",
+            LLMTask.INGREDIENT_SYNTHESIS: "openrouter_narrative",
         }[task]
         # Task models own routing.  Do not let a legacy OPENROUTER_MODEL value
         # silently switch either current production task to another model.
@@ -92,6 +95,8 @@ class OpenRouterLLMGateway(LLMProvider):
             return DecisionNarrativeLLMResponse.model_json_schema()
         if task is LLMTask.PLAN_SUMMARY:
             return DecisionOverallSummaryLLMResponse.model_json_schema()
+        if task is LLMTask.INGREDIENT_SYNTHESIS:
+            return IngredientSynthesisLLMResponse.model_json_schema()
         raise ValueError(f"Unsupported LLM task: {task}")
 
     @staticmethod
@@ -99,10 +104,20 @@ class OpenRouterLLMGateway(LLMProvider):
         if response is not None:
             retry_after = response.headers.get("Retry-After")
             try:
-                return min(max(float(retry_after), 0.05), 1.0)
+                return min(max(float(retry_after), 0.05), 1.0) + random.uniform(0, 0.05)
             except (TypeError, ValueError):
                 pass
-        return 0.25
+        return 0.25 + random.uniform(0, 0.05)
+
+    @staticmethod
+    def _diagnostics(request_context: dict[str, Any] | None, **values: Any) -> None:
+        """Keep transport state request-local; the gateway never owns it."""
+        if request_context is None:
+            return
+        existing = request_context.get("openrouter_diagnostics")
+        diagnostics = dict(existing) if isinstance(existing, dict) else {}
+        diagnostics.update({key: value for key, value in values.items() if value is not None})
+        request_context["openrouter_diagnostics"] = diagnostics
 
     @staticmethod
     def _value(value: Any) -> str | None:
@@ -186,8 +201,13 @@ class OpenRouterLLMGateway(LLMProvider):
             raise LLMUnavailableError("OpenRouter API key is not configured")
 
         profile = self.task_profile(task)
-        request_id = get_request_id()
+        request_id = (request_context or {}).get("correlation_id") or get_request_id()
         decision_run_id = (request_context or {}).get("decision_run_id")
+        self._diagnostics(
+            request_context, correlation_id=request_id, decision_run_id=decision_run_id,
+            task=task.value, configured_model=profile.model, attempt_count=0,
+            raw_response_present=False, content_present=False, validation_stage="transport",
+        )
         body: dict[str, Any] = {
             "model": profile.model,
             "messages": [
@@ -220,6 +240,7 @@ class OpenRouterLLMGateway(LLMProvider):
         url = f"{self.base_url}/chat/completions"
         response: httpx.Response | None = None
         for attempt in range(2):
+            self._diagnostics(request_context, attempt_count=attempt + 1, attempt=attempt + 1)
             try:
                 response = await client.post(
                     url,
@@ -234,6 +255,7 @@ class OpenRouterLLMGateway(LLMProvider):
                     )
                     await asyncio.sleep(self._retry_delay())
                     continue
+                self._diagnostics(request_context, failure_category=LLMFailureStage.TIMEOUT.value, validation_stage="transport", content_present=False)
                 raise self._provider_error(
                     "OpenRouter request timed out", stage=LLMFailureStage.TIMEOUT,
                     task=task, profile=profile, http_status=504,
@@ -246,6 +268,7 @@ class OpenRouterLLMGateway(LLMProvider):
                     )
                     await asyncio.sleep(self._retry_delay())
                     continue
+                self._diagnostics(request_context, failure_category=LLMFailureStage.NETWORK.value, validation_stage="transport", content_present=False)
                 raise self._provider_error(
                     "OpenRouter network connection error", stage=LLMFailureStage.NETWORK,
                     task=task, profile=profile,
@@ -259,6 +282,24 @@ class OpenRouterLLMGateway(LLMProvider):
                     )
                     await asyncio.sleep(self._retry_delay(response))
                     continue
+            # Empty completion is a provider/transient-output failure, unlike
+            # JSON/schema/grounding failures. Retry it once before exposing a
+            # deterministic fallback to the caller.
+            if response.status_code < 400 and attempt == 0:
+                try:
+                    envelope = response.json()
+                    choices = envelope.get("choices") if isinstance(envelope, dict) else None
+                    message = choices[0].get("message") if isinstance(choices, list) and choices and isinstance(choices[0], dict) else None
+                    content = message.get("content") if isinstance(message, dict) else None
+                    if not isinstance(content, str) or not content.strip():
+                        if request_context is not None:
+                            request_context["openrouter_raw_response"] = response.text
+                        self._diagnostics(request_context, raw_response_present=True, content_present=False, failure_category=LLMFailureStage.EMPTY_RESPONSE.value)
+                        logger.warning("openrouter_request_retry request_id=%s decision_run_id=%s task=%s configured_model=%s failure_stage=%s attempt=%s", request_id, decision_run_id, task.value, profile.model, LLMFailureStage.EMPTY_RESPONSE.value, attempt + 1)
+                        await asyncio.sleep(self._retry_delay(response))
+                        continue
+                except (ValueError, json.JSONDecodeError):
+                    pass
             break
 
         assert response is not None
@@ -266,6 +307,7 @@ class OpenRouterLLMGateway(LLMProvider):
         if response.status_code >= 400:
             if request_context is not None:
                 request_context["openrouter_raw_response"] = response.text
+            self._diagnostics(request_context, raw_response_present=True, content_present=False, http_status=response.status_code, failure_category="http", validation_stage="transport")
             try:
                 error_data = response.json()
                 error_metadata = self._metadata(error_data) if isinstance(error_data, dict) else {}
@@ -301,17 +343,20 @@ class OpenRouterLLMGateway(LLMProvider):
         except Exception as exc:
             if request_context is not None:
                 request_context["openrouter_raw_response"] = response.text
+            self._diagnostics(request_context, raw_response_present=True, content_present=False, failure_category=LLMFailureStage.JSON_PARSE.value, validation_stage="transport")
             raise self._provider_error(
                 "OpenRouter returned an invalid response envelope", stage=LLMFailureStage.JSON_PARSE,
                 task=task, profile=profile,
             ) from exc
         if not isinstance(data, dict):
+            self._diagnostics(request_context, raw_response_present=True, content_present=False, failure_category=LLMFailureStage.CONTENT_EXTRACTION.value, validation_stage="transport")
             raise self._provider_error(
                 "OpenRouter returned an invalid response envelope", stage=LLMFailureStage.CONTENT_EXTRACTION,
                 task=task, profile=profile,
             )
         choices = data.get("choices")
         if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+            self._diagnostics(request_context, raw_response_present=True, content_present=False, failure_category="empty_choices", validation_stage="transport")
             raise self._provider_error(
                 "OpenRouter response contained no completion choices", stage=LLMFailureStage.CONTENT_EXTRACTION,
                 task=task, profile=profile, metadata=self._metadata(data),
@@ -319,12 +364,14 @@ class OpenRouterLLMGateway(LLMProvider):
         choice = choices[0]
         message = choice.get("message")
         if not isinstance(message, dict):
+            self._diagnostics(request_context, raw_response_present=True, content_present=False, failure_category="missing_message", validation_stage="transport")
             raise self._provider_error(
                 "OpenRouter response contained no assistant message", stage=LLMFailureStage.CONTENT_EXTRACTION,
                 task=task, profile=profile, metadata=self._metadata(data, choice),
             )
         raw_text = message.get("content")
         if not isinstance(raw_text, str) or not raw_text.strip():
+            self._diagnostics(request_context, raw_response_present=True, content_present=False, failure_category=LLMFailureStage.EMPTY_RESPONSE.value, validation_stage="transport")
             raise self._provider_error(
                 "OpenRouter response content was empty", stage=LLMFailureStage.EMPTY_RESPONSE,
                 task=task, profile=profile, metadata=self._metadata(data, choice),
@@ -337,6 +384,7 @@ class OpenRouterLLMGateway(LLMProvider):
         metadata = self._metadata(data, choice)
         if request_context is not None:
             request_context["openrouter_metadata"] = metadata
+        self._diagnostics(request_context, raw_response_present=True, content_present=True, validation_stage="content", finish_reason=metadata.get("finish_reason"), resolved_model=metadata.get("resolved_model"), resolved_provider=metadata.get("resolved_provider"))
         if self._is_token_limit(metadata):
             raise self._provider_error(
                 "OpenRouter completion reached its token limit", stage=LLMFailureStage.TOKEN_LIMIT,
@@ -362,6 +410,8 @@ class OpenRouterLLMGateway(LLMProvider):
                 "OpenRouter returned invalid JSON", stage=LLMFailureStage.JSON_PARSE,
                 task=task, profile=profile, metadata=metadata,
             ) from exc
+
+        self._diagnostics(request_context, validation_stage="json", failure_category="none")
 
         logger.info(
             "openrouter_request_completed request_id=%s decision_run_id=%s task=%s configured_model=%s resolved_model=%s resolved_provider=%s routing_strategy=%s routing_attempt=%s status_code=%s duration_ms=%s finish_reason=%s native_finish_reason=%s prompt_tokens=%s completion_tokens=%s total_tokens=%s reasoning_tokens=%s cost=%s",

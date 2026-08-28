@@ -86,6 +86,29 @@ class RiskDetail(_Contract):
     source_count: int = Field(ge=1)
 
 
+class PresentedWarning(_Contract):
+    """Deterministic manager-facing projection of a raw diagnostic code."""
+
+    code: str
+    severity: Literal["info", "warning", "critical"]
+    audience: Literal["user", "technical"]
+    title: str
+    message: str
+
+
+class IngredientSynthesis(_Contract):
+    """Read-only, manager-facing synthesis for one Decision Run ingredient."""
+
+    ingredient_id: str
+    ingredient_name: str | None = None
+    unit: str | None = None
+    importance: Literal["normal", "watch", "critical"]
+    source: Literal["rule_based", "llm", "deterministic_fallback"]
+    headline: str
+    summary: str
+    evidence_ids: list[str] = Field(default_factory=list)
+
+
 class StrategyMetricsBrief(_Contract):
     """Comparable candidate metrics with their persisted evaluation semantics."""
 
@@ -159,6 +182,10 @@ class DecisionBriefFacts(_Contract):
     ingredient_demand_summary: list[IngredientDemandSummaryBrief] = Field(default_factory=list)
     risk: RiskBrief; critic: CriticBrief
     risk_details: list[RiskDetail] = Field(default_factory=list)
+    # Additive presentation fields. Raw warnings and risk_details remain
+    # available for diagnostics and existing consumers.
+    ingredient_synthesis: list[IngredientSynthesis] = Field(default_factory=list)
+    presented_warnings: list[PresentedWarning] = Field(default_factory=list)
     strategy_comparison: StrategyComparisonBrief | None = None
     evidence: list[EvidenceBrief] = Field(default_factory=list)
     data_availability: dict[str, str] = Field(default_factory=dict)
@@ -197,6 +224,18 @@ class DecisionOverallSummaryLLMResponse(_Contract):
     key_points: list[DecisionNarrativeClaim] = Field(default_factory=list)
     warning_summary: DecisionNarrativeClaim | None = None
     used_evidence_ids: list[str]
+
+
+class IngredientSynthesisLLMItem(_Contract):
+    ingredient_id: str
+    headline: str
+    summary: str
+    claims: list[DecisionNarrativeClaim]
+    used_evidence_ids: list[str]
+
+
+class IngredientSynthesisLLMResponse(_Contract):
+    items: list[IngredientSynthesisLLMItem]
 
 
 class DecisionExplanationResponse(_Contract):

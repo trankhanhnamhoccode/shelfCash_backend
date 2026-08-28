@@ -10,6 +10,7 @@ class LLMTask(str, Enum):
     EXCEL_MAPPING = "excel_mapping"
     DECISION_NARRATIVE = "decision_narrative"
     PLAN_SUMMARY = "plan_summary"
+    INGREDIENT_SYNTHESIS = "ingredient_synthesis"
 
 
 class LLMFailureStage(str, Enum):

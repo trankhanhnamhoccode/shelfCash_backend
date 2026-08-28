@@ -50,6 +50,7 @@ def test_brief_contract_required_fields_nullability_and_enums_are_frozen():
     assert {
         "procurement_rows", "ingredient_demand", "ingredient_demand_summary", "risk_details",
         "evidence", "data_availability", "assistant_summary", "strategy_comparison",
+        "ingredient_synthesis", "presented_warnings",
     } <= set(brief["properties"])
     assert brief["properties"]["assistant_summary"]["anyOf"][1] == {"type": "null"}
     assert brief["properties"]["strategy_comparison"]["anyOf"][1] == {"type": "null"}
@@ -57,6 +58,9 @@ def test_brief_contract_required_fields_nullability_and_enums_are_frozen():
     assert schemas["AssistantSummary"]["properties"]["source"]["enum"] == ["llm", "deterministic_fallback"]
     assert schemas["RiskDetail"]["properties"]["classification"]["enum"] == ["risk", "limitation", "unknown"]
     assert schemas["RiskDetail"]["properties"]["severity"]["enum"] == ["info", "warning", "critical"]
+    assert schemas["IngredientSynthesis"]["properties"]["importance"]["enum"] == ["normal", "watch", "critical"]
+    assert schemas["IngredientSynthesis"]["properties"]["source"]["enum"] == ["rule_based", "llm", "deterministic_fallback"]
+    assert schemas["PresentedWarning"]["properties"]["audience"]["enum"] == ["user", "technical"]
 
 
 def test_explanation_and_what_if_contracts_preserve_targeting_and_delta_semantics():

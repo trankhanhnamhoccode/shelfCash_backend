@@ -7,12 +7,13 @@ from sqlalchemy import select
 
 from app.decision_intelligence.contracts import (
     AssistantSummary, CriticBrief, DecisionBriefFacts, ForecastBrief, IngredientDemandBrief,
-    IngredientDemandSummaryBrief,
+    IngredientDemandSummaryBrief, IngredientSynthesis,
     ProcurementRowBrief, RecommendationBrief, RiskBrief,
 )
 from app.decision_intelligence.semantic_evidence import DecisionSemanticEvidenceBuilder
 from app.decision_intelligence.risk_metadata import project_risk_details
 from app.decision_intelligence.strategy_comparison import project_strategy_comparison
+from app.decision_intelligence.warning_presentation import present_warnings
 from app.models.business import IngredientModel, SupplierModel
 from app.models.decision import DecisionRunModel
 from app.models.operations import ForecastRunModel
@@ -94,11 +95,20 @@ class DecisionBriefBuilder:
             assistant_summary = AssistantSummary.model_validate(assistant_data) if assistant_data else None
         except Exception:
             assistant_summary = None
+        synthesis_data = (package.get("assistant") or {}).get("ingredient_synthesis")
+        try:
+            ingredient_synthesis = [IngredientSynthesis.model_validate(item) for item in synthesis_data] if isinstance(synthesis_data, list) else []
+        except Exception:
+            ingredient_synthesis = []
         return brief.model_copy(update={
             "ingredient_demand_summary": summaries,
             "risk_details": risk_details,
             "strategy_comparison": strategy_comparison,
             "assistant_summary": assistant_summary,
+            "ingredient_synthesis": ingredient_synthesis,
+            # The Brief is a manager-facing route. Technical projections stay
+            # available from the persisted package/diagnostics, not this UI list.
+            "presented_warnings": [item for item in present_warnings([*package.get("warnings", []), *critic.get("warnings", [])]) if item.audience == "user"],
         })
 
 

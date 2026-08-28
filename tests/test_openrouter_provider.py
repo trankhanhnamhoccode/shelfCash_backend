@@ -366,6 +366,66 @@ async def test_generate_json_network_error_retries_once(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_concurrent_requests_keep_raw_content_and_diagnostics_isolated(monkeypatch):
+    """A shared gateway/client must never own per-request provider state."""
+    provider = OpenRouterQwenProvider(Settings(openrouter_api_key="mock-key"))
+
+    import asyncio
+    original_sleep = asyncio.sleep
+
+    async def no_sleep(_):
+        return None
+
+    async def mock_post(url, json, **kwargs):
+        request_name = __import__("json").loads(json["messages"][1]["content"])["request"]
+        if request_name == "A":
+            await original_sleep(0.01)
+            content = '{"request":"A"}'
+        else:
+            content = ""
+        return httpx.Response(200, json={"model": "qwen/qwen3.5-9b", "provider": request_name, "choices": [{"finish_reason": "stop", "message": {"content": content}}]}, request=httpx.Request("POST", url))
+
+    client = await provider._get_client()
+    monkeypatch.setattr(client, "post", mock_post)
+    monkeypatch.setattr("app.llm.openrouter_qwen.asyncio.sleep", no_sleep)
+    context_a, context_b = {"correlation_id": "request-A"}, {"correlation_id": "request-B"}
+    result_a, result_b = await asyncio.gather(
+        provider.generate_json("system", {"request": "A"}, request_context=context_a),
+        provider.generate_json("system", {"request": "B"}, request_context=context_b),
+        return_exceptions=True,
+    )
+    assert result_a == {"request": "A"}
+    assert isinstance(result_b, LLMProviderError)
+    assert context_a["openrouter_raw_content"] == '{"request":"A"}'
+    assert context_a["openrouter_diagnostics"]["correlation_id"] == "request-A"
+    assert context_a["openrouter_diagnostics"]["resolved_provider"] == "A"
+    assert "openrouter_raw_content" not in context_b
+    assert context_b["openrouter_diagnostics"]["correlation_id"] == "request-B"
+    assert context_b["openrouter_diagnostics"]["failure_category"] == LLMFailureStage.EMPTY_RESPONSE.value
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_rapid_sequential_requests_keep_independent_contexts(monkeypatch):
+    provider = OpenRouterQwenProvider(Settings(openrouter_api_key="mock-key"))
+
+    async def mock_post(url, json, **kwargs):
+        name = __import__("json").loads(json["messages"][1]["content"])["name"]
+        return httpx.Response(200, json={"provider": f"provider-{name}", "choices": [{"finish_reason": "stop", "message": {"content": '{"name":"' + name + '"}'}}]}, request=httpx.Request("POST", url))
+
+    client = await provider._get_client()
+    monkeypatch.setattr(client, "post", mock_post)
+    first, second = {"correlation_id": "rapid-A"}, {"correlation_id": "rapid-B"}
+    assert await provider.generate_json("system", {"name": "A"}, request_context=first) == {"name": "A"}
+    assert await provider.generate_json("system", {"name": "B"}, request_context=second) == {"name": "B"}
+    assert first["openrouter_raw_content"] == '{"name":"A"}'
+    assert second["openrouter_raw_content"] == '{"name":"B"}'
+    assert first["openrouter_diagnostics"]["resolved_provider"] == "provider-A"
+    assert second["openrouter_diagnostics"]["resolved_provider"] == "provider-B"
+    await provider.close()
+
+
+@pytest.mark.asyncio
 async def test_map_sheet_success(monkeypatch):
     settings = Settings(openrouter_api_key="mock-key")
     provider = OpenRouterQwenProvider(settings)
