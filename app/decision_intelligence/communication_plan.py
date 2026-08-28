@@ -19,10 +19,15 @@ class CommunicationPlan:
     def as_payload(self) -> dict[str, list[str]]:
         return {
             "decision": self.decision,
+            "main_risk": self.main_attention,
             "main_attention": self.main_attention,
             "limitation": self.limitation,
             "supporting": self.supporting,
         }
+
+    @property
+    def main_risk(self) -> list[str]:
+        return self.main_attention
 
     @property
     def evidence_ids(self) -> list[str]:
@@ -42,7 +47,22 @@ def summary_communication_plan(records: list[dict[str, Any]]) -> CommunicationPl
     # Metrics describe the selected plan and are useful context, not a reason to
     # replace the plan decision selected by the backend.
     supporting = _ids(records, lambda item: item.get("type") == "SELECTED_PLAN_RISK_METRICS", 1)
-    risk = _ids(records, lambda item: item.get("classification") == "RISK_SIGNAL", 2)
+    operational = [item for item in records if item.get("type") == "INGREDIENT_OPERATIONAL_RISK"]
+
+    def risk_key(item: dict[str, Any]):
+        return (
+            item.get("first_stockout_date") is None,
+            str(item.get("first_stockout_date") or "9999-12-31"),
+            float(item.get("fill_rate")) if item.get("fill_rate") is not None else float("inf"),
+            -float(item.get("shortage_quantity") or 0),
+            -int(item.get("stockout_event_count") or 0),
+            str(item.get("ingredient_name") or item.get("ingredient_id") or ""),
+            str(item.get("ingredient_id") or ""),
+        )
+
+    risk = [str(item["evidence_id"]) for item in sorted(operational, key=risk_key)[:1]]
+    if not risk:
+        risk = _ids(records, lambda item: item.get("classification") == "RISK_SIGNAL", 1)
     limitation = _ids(records, lambda item: item.get("classification") == "LIMITATION", 1)
     selected = set(decision + supporting + risk + limitation)
     supporting.extend(_ids(

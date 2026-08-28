@@ -31,6 +31,33 @@ def test_summary_plan_does_not_invent_attention_when_there_is_no_risk():
     assert plan.limitation == []
 
 
+def test_summary_plan_selects_one_main_operational_risk_by_earliest_stockout_then_fill_rate():
+    plan = summary_communication_plan([
+        _record("decision", "PLAN_OVERVIEW"),
+        {
+            "evidence_id": "late", "type": "INGREDIENT_OPERATIONAL_RISK", "classification": "RISK_SIGNAL",
+            "ingredient_id": "cup", "first_stockout_date": "2026-08-17", "fill_rate": 0.88,
+            "shortage_quantity": 10, "stockout_event_count": 1,
+        },
+        {
+            "evidence_id": "early", "type": "INGREDIENT_OPERATIONAL_RISK", "classification": "RISK_SIGNAL",
+            "ingredient_id": "milk", "first_stockout_date": "2026-08-14", "fill_rate": 0.74,
+            "shortage_quantity": 2, "stockout_event_count": 1,
+        },
+    ])
+
+    assert plan.main_risk == ["early"]
+
+
+def test_summary_plan_operational_risk_tie_break_is_stable_by_ingredient_id():
+    records = [
+        _record("decision", "PLAN_OVERVIEW"),
+        {"evidence_id": "z", "type": "INGREDIENT_OPERATIONAL_RISK", "classification": "RISK_SIGNAL", "ingredient_id": "z", "first_stockout_date": "2026-08-14", "fill_rate": .74, "shortage_quantity": 2, "stockout_event_count": 1},
+        {"evidence_id": "a", "type": "INGREDIENT_OPERATIONAL_RISK", "classification": "RISK_SIGNAL", "ingredient_id": "a", "first_stockout_date": "2026-08-14", "fill_rate": .74, "shortage_quantity": 2, "stockout_event_count": 1},
+    ]
+    assert summary_communication_plan(records).main_risk == ["a"]
+
+
 def test_why_plan_only_selects_causal_fact_as_answer_first():
     without_cause = narrative_communication_plan([
         _record("quantity", "PROCUREMENT_QUANTITY"),

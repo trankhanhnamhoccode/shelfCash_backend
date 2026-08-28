@@ -11,6 +11,7 @@ from app.decision_intelligence.contracts import (
     RiskBrief,
 )
 from app.decision_intelligence.overall_summary import OverallSummaryProvider
+from app.decision_intelligence.display import purchase_cost_display
 from app.decision_intelligence.semantic_evidence import DecisionSemanticEvidenceBuilder
 from app.models.decision import DecisionRunModel
 
@@ -121,6 +122,14 @@ def test_overall_summary_falls_back_for_malformed_or_unsupported_causal_output()
     assert "PACK_SIZE_ROUNDING" not in rejected.summary
     assert "quy cach" not in rejected.summary.lower()
 
+    def presentation_claim_type(payload):
+        response = _valid_response(payload)
+        response["summary"]["type"] = "SUMMARY"
+        return response
+
+    rejected_presentation_type = OverallSummaryProvider(_Gateway(presentation_claim_type), None).summarize(brief, facts)
+    assert rejected_presentation_type.source == "deterministic_fallback"
+
     def raw_machine_code(payload):
         response = _valid_response(payload)
         response["summary"] = {
@@ -148,6 +157,29 @@ def test_deterministic_summary_never_invents_null_risk_or_internal_identifiers()
     assert "overall-summary-run" not in rendered
     assert "PACK_SIZE_ROUNDING" not in rendered
     assert "0%" not in rendered
+
+
+def test_purchase_cost_display_is_shared_by_fallback_and_llm_evidence():
+    brief = _brief().model_copy(update={
+        "recommendation": RecommendationBrief(available=True, strategy="balanced", total_purchase_cost=7_668_000),
+    })
+    facts = DecisionSemanticEvidenceBuilder().build(brief)
+    provider = OverallSummaryProvider(None, None)
+    fallback = provider.deterministic_fallback(brief, facts)
+    _, records = provider._context(brief, facts)
+    overview = next(record for record in records if record["type"] == "PLAN_OVERVIEW")
+
+    assert purchase_cost_display(7_668_000) == "7,67 triệu đồng"
+    assert overview["total_purchase_cost_display"] == "7,67 triệu đồng"
+    assert "7,67 triệu đồng" in fallback.summary
+    assert "7.668. đồng" not in fallback.summary
+
+
+def test_operational_risk_date_gets_a_backend_display_value_for_grounding():
+    record = {"first_stockout_date": "2026-08-14"}
+    OverallSummaryProvider._add_display_values(record)
+
+    assert record["first_stockout_date_display"] == "14/08"
 
 
 def test_no_feasible_recommendation_has_a_grounded_summary_without_order_metrics():

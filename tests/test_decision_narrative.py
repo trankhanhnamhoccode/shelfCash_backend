@@ -1,6 +1,8 @@
 import asyncio
 from datetime import date, datetime, timezone
 
+import pytest
+
 from app.config import Settings
 from app.decision_intelligence.contracts import (
     CriticBrief, DecisionBriefFacts, ForecastBrief, IngredientDemandBrief,
@@ -20,6 +22,25 @@ class MockQwen:
     async def generate_json(self, system, payload, **kwargs):
         self.calls.append({"payload": payload, "kwargs": kwargs})
         return self.response(payload)
+
+
+@pytest.mark.parametrize("text", [
+    "Sữa có thể thiếu do nhu cầu tăng.",
+    "Sữa có thể thiếu bởi nhu cầu tăng.",
+    "Nguyên nhân xuất phát từ nhu cầu tăng.",
+])
+def test_causal_hedges_are_rejected_without_causal_evidence(text):
+    with pytest.raises(ValueError, match="unsupported_causal_claim"):
+        DecisionNarrativeProvider._validate_causal_language(
+            text, [{"type": "DEMAND_HORIZON_SUMMARY", "classification": "DERIVED"}],
+        )
+
+
+def test_causal_language_is_allowed_when_causal_evidence_is_cited():
+    DecisionNarrativeProvider._validate_causal_language(
+        "Sữa thiếu vì nhu cầu tăng.",
+        [{"type": "PROCUREMENT_REASON", "classification": "CAUSAL"}],
+    )
 
 
 def brief(days=1):

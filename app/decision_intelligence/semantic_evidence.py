@@ -141,11 +141,52 @@ class DecisionSemanticEvidenceBuilder:
         facts.extend(self._alignment_facts(brief, demand_facts))
         facts.extend(self._selected_risk_facts(brief))
         if isinstance(package, dict):
+            facts.extend(self._operational_risk_facts(brief, package))
             facts.extend(self._baseline_facts(brief, package))
             facts.extend(self._stress_facts(brief, package))
             facts.extend(self._warning_facts(brief, package))
             facts.extend(self._strategy_facts(brief, package))
         return sorted(facts, key=lambda item: item.fact_id)
+
+    def _operational_risk_facts(self, brief: DecisionBriefFacts, package: dict[str, Any]) -> list[SemanticFact]:
+        """Expose already-computed selected-plan ingredient risks for ranking."""
+        metrics = package.get("business_metrics")
+        deterministic = metrics.get("deterministic") if isinstance(metrics, dict) else None
+        rows = deterministic.get("ingredient_metrics") if isinstance(deterministic, dict) else None
+        if not isinstance(rows, list):
+            return []
+        names = {row.ingredient_id: row.ingredient_name for row in brief.procurement_rows if row.ingredient_name}
+        names.update({row.ingredient_id: row.ingredient_name for row in brief.ingredient_demand if row.ingredient_name})
+        facts: list[SemanticFact] = []
+        for index, row in enumerate(rows):
+            if not isinstance(row, dict) or not row.get("ingredient_id"):
+                continue
+            shortage = _number(row.get("shortage_quantity")) or 0.0
+            events = int(row.get("stockout_event_count") or 0)
+            first = _date(row.get("first_stockout_date"))
+            if shortage <= 0 and events <= 0 and first is None:
+                continue
+            ingredient_id = str(row["ingredient_id"])
+            facts.append(SemanticFact(
+                fact_id=_fact_id(brief.decision_run_id, "INGREDIENT_OPERATIONAL_RISK", SemanticFactScope.INGREDIENT, {"ingredient_id": ingredient_id}),
+                fact_type="INGREDIENT_OPERATIONAL_RISK",
+                decision_run_id=brief.decision_run_id,
+                classification=SemanticFactClassification.RISK_SIGNAL,
+                scope=SemanticFactScope.INGREDIENT,
+                entities={"ingredient_id": ingredient_id},
+                values={
+                    "ingredient_name": names.get(ingredient_id), "unit": row.get("unit"),
+                    "fill_rate": _number(row.get("fill_rate")), "shortage_quantity": shortage,
+                    "first_stockout_date": first, "stockout_event_count": events,
+                },
+                source_evidence_ids=[_source_id(f"package.business_metrics.deterministic.ingredient_metrics[{index}]")],
+                provenance=SemanticFactProvenance(
+                    source_type="DecisionRun.package_json", source_module="app.services.business_metrics_service",
+                    source_path=f"package.business_metrics.deterministic.ingredient_metrics[{index}]",
+                    source_field="Exact FEFO selected-plan ingredient metric",
+                ),
+            ))
+        return facts
 
     def _plan_overview_facts(self, brief: DecisionBriefFacts) -> list[SemanticFact]:
         return [SemanticFact(

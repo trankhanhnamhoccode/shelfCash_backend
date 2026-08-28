@@ -575,6 +575,13 @@ class DecisionNarrativeProvider:
     def _validate_numbers(text: str, payloads: list[dict]):
         numbers = re.findall(r"(?<![\w-])\d+(?:[.,]\d+)?", text)
         supported = {round(float(value), 9) for payload in payloads for value in payload.values() if isinstance(value, (int, float))}
+        # Presentation-safe display strings (for example ``14/08`` and
+        # ``7,67 triệu đồng``) are produced by backend code and are therefore
+        # equally authoritative for numeric grounding.
+        for payload in payloads:
+            for key, value in payload.items():
+                if key.endswith("_display") and isinstance(value, str):
+                    supported.update(round(float(token.replace(",", ".")), 9) for token in re.findall(r"\d+(?:[.,]\d+)?", value))
         for number in numbers:
             if round(float(number.replace(",", ".")), 9) not in supported:
                 raise ValueError("unsupported_numeric_claim")
@@ -663,7 +670,9 @@ class DecisionNarrativeProvider:
         # historical mojibake literals, while model output is UTF-8 text.
         causal_markers = (
             " v\u00ec ", " do ", " n\u00ean ", " d\u1eabn \u0111\u1ebfn ",
-            " \u0111\u1ec3 tr\u00e1nh ", " because ", " due to ", " therefore ", " caused by ",
+            " b\u1edfi ", " do \u0111\u00f3 ", " khi\u1ebfn ", " \u0111\u1ec3 tr\u00e1nh ",
+            " nguy\u00ean nh\u00e2n ", " xu\u1ea5t ph\u00e1t t\u1eeb ",
+            " because ", " due to ", " therefore ", " caused by ",
         )
         if not any(marker in lowered for marker in causal_markers):
             return

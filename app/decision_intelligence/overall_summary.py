@@ -7,6 +7,7 @@ from typing import Any
 
 from app.decision_intelligence.adapter import ShelfCashDecisionIntelligenceAdapter
 from app.decision_intelligence.communication_plan import summary_communication_plan
+from app.decision_intelligence.display import purchase_cost_display, vi_number
 from app.decision_intelligence.contracts import (
     AssistantSummary,
     DecisionBriefFacts,
@@ -54,10 +55,24 @@ ID hợp lệ, nhưng headline/summary/key_points phải giữ văn phong tự n
 trả một JSON object đúng schema."""
 
 
-def _vi_number(value: float, maximum_decimals: int = 2) -> str:
-    rendered = f"{value:,.{maximum_decimals}f}"
-    rendered = rendered.rstrip("0").rstrip(".")
-    return rendered.replace(",", "X").replace(".", ",").replace("X", ".")
+SYSTEM_PROMPT += """
+
+COMMUNICATION PLAN ORDER: use decision for the first sentence. Use main_risk only for the
+second operational-risk sentence when it is non-empty; do not replace it with supporting
+or other risk evidence. Use limitation only for the final limitation sentence when non-empty.
+When main_risk is empty, do not invent a warning.
+
+CLAIM TYPE CONTRACT: headline, summary, key_points, warning_summary are presentation fields,
+not claim types. claims[].type must exactly equal the semantic type of at least one cited
+evidence_id. Never use HEADLINE, SUMMARY, KEY_POINT, or WARNING_SUMMARY as a claim type.
+Good: evidence PLAN_OVERVIEW -> claim PLAN_OVERVIEW. Good: evidence
+INGREDIENT_OPERATIONAL_RISK -> claim INGREDIENT_OPERATIONAL_RISK. Bad: summary -> SUMMARY.
+
+CAUSAL SAFETY: unless the cited evidence is CAUSAL or PROCUREMENT_REASON, never use causal
+language: vì, do, bởi, nên, do đó, dẫn đến, khiến, để tránh, nguyên nhân, xuất phát từ.
+This includes hedges such as "có thể do" and "có khả năng do". OBSERVATION and DERIVED
+evidence may describe a state only, never its cause.
+"""
 
 
 def _strategy_label(strategy: str | None) -> str | None:
@@ -112,7 +127,7 @@ class OverallSummaryProvider:
         summary = f"ShelfCash \u0111\u1ec1 xu\u1ea5t nh\u1eadp {count} nguy\u00ean li\u1ec7u"
         cost = overview.values.get("total_purchase_cost") if overview else None
         if isinstance(cost, (int, float)):
-            summary += f" v\u1edbi t\u1ed5ng chi ph\u00ed d\u1ef1 ki\u1ebfn {_vi_number(float(cost), 0)} \u0111\u1ed3ng"
+            summary += f" v\u1edbi t\u1ed5ng chi ph\u00ed d\u1ef1 ki\u1ebfn {purchase_cost_display(cost)}"
         if horizon:
             summary += f" cho {horizon} ng\u00e0y t\u1edbi"
         summary += "."
@@ -155,8 +170,8 @@ class OverallSummaryProvider:
             selected = [item for item in structured if item["evidence_id"] in selected_ids]
             payload = {"language": "vi", "communication_plan": plan.as_payload(), "evidence": selected}
             logger.info(
-                "overall_summary_communication_plan decision_run_id=%s decision=%s attention=%s limitation=%s supporting=%s",
-                brief.decision_run_id, plan.decision, plan.main_attention, plan.limitation, plan.supporting,
+                "overall_summary_communication_plan decision_run_id=%s decision=%s main_risk=%s limitation=%s supporting=%s",
+                brief.decision_run_id, plan.decision, plan.main_risk, plan.limitation, plan.supporting,
             )
             raw = self._run_gateway(payload, request_context)
             try:
@@ -282,8 +297,15 @@ class OverallSummaryProvider:
             ),
             key=lambda fact: float(fact.values.get("shortage_quantity") or 0), reverse=True,
         )[:3]
+        operational_risk = [
+            fact for fact in facts if fact.fact_type == "INGREDIENT_OPERATIONAL_RISK"
+        ]
         risk = sorted(
-            (fact for fact in facts if fact.classification is SemanticFactClassification.RISK_SIGNAL),
+            (
+                fact for fact in facts
+                if fact.classification is SemanticFactClassification.RISK_SIGNAL
+                and fact.fact_type != "INGREDIENT_OPERATIONAL_RISK"
+            ),
             key=lambda fact: max(
                 float(fact.values.get("shortage_quantity") or 0),
                 float(fact.values.get("capacity_violation_quantity") or 0),
@@ -294,7 +316,9 @@ class OverallSummaryProvider:
             key=lambda fact: fact.fact_type,
         )[:3]
         selected_risk = [fact for fact in facts if fact.fact_type == "SELECTED_PLAN_RISK_METRICS"]
-        return [*overview, *selected_risk, *demand, *alignment, *baseline, *risk, *limitations]
+        # Preserve every selected-plan operational candidate: communication-plan
+        # ranking must see the full set before it chooses one main risk.
+        return [*overview, *selected_risk, *demand, *alignment, *baseline, *operational_risk, *risk, *limitations]
 
     @staticmethod
     def _add_display_values(record: dict[str, Any]) -> None:
@@ -302,13 +326,16 @@ class OverallSummaryProvider:
         if isinstance(cost, (int, float)):
             if cost >= 1_000_000:
                 display_value = round(float(cost) / 1_000_000, 2)
-                record["total_purchase_cost_display"] = f"{_vi_number(display_value)} tri\u1ec7u \u0111\u1ed3ng"
+                record["total_purchase_cost_display"] = purchase_cost_display(cost)
                 record["total_purchase_cost_display_value"] = display_value
             else:
-                record["total_purchase_cost_display"] = f"{_vi_number(float(cost), 0)} \u0111\u1ed3ng"
+                record["total_purchase_cost_display"] = purchase_cost_display(cost)
                 record["total_purchase_cost_display_value"] = float(cost)
         rate = record.get("expected_fill_rate")
         if isinstance(rate, (int, float)):
             display_value = round(float(rate) * 100, 1)
-            record["expected_fill_rate_display"] = f"{_vi_number(display_value, 1)}%"
+            record["expected_fill_rate_display"] = f"{vi_number(display_value, 1)}%"
             record["expected_fill_rate_display_value"] = display_value
+        stockout_date = record.get("first_stockout_date")
+        if isinstance(stockout_date, str) and len(stockout_date) == 10 and stockout_date[4] == "-" and stockout_date[7] == "-":
+            record["first_stockout_date_display"] = f"{stockout_date[8:10]}/{stockout_date[5:7]}"
