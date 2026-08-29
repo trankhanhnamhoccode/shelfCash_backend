@@ -113,9 +113,21 @@ class OverallSummaryProvider:
             fact for fact in facts
             if fact.classification is SemanticFactClassification.LIMITATION
         ]
-        stress = [
+        risk_signals = [
             fact for fact in facts
             if fact.classification is SemanticFactClassification.RISK_SIGNAL
+        ]
+        conservative_risks = [
+            fact for fact in risk_signals
+            if fact.values.get("basis_kind") == "conservative_design_scenario"
+        ]
+        stress_risks = [
+            fact for fact in risk_signals
+            if fact.fact_type.startswith("STRESS_")
+        ]
+        selected_plan_risks = [
+            fact for fact in risk_signals
+            if fact not in conservative_risks and fact not in stress_risks
         ]
         if not brief.recommendation.available:
             return AssistantSummary(
@@ -146,11 +158,12 @@ class OverallSummaryProvider:
         points = [
             f"K\u1ebf ho\u1ea1ch hi\u1ec7n t\u1ea1i s\u1eed d\u1ee5ng chi\u1ebfn l\u01b0\u1ee3c {strategy}."
         ] if strategy else []
-        if stress:
-            if any(fact.values.get("basis_kind") == "conservative_design_scenario" for fact in stress):
-                points.append("Trong kịch bản nhu cầu bảo thủ, mô phỏng ghi nhận tín hiệu thiếu hàng cần theo dõi.")
-            else:
-                points.append("Một số kịch bản kiểm tra ghi nhận tín hiệu thiếu hàng hoặc vượt sức chứa.")
+        if conservative_risks:
+            points.append("Trong kịch bản nhu cầu bảo thủ, mô phỏng ghi nhận tín hiệu thiếu hàng cần theo dõi.")
+        elif stress_risks:
+            points.append("Một số kịch bản kiểm tra ghi nhận tín hiệu thiếu hàng hoặc vượt sức chứa.")
+        elif selected_plan_risks:
+            points.append("Kế hoạch hiện tại có một tín hiệu rủi ro vận hành cần theo dõi.")
         return AssistantSummary(
             headline=(
                 f"K\u1ebf ho\u1ea1ch nh\u1eadp h\u00e0ng {horizon} ng\u00e0y"

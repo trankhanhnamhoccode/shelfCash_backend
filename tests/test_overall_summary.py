@@ -1,5 +1,6 @@
 import json
 from datetime import date, datetime, timezone
+import pytest
 
 from app.decision_intelligence.contracts import (
     CriticBrief,
@@ -13,7 +14,10 @@ from app.decision_intelligence.contracts import (
 )
 from app.decision_intelligence.overall_summary import OverallSummaryProvider
 from app.decision_intelligence.display import purchase_cost_display
-from app.decision_intelligence.semantic_evidence import DecisionSemanticEvidenceBuilder
+from app.decision_intelligence.semantic_evidence import (
+    DecisionSemanticEvidenceBuilder, SemanticFact, SemanticFactClassification,
+    SemanticFactProvenance, SemanticFactScope,
+)
 from app.models.decision import DecisionRunModel
 
 
@@ -140,6 +144,78 @@ def test_provenance_validation_is_input_order_independent():
     typed = _provenance_response("c", "Trong kịch bản nhu cầu bảo thủ, mô phỏng ghi nhận nguy cơ thiếu.")
     OverallSummaryProvider._validate_expression(typed, {"c"}, [selected, conservative])
     OverallSummaryProvider._validate_expression(typed, {"c"}, [conservative, selected])
+
+
+def test_overall_summary_runtime_rejects_wrong_fill_rate_term_and_accepts_correct_term():
+    brief = _brief()
+    facts = DecisionSemanticEvidenceBuilder().build(brief)
+
+    def provider_response(text):
+        def factory(payload):
+            response = _valid_response(payload)
+            response["summary"]["text"] = text
+            return response
+        return factory
+
+    invalid = OverallSummaryProvider(
+        _Gateway(provider_response("Tỷ lệ lấp kho cần theo dõi.")), None,
+    ).summarize(brief, facts)
+    valid = OverallSummaryProvider(
+        _Gateway(provider_response("Tỷ lệ đáp ứng nhu cầu cần theo dõi.")), None,
+    ).summarize(brief, facts)
+    assert invalid.source == "deterministic_fallback"
+    assert invalid.llm_diagnostics["error_message"] == "overall_summary_invalid_fill_rate_terminology"
+    assert valid.source == "llm"
+
+
+def test_provider_like_future_and_three_provenance_wording_is_accepted_and_order_independent():
+    selected = {"evidence_id": "p", "type": "PLAN_OVERVIEW"}
+    conservative = {"evidence_id": "c", "type": "INGREDIENT_OPERATIONAL_RISK", "basis_kind": "conservative_design_scenario"}
+    stress = {"evidence_id": "s", "type": "STRESS_SHORTAGE_OBSERVED"}
+    claims = [
+        {"type": "PLAN_OVERVIEW", "text": "ShelfCash đề xuất phương án hiện tại.", "evidence_ids": ["p"]},
+        {"type": "INGREDIENT_OPERATIONAL_RISK", "text": "Trong kịch bản nhu cầu bảo thủ, mô phỏng ghi nhận nguy cơ thiếu hụt.", "evidence_ids": ["c"]},
+        {"type": "STRESS_SHORTAGE_OBSERVED", "text": "Một số kịch bản kiểm tra sức chịu đựng ghi nhận nguy cơ thiếu hụt.", "evidence_ids": ["s"]},
+    ]
+    typed = DecisionOverallSummaryLLMResponse.model_validate({
+        "headline": claims[0], "summary": claims[1], "key_points": [claims[2]],
+        "warning_summary": None, "used_evidence_ids": ["p", "c", "s"],
+    })
+    OverallSummaryProvider._validate_expression(typed, {"p", "c", "s"}, [selected, conservative, stress])
+    OverallSummaryProvider._validate_expression(typed, {"p", "c", "s"}, [stress, selected, conservative])
+
+
+def test_valid_key_point_counts_are_schema_and_business_valid():
+    claim = {"type": "PLAN_OVERVIEW", "text": "Kế hoạch hiện tại đã được chọn.", "evidence_ids": ["p"]}
+    for count in range(4):
+        typed = DecisionOverallSummaryLLMResponse.model_validate({
+            "headline": claim,
+            "summary": {**claim, "text": "ShelfCash đề xuất kế hoạch hiện tại."},
+            "key_points": [{**claim, "text": f"Điểm cần theo dõi {index}."} for index in range(count)],
+            "warning_summary": None,
+            "used_evidence_ids": ["p"],
+        })
+        OverallSummaryProvider._validate_expression(typed, {"p"}, [{"evidence_id": "p", "type": "PLAN_OVERVIEW"}])
+
+
+def _risk_fact(fact_type, *, basis_kind=None):
+    values = {"basis_kind": basis_kind} if basis_kind else {}
+    return SemanticFact(
+        fact_id=fact_type, fact_type=fact_type, decision_run_id="overall-summary-run",
+        classification=SemanticFactClassification.RISK_SIGNAL, scope=SemanticFactScope.INGREDIENT,
+        values=values,
+        provenance=SemanticFactProvenance(source_type="test", source_module="test", source_path="test"),
+    )
+
+
+def test_deterministic_fallback_preserves_selected_conservative_and_stress_provenance():
+    provider = OverallSummaryProvider(None, None)
+    selected = provider.deterministic_fallback(_brief(), [_risk_fact("SELECTED_PLAN_RISK_METRICS")])
+    conservative = provider.deterministic_fallback(_brief(), [_risk_fact("INGREDIENT_OPERATIONAL_RISK", basis_kind="conservative_design_scenario")])
+    stress = provider.deterministic_fallback(_brief(), [_risk_fact("STRESS_SHORTAGE_OBSERVED")])
+    assert "Kế hoạch hiện tại có" in " ".join(selected.key_points)
+    assert "kịch bản nhu cầu bảo thủ" in " ".join(conservative.key_points)
+    assert "kịch bản kiểm tra" in " ".join(stress.key_points)
 
 
 def test_overall_summary_falls_back_for_malformed_or_unsupported_causal_output():
