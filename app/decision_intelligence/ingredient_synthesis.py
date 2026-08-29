@@ -19,7 +19,12 @@ from app.decision_intelligence.display import add_numeric_display_contract, vi_n
 from app.decision_intelligence.narrative import DecisionNarrativeProvider
 from app.decision_intelligence.semantic_evidence import SemanticFact
 from app.decision_intelligence.style_examples import retrieve_style_examples
-from app.llm.tasks import LLMTask
+from app.llm.tasks import LLMFailureStage, LLMTask
+
+try:
+    import httpx
+except ImportError:  # pragma: no cover - OpenRouter installs httpx in production.
+    httpx = None
 
 logger = logging.getLogger("shelfcash.ingredient_synthesis")
 
@@ -199,12 +204,20 @@ class IngredientSynthesisProvider:
         except Exception as exc:
             self._apply_gateway_diagnostics(diagnostics, context)
             stage = self._batch_failure_stage(exc, context)
+            self._apply_exception_diagnostics(diagnostics, exc)
             diagnostics.update(status="failed", failure_stage=stage)
             diagnostics["items"] = [
                 self._item_diagnostic(prepared[entry["ingredient_id"]][0], "fallback", stage, f"batch_{stage.lower()}")
                 for entry in eligible
             ]
-            logger.warning("ingredient_synthesis_batch_fallback decision_run_id=%s eligible_count=%s failure_stage=%s reason=%s", brief.decision_run_id, len(eligible), stage, type(exc).__name__)
+            logger.warning(
+                "event=ingredient_synthesis_batch_fallback decision_run_id=%s task=%s correlation_id=%s eligible_count=%s provider_call_count=%s configured_model=%s resolved_model=%s provider=%s failure_stage=%s exception_type=%s exception_message=%s http_status=%s raw_response_present=%s content_present=%s",
+                brief.decision_run_id, LLMTask.INGREDIENT_SYNTHESIS.value,
+                diagnostics.get("correlation_id"), len(eligible), diagnostics.get("provider_call_count"),
+                diagnostics.get("configured_model"), diagnostics.get("resolved_model"), diagnostics.get("provider"),
+                stage, diagnostics.get("exception_type", type(exc).__name__), diagnostics.get("exception_message"),
+                diagnostics.get("http_status"), diagnostics.get("raw_response_present"), diagnostics.get("content_present"),
+            )
             return [self._fallback(prepared[item][0]) if item in {entry["ingredient_id"] for entry in eligible} else prepared[item][0] for item in ingredient_ids]
         returned = {item.ingredient_id: item for item in typed.items}
         results = []
@@ -266,6 +279,15 @@ class IngredientSynthesisProvider:
             return "SCHEMA_VALIDATION"
         if isinstance(exc, LLMUnavailableError):
             return "PROVIDER_UNAVAILABLE"
+        if isinstance(exc, asyncio.TimeoutError) or (httpx is not None and isinstance(exc, httpx.TimeoutException)):
+            return LLMFailureStage.TIMEOUT.value
+        if httpx is not None and isinstance(exc, httpx.RequestError):
+            return LLMFailureStage.NETWORK.value
+        # This is a defensive boundary only. OpenRouterLLMGateway normalizes
+        # its own failures; an exception reaching here unclassified originated
+        # in local orchestration, a custom provider, or the sync/async bridge.
+        if isinstance(exc, (RuntimeError, TypeError, ValueError, OSError)):
+            return LLMFailureStage.INTERNAL_RUNTIME.value
         return "UNKNOWN"
 
     @staticmethod
@@ -294,6 +316,24 @@ class IngredientSynthesisProvider:
         )
         return redacted[:20000]
 
+    @staticmethod
+    def _safe_exception_message(exc: Exception) -> str:
+        value = str(exc)
+        redacted = re.sub(
+            r'''(?i)(authorization|api[_-]?key)\s*[:=]\s*(?:bearer\s+)?[^,\s"'}]+''',
+            r"\1=[REDACTED]",
+            value,
+        )
+        return redacted[:500]
+
+    def _apply_exception_diagnostics(self, diagnostics: dict[str, Any], exc: Exception) -> None:
+        details = getattr(exc, "details", None)
+        details = details if isinstance(details, dict) else {}
+        diagnostics["exception_type"] = str(details.get("exception_type") or type(exc).__name__)
+        diagnostics["exception_message"] = str(details.get("exception_message") or self._safe_exception_message(exc))[:500]
+        if details.get("origin") is not None:
+            diagnostics["exception_origin"] = str(details["origin"])
+
     def _apply_gateway_diagnostics(self, diagnostics: dict[str, Any], context: dict[str, Any]) -> None:
         gateway = context.get("openrouter_diagnostics")
         if isinstance(gateway, dict):
@@ -305,12 +345,17 @@ class IngredientSynthesisProvider:
             diagnostics["content_present"] = bool(gateway.get("content_present", diagnostics["content_present"]))
             if gateway.get("http_status") is not None:
                 diagnostics["http_status"] = gateway["http_status"]
+            for key in ("generation_id", "exception_type", "exception_message", "exception_origin", "validation_stage"):
+                if gateway.get(key) is not None:
+                    diagnostics[key] = gateway[key]
         metadata = context.get("openrouter_metadata")
         if isinstance(metadata, dict):
             diagnostics["resolved_model"] = metadata.get("resolved_model") or diagnostics["resolved_model"]
             diagnostics["provider"] = metadata.get("resolved_provider") or diagnostics["provider"]
             if metadata.get("finish_reason") is not None:
                 diagnostics["finish_reason"] = metadata["finish_reason"]
+            if metadata.get("generation_id") is not None:
+                diagnostics["generation_id"] = metadata["generation_id"]
         raw = context.get("openrouter_raw_content") or context.get("openrouter_raw_response")
         safe_raw = self._safe_raw_response(raw)
         if safe_raw is not None:

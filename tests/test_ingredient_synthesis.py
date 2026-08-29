@@ -1,4 +1,5 @@
 from datetime import date, datetime, timezone
+import httpx
 from app.core.exceptions import LLMProviderError
 from app.decision_intelligence.contracts import (
     CriticBrief, DecisionBriefFacts, ForecastBrief, IngredientDemandBrief,
@@ -223,3 +224,38 @@ def test_unavailable_provider_is_not_attempted_and_raw_response_is_redacted():
     assert provider.last_diagnostics["status"] == "not_attempted"
     assert provider.last_diagnostics["failure_stage"] == "PROVIDER_UNAVAILABLE"
     assert "secret" not in provider._safe_raw_response('Authorization: secret {"api_key": "another-secret"}')
+
+
+def test_unclassified_transport_network_exception_is_not_reported_as_unknown():
+    class _NetworkGateway:
+        available = True
+
+        async def generate_json(self, *_args, **_kwargs):
+            raise httpx.ConnectError("synthetic network failure", request=httpx.Request("POST", "https://openrouter.ai/api/v1/chat/completions"))
+
+    brief, facts = _critical_batch()
+    provider = IngredientSynthesisProvider(_NetworkGateway(), None)
+    result = provider.synthesize(brief, facts)
+
+    assert all(item.source == "deterministic_fallback" for item in result)
+    assert provider.last_diagnostics["failure_stage"] == "NETWORK"
+    assert provider.last_diagnostics["exception_type"] == "ConnectError"
+    assert provider.last_diagnostics["raw_response_present"] is False
+    assert provider.last_diagnostics["content_present"] is False
+
+
+def test_unclassified_internal_runtime_exception_is_observable_not_unknown():
+    class _BrokenGateway:
+        available = True
+
+        async def generate_json(self, *_args, **_kwargs):
+            raise RuntimeError("synthetic internal failure")
+
+    brief, facts = _critical_batch()
+    provider = IngredientSynthesisProvider(_BrokenGateway(), None)
+    provider.synthesize(brief, facts)
+
+    diagnostics = provider.last_diagnostics
+    assert diagnostics["failure_stage"] == "INTERNAL_RUNTIME"
+    assert diagnostics["exception_type"] == "RuntimeError"
+    assert diagnostics["exception_message"] == "synthetic internal failure"

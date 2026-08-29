@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import random
+import re
 import time
 from typing import Any
 
@@ -140,6 +141,7 @@ class OpenRouterLLMGateway(LLMProvider):
             {},
         )
         return {
+            "generation_id": self._value(data.get("id")),
             "resolved_model": self._value(selected_endpoint.get("model")) or self._value(data.get("model")),
             "resolved_provider": self._value(selected_endpoint.get("provider")) or self._value(data.get("provider")),
             "routing_strategy": self._value(router_metadata.get("strategy")),
@@ -168,6 +170,45 @@ class OpenRouterLLMGateway(LLMProvider):
             for key in ("finish_reason", "native_finish_reason")
         }
         return bool(reasons & {"length", "max_tokens", "max_token", "token_limit"})
+
+    @staticmethod
+    def _safe_exception_message(exc: Exception) -> str:
+        """Keep developer diagnostics useful without copying credentials."""
+        return re.sub(
+            r'''(?i)(authorization|api[_-]?key)\s*[:=]\s*(?:bearer\s+)?[^,\s"'}]+''',
+            r"\1=[REDACTED]",
+            str(exc),
+        )[:500]
+
+    def _normalized_runtime_error(
+        self,
+        exc: Exception,
+        *,
+        stage: LLMFailureStage,
+        task: LLMTask,
+        profile: OpenRouterTaskProfile,
+        request_context: dict[str, Any] | None,
+        origin: str,
+    ) -> LLMProviderError:
+        self._diagnostics(
+            request_context,
+            failure_category=stage.value,
+            validation_stage="runtime",
+            exception_type=type(exc).__name__,
+            exception_message=self._safe_exception_message(exc),
+            exception_origin=origin,
+            raw_response_present=False,
+            content_present=False,
+        )
+        return self._provider_error(
+            f"OpenRouter runtime failure during {origin}", stage=stage,
+            task=task, profile=profile,
+            metadata={
+                "exception_type": type(exc).__name__,
+                "exception_message": self._safe_exception_message(exc),
+                "origin": origin,
+            },
+        )
 
     def _provider_error(
         self,
@@ -200,7 +241,20 @@ class OpenRouterLLMGateway(LLMProvider):
         if not self.available:
             raise LLMUnavailableError("OpenRouter API key is not configured")
 
-        profile = self.task_profile(task)
+        try:
+            profile = self.task_profile(task)
+        except Exception as exc:
+            # A bad local configuration/task is not an OpenRouter outage.
+            fallback_profile = OpenRouterTaskProfile(
+                model=self.model, temperature=0.0, max_tokens=0, timeout_seconds=0,
+                reasoning_enabled=False, structured_output=False, strict_schema=False,
+                require_parameters=False,
+            )
+            raise self._normalized_runtime_error(
+                exc, stage=LLMFailureStage.INTERNAL_RUNTIME, task=task,
+                profile=fallback_profile, request_context=request_context,
+                origin="task_profile",
+            ) from exc
         request_id = (request_context or {}).get("correlation_id") or get_request_id()
         decision_run_id = (request_context or {}).get("decision_run_id")
         self._diagnostics(
@@ -208,26 +262,39 @@ class OpenRouterLLMGateway(LLMProvider):
             task=task.value, configured_model=profile.model, attempt_count=0,
             raw_response_present=False, content_present=False, validation_stage="transport",
         )
-        body: dict[str, Any] = {
-            "model": profile.model,
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
-            ],
-            "temperature": profile.temperature,
-            "max_tokens": profile.max_tokens,
-            "reasoning": {"enabled": True} if profile.reasoning_enabled else {"effort": "none"},
-            "provider": {"require_parameters": profile.require_parameters},
-        }
-        if profile.structured_output:
-            body["response_format"] = {
-                "type": "json_schema",
-                "json_schema": {
-                    "name": task.value,
-                    "strict": profile.strict_schema,
-                    "schema": self._response_schema(task),
-                },
+        try:
+            body: dict[str, Any] = {
+                "model": profile.model,
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+                ],
+                "temperature": profile.temperature,
+                "max_tokens": profile.max_tokens,
+                "reasoning": {"enabled": True} if profile.reasoning_enabled else {"effort": "none"},
+                "provider": {"require_parameters": profile.require_parameters},
             }
+            if profile.structured_output:
+                body["response_format"] = {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": task.value,
+                        "strict": profile.strict_schema,
+                        "schema": self._response_schema(task),
+                    },
+                }
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise self._normalized_runtime_error(
+                exc, stage=LLMFailureStage.REQUEST_SERIALIZATION, task=task,
+                profile=profile, request_context=request_context,
+                origin="request_payload",
+            ) from exc
+        except Exception as exc:
+            raise self._normalized_runtime_error(
+                exc, stage=LLMFailureStage.INTERNAL_RUNTIME, task=task,
+                profile=profile, request_context=request_context,
+                origin="request_construction",
+            ) from exc
 
         started = time.monotonic()
         logger.info(
@@ -236,7 +303,14 @@ class OpenRouterLLMGateway(LLMProvider):
             profile.max_tokens, "enabled" if profile.reasoning_enabled else "off",
             profile.structured_output, profile.strict_schema, profile.require_parameters,
         )
-        client = await self._get_client()
+        try:
+            client = await self._get_client()
+        except Exception as exc:
+            raise self._normalized_runtime_error(
+                exc, stage=LLMFailureStage.INTERNAL_RUNTIME, task=task,
+                profile=profile, request_context=request_context,
+                origin="client_initialization",
+            ) from exc
         url = f"{self.base_url}/chat/completions"
         response: httpx.Response | None = None
         for attempt in range(2):
@@ -272,6 +346,12 @@ class OpenRouterLLMGateway(LLMProvider):
                 raise self._provider_error(
                     "OpenRouter network connection error", stage=LLMFailureStage.NETWORK,
                     task=task, profile=profile,
+                ) from exc
+            except Exception as exc:
+                raise self._normalized_runtime_error(
+                    exc, stage=LLMFailureStage.INTERNAL_RUNTIME, task=task,
+                    profile=profile, request_context=request_context,
+                    origin="http_transport",
                 ) from exc
 
             if response.status_code == 429 or response.status_code >= 500:
@@ -313,6 +393,12 @@ class OpenRouterLLMGateway(LLMProvider):
                 error_metadata = self._metadata(error_data) if isinstance(error_data, dict) else {}
             except Exception:
                 error_metadata = {}
+            self._diagnostics(
+                request_context,
+                resolved_model=error_metadata.get("resolved_model"),
+                resolved_provider=error_metadata.get("resolved_provider"),
+                generation_id=error_metadata.get("generation_id"),
+            )
             if response.status_code in (401, 403):
                 message, status = "OpenRouter authentication failed", 401
             elif response.status_code == 402:

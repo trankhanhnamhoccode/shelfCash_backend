@@ -96,9 +96,10 @@ async def test_task_requests_use_strict_schema_reasoning_off_and_required_parame
     await provider.generate_json("mapping", {}, task=LLMTask.EXCEL_MAPPING)
     await provider.generate_json("narrative", {}, task=LLMTask.DECISION_NARRATIVE)
     await provider.generate_json("summary", {}, task=LLMTask.PLAN_SUMMARY)
+    await provider.generate_json("ingredient synthesis", {"ingredients": []}, task=LLMTask.INGREDIENT_SYNTHESIS)
 
-    mapping, narrative, summary = sent
-    for body, task in ((mapping, LLMTask.EXCEL_MAPPING), (narrative, LLMTask.DECISION_NARRATIVE), (summary, LLMTask.PLAN_SUMMARY)):
+    mapping, narrative, summary, ingredient_synthesis = sent
+    for body, task in ((mapping, LLMTask.EXCEL_MAPPING), (narrative, LLMTask.DECISION_NARRATIVE), (summary, LLMTask.PLAN_SUMMARY), (ingredient_synthesis, LLMTask.INGREDIENT_SYNTHESIS)):
         assert body["reasoning"] == {"effort": "none"}
         assert body["provider"] == {"require_parameters": True}
         assert body["response_format"]["type"] == "json_schema"
@@ -107,6 +108,7 @@ async def test_task_requests_use_strict_schema_reasoning_off_and_required_parame
     assert "column_mapping" in mapping["response_format"]["json_schema"]["schema"]["properties"]
     assert "used_evidence_ids" in narrative["response_format"]["json_schema"]["schema"]["properties"]
     assert "headline" in summary["response_format"]["json_schema"]["schema"]["properties"]
+    assert "items" in ingredient_synthesis["response_format"]["json_schema"]["schema"]["properties"]
     await provider.close()
 
 
@@ -313,6 +315,43 @@ async def test_generate_json_timeout(monkeypatch):
         await provider.generate_json("system", {})
     assert calls == 2
     assert exc_info.value.details["failure_stage"] == LLMFailureStage.TIMEOUT.value
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_request_serialization_is_normalized_before_transport():
+    provider = OpenRouterLLMGateway(Settings(openrouter_api_key="mock-key"))
+    context = {"correlation_id": "serialization-test"}
+
+    with pytest.raises(LLMProviderError) as exc_info:
+        await provider.generate_json("system", {"not_json": object()}, task=LLMTask.INGREDIENT_SYNTHESIS, request_context=context)
+
+    assert exc_info.value.details["failure_stage"] == LLMFailureStage.REQUEST_SERIALIZATION.value
+    assert exc_info.value.details["exception_type"] == "TypeError"
+    assert context["openrouter_diagnostics"]["configured_model"] == "qwen/qwen3.5-9b"
+    assert context["openrouter_diagnostics"]["failure_category"] == LLMFailureStage.REQUEST_SERIALIZATION.value
+    assert context["openrouter_diagnostics"]["raw_response_present"] is False
+    assert context["openrouter_diagnostics"]["content_present"] is False
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_internal_transport_runtime_error_is_normalized(monkeypatch):
+    provider = OpenRouterLLMGateway(Settings(openrouter_api_key="mock-key"))
+
+    async def broken_post(*_args, **_kwargs):
+        raise RuntimeError("synthetic internal failure")
+
+    client = await provider._get_client()
+    monkeypatch.setattr(client, "post", broken_post)
+    context = {}
+    with pytest.raises(LLMProviderError) as exc_info:
+        await provider.generate_json("system", {}, task=LLMTask.INGREDIENT_SYNTHESIS, request_context=context)
+
+    assert exc_info.value.details["failure_stage"] == LLMFailureStage.INTERNAL_RUNTIME.value
+    assert exc_info.value.details["exception_type"] == "RuntimeError"
+    assert exc_info.value.details["origin"] == "http_transport"
+    assert context["openrouter_diagnostics"]["exception_origin"] == "http_transport"
     await provider.close()
 
 
