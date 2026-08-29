@@ -22,6 +22,11 @@ _BANK = (
     StyleExample("ingredient-shortage-with-order", "ingredient_synthesis", "SYNTHESIS", "SHORTAGE_WITH_ORDER", "simple", "<INGREDIENT> có nguy cơ thiếu trong kỳ mô phỏng; kế hoạch hiện có lô nhập <ORDER_QUANTITY> để theo dõi cùng rủi ro này."),
     StyleExample("ingredient-limited-evidence", "ingredient_synthesis", "SYNTHESIS", "LIMITED_EVIDENCE", "simple", "<INGREDIENT> có rủi ro vận hành cần ưu tiên theo dõi. Dữ liệu hiện có chỉ đủ để mô tả tín hiệu này, không xác nhận nguyên nhân."),
     StyleExample("ingredient-critical-generic", "ingredient_synthesis", "SYNTHESIS", "DEFAULT", "simple", "<INGREDIENT> có tín hiệu vận hành cần được ưu tiên theo dõi trong kỳ kế hoạch."),
+    # CRITICAL ingredient examples bind wording to the primary evidence provenance.
+    StyleExample("ingredient-selected-plan-critical", "ingredient_synthesis", "SYNTHESIS", "SELECTED_PLAN_DEFAULT", "simple", "Trong kế hoạch hiện tại, <INGREDIENT> có nguy cơ thiếu từ <DATE>."),
+    StyleExample("ingredient-conservative-critical", "ingredient_synthesis", "SYNTHESIS", "CONSERVATIVE_DESIGN_DEFAULT", "simple", "Trong kịch bản nhu cầu bảo thủ, mô phỏng ghi nhận <INGREDIENT> có nguy cơ thiếu từ <DATE>."),
+    StyleExample("ingredient-stress-critical", "ingredient_synthesis", "SYNTHESIS", "STRESS_DEFAULT", "simple", "Trong kịch bản kiểm tra sức chịu đựng, mô phỏng ghi nhận nguy cơ thiếu đối với <INGREDIENT>."),
+    StyleExample("ingredient-limited-critical", "ingredient_synthesis", "SYNTHESIS", "LIMITED_EVIDENCE_DEFAULT", "simple", "Dữ liệu hiện có chỉ đủ để xác nhận tín hiệu cần ưu tiên theo dõi đối với <INGREDIENT>, chưa đủ để mô tả chi tiết rủi ro."),
     StyleExample("summary-feasible", "overall_summary", "SUMMARY", "FEASIBLE", "simple", "ShelfCash đề xuất kế hoạch <STRATEGY> với chi phí nhập <COST> cho <HORIZON>."),
     StyleExample("summary-selected-plan-risk", "overall_summary", "SUMMARY", "SELECTED_PLAN_RISK", "simple", "Trong kế hoạch hiện tại, <INGREDIENT> có nguy cơ thiếu từ <DATE>."),
     StyleExample("summary-conservative-design-risk", "overall_summary", "SUMMARY", "CONSERVATIVE_DESIGN_RISK", "simple", "Trong kịch bản nhu cầu bảo thủ, <INGREDIENT> có nguy cơ thiếu từ <DATE>."),
@@ -45,6 +50,10 @@ _BANK = (
 def retrieve_style_examples(*, task: str, intent: str, case: str, detail_level: str, limit: int = 1) -> list[dict[str, str | bool]]:
     """Return at most one positive and one explicitly-labelled negative pattern."""
     matches = [item for item in _BANK if item.task == task and item.intent == intent and item.case == case and item.style == detail_level]
+    if not matches:
+        provenance = next((value for value in ("CONSERVATIVE_DESIGN", "SELECTED_PLAN", "LIMITED_EVIDENCE", "STRESS") if case.startswith(f"{value}_")), None)
+        if provenance:
+            matches = [item for item in _BANK if item.task == task and item.intent == intent and item.case == f"{provenance}_DEFAULT" and item.style == detail_level]
     if not matches:
         matches = [item for item in _BANK if item.task == task and item.intent == intent and item.case == "DEFAULT" and item.style == detail_level]
     return [

@@ -45,6 +45,16 @@ other facts, calculate, or add recommendations. STYLE_EXAMPLES are wording
 patterns, not evidence: never copy their names, dates, quantities, percentages,
 or causes. Keep headline short and summary to one to three short sentences.
 For fill rate, use "tỷ lệ đáp ứng nhu cầu", never "tỷ lệ lấp kho".
+PRESENTATION_PROVENANCE on COMMUNICATION_PLAN.primary is authoritative. For
+CONSERVATIVE_DESIGN, explicitly say "Trong kịch bản nhu cầu bảo thủ" and use
+projected language such as "mô phỏng ghi nhận" or "có nguy cơ"; never call it
+the current plan. For STRESS, explicitly say "Trong kịch bản kiểm tra sức chịu
+đựng" and never call it the current plan. SELECTED_PLAN may use current-plan
+wording. LIMITED_EVIDENCE must say the evidence is limited and must not invent
+shortage timing or a cause. When causal_allowed=false, safe juxtaposition is
+allowed (for example, a risk date followed by a planned arrival date), but do
+not state that one caused the other. Planning evidence is future-oriented: do
+not describe a projected shortage as a completed historical event.
 """
 
 
@@ -86,7 +96,9 @@ class IngredientSynthesisProvider:
             item_records = by_ingredient[ingredient_id]
             importance = self._importance(item_records, risk_by_ingredient[ingredient_id])
             importance_reason = self._importance_reason(item_records, risk_by_ingredient[ingredient_id])
-            plan = self._communication_plan(item_records) if importance == "critical" else None
+            critical_details = [detail for detail in risk_by_ingredient[ingredient_id]
+                                if detail.classification != "unknown" and detail.severity == "critical"]
+            plan = self._communication_plan(item_records, critical_details) if importance == "critical" else None
             fallback = self._rule(brief, ingredient_id, item_records, importance, plan)
             prepared[ingredient_id] = (fallback, item_records, importance)
             if importance == "critical":
@@ -213,11 +225,25 @@ class IngredientSynthesisProvider:
             selected = {item["evidence_id"]: item for item in records}
             primary = selected.get(next(iter(plan["primary"]["evidence_ids"]), ""), {})
             primary_role = plan["primary"]["role"]
+            provenance = plan["primary"]["presentation_provenance"]
             authorized = list(plan["authorized_evidence_ids"])
-            if primary_role == "stockout_timing" and primary.get("first_stockout_date"):
+            if provenance == "LIMITED_EVIDENCE":
+                headline = "Cần ưu tiên theo dõi với dữ liệu còn hạn chế"
+                summary = f"Dữ liệu hiện có chỉ đủ để xác nhận tín hiệu vận hành cần ưu tiên theo dõi đối với {name}, chưa đủ để mô tả chi tiết rủi ro."
+            elif provenance == "CONSERVATIVE_DESIGN" and primary_role == "stockout_timing" and primary.get("first_stockout_date"):
+                when = primary.get("display_values", {}).get("first_stockout_date", primary["first_stockout_date"])
+                headline = "Nguy cơ thiếu trong kịch bản nhu cầu bảo thủ"
+                summary = f"Trong kịch bản nhu cầu bảo thủ, mô phỏng ghi nhận {name} có nguy cơ thiếu từ {when}."
+            elif provenance == "CONSERVATIVE_DESIGN":
+                headline = "Rủi ro trong kịch bản nhu cầu bảo thủ"
+                summary = f"Trong kịch bản nhu cầu bảo thủ, mô phỏng ghi nhận rủi ro cần ưu tiên theo dõi đối với {name}."
+            elif provenance == "STRESS":
+                headline = "Rủi ro trong kịch bản kiểm tra sức chịu đựng"
+                summary = f"Trong kịch bản kiểm tra sức chịu đựng, mô phỏng ghi nhận rủi ro cần ưu tiên theo dõi đối với {name}."
+            elif primary_role == "stockout_timing" and primary.get("first_stockout_date"):
                 when = primary.get("display_values", {}).get("first_stockout_date", primary["first_stockout_date"])
                 headline = "Nguy cơ thiếu trong kỳ kế hoạch"
-                summary = f"{name} có nguy cơ thiếu từ {when} trong kỳ kế hoạch."
+                summary = f"Kế hoạch hiện tại có nguy cơ thiếu {name} từ {when}."
             elif primary_role == "shortage_risk":
                 headline = "Thiếu hụt cần được ưu tiên theo dõi"
                 summary = f"{name} có rủi ro thiếu hụt cần được ưu tiên theo dõi trong kỳ kế hoạch."
@@ -261,26 +287,44 @@ class IngredientSynthesisProvider:
         return IngredientSynthesis(ingredient_id=ingredient_id, ingredient_name=name, unit=unit, importance=importance, source="rule_based", headline=headline, summary=summary, evidence_ids=list(dict.fromkeys(ids)))
 
     @staticmethod
-    def _communication_plan(records):
+    def _communication_plan(records, critical_details=()):
         """Select the small fact set that an ingredient brief may express."""
         by_type: dict[str, list[dict[str, Any]]] = defaultdict(list)
         for record in records:
             by_type[str(record["type"])].append(record)
-        operational = by_type.get("INGREDIENT_OPERATIONAL_RISK", [])
-        primary_record = operational[0] if operational else (records[0] if records else {})
-        primary_role = "stockout_timing" if primary_record.get("first_stockout_date") else "shortage_risk"
-        primary = {"role": primary_role, "evidence_ids": [primary_record["evidence_id"]] if primary_record else []}
+        # A CRITICAL level is authorized by RiskDetail. Bind it only to an
+        # exact code match in structured evidence; never substitute a nearby
+        # operational row merely because it is first.
+        ranked_details = sorted(critical_details, key=lambda item: (
+            item.category, item.code, item.ingredient_id or "", tuple(item.evidence_ids),
+        ))
+        primary_record = next((record for detail in ranked_details
+                               for record in by_type.get(detail.code, [])), None)
+        if primary_record is None:
+            primary = {
+                "role": "limited_evidence", "evidence_ids": [],
+                "presentation_provenance": "LIMITED_EVIDENCE",
+                "required_framing": "State that evidence is limited; do not invent shortage timing, cause, or current-plan failure.",
+            }
+        else:
+            provenance = IngredientSynthesisProvider._record_presentation_provenance(primary_record)
+            primary_role = "stockout_timing" if primary_record.get("first_stockout_date") else "shortage_risk"
+            primary = {
+                "role": primary_role, "evidence_ids": [primary_record["evidence_id"]],
+                "presentation_provenance": provenance,
+                "required_framing": IngredientSynthesisProvider._required_framing(provenance),
+            }
 
         supporting: list[dict[str, Any]] = []
         # Receipt/order context adds value to a modeled stockout, while demand
         # alignment is a compact fallback when no procurement record exists.
-        for role, type_ in (("procurement_quantity", "PROCUREMENT_QUANTITY"), ("procurement_alignment", "DEMAND_ORDER_ALIGNMENT"), ("shortage_context", "DEMAND_HORIZON_SUMMARY")):
+        for role, type_ in (("procurement_quantity", "PROCUREMENT_QUANTITY"), ("procurement_alignment", "DEMAND_ORDER_ALIGNMENT"), ("shortage_context", "DEMAND_HORIZON_SUMMARY")) if primary["evidence_ids"] else ():
             candidate = next((item for item in by_type.get(type_, []) if item["evidence_id"] not in primary["evidence_ids"]), None)
             if candidate is not None and all(candidate["evidence_id"] not in item["evidence_ids"] for item in supporting):
                 supporting.append({"role": role, "evidence_ids": [candidate["evidence_id"]]})
             if len(supporting) == 2:
                 break
-        limitation_record = next((item for item in records if item.get("classification") == "LIMITATION"), None)
+        limitation_record = next((item for item in records if item.get("classification") == "LIMITATION"), None) if primary["evidence_ids"] else None
         limitation = None if limitation_record is None else {"role": "ingredient_limitation", "evidence_ids": [limitation_record["evidence_id"]]}
         authorized = [*primary["evidence_ids"], *(evidence_id for item in supporting for evidence_id in item["evidence_ids"])]
         if limitation:
@@ -294,8 +338,27 @@ class IngredientSynthesisProvider:
         }
 
     @staticmethod
+    def _record_presentation_provenance(record: dict[str, Any]) -> str:
+        if str(record.get("type", "")).startswith("STRESS_"):
+            return "STRESS"
+        if record.get("basis_kind") == "conservative_design_scenario":
+            return "CONSERVATIVE_DESIGN"
+        return "SELECTED_PLAN"
+
+    @staticmethod
+    def _required_framing(provenance: str) -> str:
+        return {
+            "SELECTED_PLAN": "Current/selected-plan wording is allowed only for this evidence.",
+            "CONSERVATIVE_DESIGN": "Explicitly say 'Trong kịch bản nhu cầu bảo thủ'; never call this the current plan.",
+            "STRESS": "Explicitly say 'Trong kịch bản kiểm tra sức chịu đựng'; never call this the current plan.",
+            "LIMITED_EVIDENCE": "State that evidence is limited; do not invent detailed shortage timing or cause.",
+        }[provenance]
+
+    @staticmethod
     def _classify_case(plan: dict[str, Any]) -> str:
         roles = {item["role"] for item in plan["supporting"]}
+        if plan["primary"]["role"] == "limited_evidence":
+            return "LIMITED_EVIDENCE"
         if plan["primary"]["role"] == "stockout_timing" and roles & {"procurement_quantity", "procurement_alignment"}:
             return "STOCKOUT_BEFORE_RECEIPT"
         if plan["primary"]["role"] == "stockout_timing":
@@ -320,12 +383,15 @@ class IngredientSynthesisProvider:
             item_diagnostic = self._item_diagnostic(fallback, "fallback", None, None)
             item_diagnostic.update(llm_attempted=True, provider_call_count=1, raw_response_present=False, content_present=False, attempt_count=0)
             plan = entry["communication_plan"]
-            examples = retrieve_style_examples(task="ingredient_synthesis", intent="SYNTHESIS", case=entry["case_archetype"], detail_level="simple", limit=1)
+            provenance = plan["primary"]["presentation_provenance"]
+            style_case = f"{provenance}_{entry['case_archetype']}"
+            examples = retrieve_style_examples(task="ingredient_synthesis", intent="SYNTHESIS", case=style_case, detail_level="simple", limit=1)
             item_diagnostic.update(
                 communication_primary_role=plan["primary"]["role"],
                 communication_supporting_roles=[item["role"] for item in plan["supporting"]],
                 communication_limitation_role=plan["limitation"]["role"] if plan["limitation"] else None,
                 causal_allowed=plan["causal_allowed"],
+                presentation_provenance=provenance,
                 case_archetype=entry["case_archetype"],
                 selected_style_example_ids=[item["example_id"] for item in examples],
             )
@@ -335,6 +401,7 @@ class IngredientSynthesisProvider:
                 self._apply_item_gateway_diagnostics(item_diagnostic, context)
                 item = IngredientSynthesisLLMResponse.model_validate(raw)
                 self._validate_presentation(item)
+                self._validate_provenance(item, plan)
                 allowed = set(plan["authorized_evidence_ids"])
                 claim_ids = {evidence_id for claim in item.claims for evidence_id in claim.evidence_ids}
                 if not set(item.used_evidence_ids) <= allowed or not claim_ids <= allowed:
@@ -383,6 +450,22 @@ class IngredientSynthesisProvider:
             raise ValueError("ingredient_synthesis_overlong_output")
         if "tỷ lệ lấp kho" in f"{item.headline} {summary}".lower():
             raise ValueError("ingredient_synthesis_invalid_fill_rate_terminology")
+
+    @staticmethod
+    def _validate_provenance(item: IngredientSynthesisLLMResponse, plan: dict[str, Any]) -> None:
+        """Small, structured framing guard; this is deliberately not NLP."""
+        text = f"{item.headline} {item.summary}".lower()
+        provenance = plan["primary"]["presentation_provenance"]
+        selected_plan_terms = ("kế hoạch hiện tại", "phương án được chọn")
+        if provenance == "CONSERVATIVE_DESIGN":
+            if "kịch bản nhu cầu bảo thủ" not in text or any(term in text for term in selected_plan_terms):
+                raise ValueError("ingredient_synthesis_conservative_provenance_mismatch")
+        elif provenance == "STRESS":
+            if "kịch bản kiểm tra sức chịu đựng" not in text or any(term in text for term in selected_plan_terms):
+                raise ValueError("ingredient_synthesis_stress_provenance_mismatch")
+        elif provenance == "LIMITED_EVIDENCE":
+            if "dữ liệu" not in text or "thiếu từ" in text or "kế hoạch hiện tại thiếu" in text:
+                raise ValueError("ingredient_synthesis_limited_evidence_mismatch")
 
     @staticmethod
     def _batch_failure_stage(exc: Exception, context: dict[str, Any]) -> str:

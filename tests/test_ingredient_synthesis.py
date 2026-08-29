@@ -11,7 +11,7 @@ from app.decision_intelligence.style_examples import retrieve_style_examples
 
 
 def brief(ids, critical=(), warning=()):
-    details = [RiskDetail(code="RISK_CONSTRAINT_VIOLATION", classification="risk", category="risk_evaluation", severity="critical", title="Critical", scope="ingredient", ingredient_id=x, source_count=1) for x in critical]
+    details = [RiskDetail(code="INGREDIENT_OPERATIONAL_RISK", classification="risk", category="shortage", severity="critical", title="Critical", scope="ingredient", ingredient_id=x, source_count=1) for x in critical]
     details += [RiskDetail(code="STRESS_SHORTAGE_OBSERVED", classification="risk", category="shortage", severity="warning", title="Watch", scope="ingredient", ingredient_id=x, source_count=1) for x in warning]
     return DecisionBriefFacts(decision_run_id="ingredient-run", store_id="store", status="completed", forecast=ForecastBrief(horizon_days=7, cutoff_date=date(2026, 8, 20)), recommendation=RecommendationBrief(available=True, strategy="balanced"), ingredient_demand=[IngredientDemandBrief(ingredient_id=x, ingredient_name=f"Ingredient {x}", unit="kg", target_date=date(2026, 8, 21), p25=1, p50=2, p75=3) for x in ids], risk=RiskBrief(), critic=CriticBrief(), risk_details=details, generated_at=datetime.now(timezone.utc))
 
@@ -137,8 +137,9 @@ def test_communication_plan_prioritizes_stockout_and_bounds_nonredundant_support
         {"evidence_id": "alignment", "type": "DEMAND_ORDER_ALIGNMENT"},
         {"evidence_id": "demand", "type": "DEMAND_HORIZON_SUMMARY"},
     ]
-    plan = IngredientSynthesisProvider._communication_plan(records)
-    assert plan["primary"] == {"role": "stockout_timing", "evidence_ids": ["risk"]}
+    critical = [RiskDetail(code="INGREDIENT_OPERATIONAL_RISK", classification="risk", category="shortage", severity="critical", title="Critical", scope="ingredient", ingredient_id="a", source_count=1)]
+    plan = IngredientSynthesisProvider._communication_plan(records, critical)
+    assert plan["primary"] == {"role": "stockout_timing", "evidence_ids": ["risk"], "presentation_provenance": "SELECTED_PLAN", "required_framing": "Current/selected-plan wording is allowed only for this evidence."}
     assert [item["role"] for item in plan["supporting"]] == ["procurement_quantity", "procurement_alignment"]
     assert len(plan["supporting"]) == 2 and "demand" not in plan["authorized_evidence_ids"]
     assert plan["causal_allowed"] is False
@@ -161,7 +162,7 @@ def test_known_but_communication_plan_unauthorized_evidence_falls_back():
     built_facts = facts(value, ("a",)); records, _ = provider._records(value, built_facts)
     risk = next(item["evidence_id"] for item in records if item["type"] == "INGREDIENT_OPERATIONAL_RISK")
     demand = next(item["evidence_id"] for item in records if item["type"] == "DEMAND_HORIZON_SUMMARY")
-    provider._communication_plan = lambda _records: {"primary": {"role": "stockout_timing", "evidence_ids": [risk]}, "supporting": [], "limitation": None, "causal_allowed": False, "authorized_evidence_ids": [risk]}
+    provider._communication_plan = lambda _records, _details: {"primary": {"role": "stockout_timing", "evidence_ids": [risk], "presentation_provenance": "SELECTED_PLAN", "required_framing": "Current/selected-plan wording is allowed only for this evidence."}, "supporting": [], "limitation": None, "causal_allowed": False, "authorized_evidence_ids": [risk]}
     gateway.responses["a"] = {"headline": "Cần theo dõi", "summary": "Có nguy cơ thiếu hàng trong kỳ kế hoạch.", "claims": [{"type": "DEMAND_HORIZON_SUMMARY", "text": "Có nguy cơ thiếu hàng trong kỳ kế hoạch.", "evidence_ids": [demand]}], "used_evidence_ids": [demand]}
     result = provider.synthesize(value, built_facts)
     assert result[0].source == "deterministic_fallback"
@@ -265,3 +266,121 @@ def test_representative_ten_conservative_shortages_have_explicit_watch_authority
     assert (provider.last_diagnostics["normal_count"], provider.last_diagnostics["watch_count"], provider.last_diagnostics["critical_count"]) == (0, 10, 0)
     assert {detail.code for detail in value.risk_details} == {"INGREDIENT_OPERATIONAL_RISK"}
     assert {detail.severity for detail in value.risk_details} == {"warning"}
+
+
+class ProvenanceGateway:
+    available = True
+
+    def __init__(self, response, failures=None):
+        self.response, self.failures, self.calls = response, failures or {}, []
+
+    async def generate_json(self, _system, payload, *, request_context, **_kwargs):
+        ingredient_id = payload["ingredient_id"]
+        self.calls.append(payload)
+        if ingredient_id in self.failures:
+            raise self.failures[ingredient_id]
+        request_context["openrouter_diagnostics"] = {"attempt_count": 1, "resolved_model": "qwen/qwen3.5-9b", "resolved_provider": "fake", "raw_response_present": True, "content_present": True}
+        return self.response(payload)
+
+
+def _critical(code, ingredient_id):
+    return RiskDetail(code=code, classification="risk", category="shortage", severity="critical", title="Critical", scope="ingredient", ingredient_id=ingredient_id, source_count=1)
+
+
+def _provider_response(summary):
+    def response(payload):
+        primary_id = payload["communication_plan"]["primary"]["evidence_ids"]
+        primary_type = next((item["type"] for item in payload["evidence"] if item["evidence_id"] in primary_id), "INGREDIENT_OPERATIONAL_RISK")
+        return {"headline": "Cần theo dõi", "summary": summary, "claims": [{"type": primary_type, "text": summary, "evidence_ids": primary_id}], "used_evidence_ids": primary_id}
+    return response
+
+
+def _conservative_critical():
+    value = brief(["pearls"]).model_copy(update={
+        "ingredient_demand": [IngredientDemandBrief(ingredient_id="pearls", ingredient_name="Trân châu", unit="kg", target_date=date(2026, 8, 21), p25=1, p50=2, p75=3)],
+        "risk_details": [_critical("INGREDIENT_OPERATIONAL_RISK", "pearls")],
+    })
+    package = {"business_metrics": {"deterministic": {"ingredient_metrics": [{
+        "ingredient_id": "pearls", "unit": "kg", "basis_kind": "conservative_design_scenario",
+        "shortage_quantity": 1, "stockout_event_count": 1, "first_stockout_date": "2026-08-14",
+    }]}}, "warnings": []}
+    return value, DecisionSemanticEvidenceBuilder().build(value, package)
+
+
+def _stress_critical():
+    value = brief(["pearls"]).model_copy(update={"risk_details": [_critical("STRESS_SHORTAGE_OBSERVED", "pearls")]})
+    package = {"business_metrics": {"deterministic": {"ingredient_metrics": []}}, "stress_tests": {"results": [{
+        "scenario_id": "stress-1", "summary": {"by_key": [{"ingredient_id": "pearls", "unit": "kg", "shortage_quantity": 1}]},
+    }]}, "warnings": []}
+    return value, DecisionSemanticEvidenceBuilder().build(value, package)
+
+
+def test_critical_conservative_payload_and_provider_output_preserve_primary_provenance():
+    value, built_facts = _conservative_critical()
+    gateway = ProvenanceGateway(_provider_response("Trong kịch bản nhu cầu bảo thủ, Trân châu có nguy cơ thiếu từ 14/08."))
+    result = IngredientSynthesisProvider(gateway, None).synthesize(value, built_facts)
+    plan = gateway.calls[0]["communication_plan"]
+    assert result[0].source == "llm" and result[0].importance == "critical"
+    assert plan["primary"]["presentation_provenance"] == "CONSERVATIVE_DESIGN"
+    assert [item["type"] for item in gateway.calls[0]["evidence"] if item["evidence_id"] in plan["primary"]["evidence_ids"]] == ["INGREDIENT_OPERATIONAL_RISK"]
+    assert gateway.calls[0]["style_examples"][0]["example_id"] == "ingredient-conservative-critical"
+
+
+def test_critical_conservative_and_stress_selected_plan_wording_falls_back():
+    value, built_facts = _conservative_critical()
+    conservative = IngredientSynthesisProvider(ProvenanceGateway(_provider_response("Kế hoạch hiện tại có nguy cơ thiếu Trân châu.")), None).synthesize(value, built_facts)[0]
+    stress_value, stress_facts = _stress_critical()
+    stress = IngredientSynthesisProvider(ProvenanceGateway(_provider_response("Kế hoạch hiện tại thiếu nguyên liệu.")), None).synthesize(stress_value, stress_facts)[0]
+    assert conservative.source == stress.source == "deterministic_fallback"
+    assert "kịch bản nhu cầu bảo thủ" in conservative.summary.lower()
+    assert "kịch bản kiểm tra sức chịu đựng" in stress.summary.lower()
+
+
+def test_critical_stress_and_selected_plan_provider_outputs_are_distinguished():
+    stress_value, stress_facts = _stress_critical()
+    stress_gateway = ProvenanceGateway(_provider_response("Trong kịch bản kiểm tra sức chịu đựng, mô phỏng ghi nhận nguy cơ thiếu."))
+    stress = IngredientSynthesisProvider(stress_gateway, None).synthesize(stress_value, stress_facts)[0]
+    selected = brief(["selected"], critical=("selected",))
+    selected_facts = facts(selected, ("selected",))
+    selected_gateway = ProvenanceGateway(_provider_response("Kế hoạch hiện tại có nguy cơ thiếu hàng trong kỳ kế hoạch."))
+    selected_result = IngredientSynthesisProvider(selected_gateway, None).synthesize(selected, selected_facts)[0]
+    assert stress.source == selected_result.source == "llm"
+    assert stress_gateway.calls[0]["communication_plan"]["primary"]["presentation_provenance"] == "STRESS"
+    assert selected_gateway.calls[0]["communication_plan"]["primary"]["presentation_provenance"] == "SELECTED_PLAN"
+
+
+def test_critical_mixed_and_multiple_details_bind_exact_code_not_presence_or_order():
+    value, built_facts = _conservative_critical()
+    stress_value, stress_facts = _stress_critical()
+    combined = [*built_facts, *[fact for fact in stress_facts if fact.entities.get("ingredient_id") == "pearls" and fact.fact_type.startswith("STRESS_")]]
+    mixed_details = [_critical("INGREDIENT_OPERATIONAL_RISK", "pearls"), _critical("STRESS_SHORTAGE_OBSERVED", "pearls")]
+    mixed = value.model_copy(update={"risk_details": mixed_details})
+    provider = IngredientSynthesisProvider(ProvenanceGateway(_provider_response("Trong kịch bản nhu cầu bảo thủ, Trân châu có nguy cơ thiếu từ 14/08.")), None)
+    result = provider.synthesize(mixed, combined)[0]
+    assert result.source == "llm"
+    assert provider.last_diagnostics["items"][0]["presentation_provenance"] == "CONSERVATIVE_DESIGN"
+    records, _ = provider._records(mixed, combined)
+    first = provider._communication_plan(records, mixed_details)
+    second = provider._communication_plan(records, list(reversed(mixed_details)))
+    assert first["primary"] == second["primary"]
+
+
+@pytest.mark.parametrize(("kind", "expected"), [
+    ("selected", "kế hoạch hiện tại"),
+    ("conservative", "kịch bản nhu cầu bảo thủ"),
+    ("stress", "kịch bản kiểm tra sức chịu đựng"),
+    ("limited", "dữ liệu hiện có"),
+])
+def test_critical_provider_failure_fallback_preserves_plan_provenance(kind, expected):
+    if kind == "conservative":
+        value, built_facts = _conservative_critical()
+    elif kind == "stress":
+        value, built_facts = _stress_critical()
+    else:
+        value = brief([kind], critical=(kind,))
+        if kind == "limited":
+            value = value.model_copy(update={"risk_details": [_critical("RISK_CONSTRAINT_VIOLATION", kind)]})
+        built_facts = facts(value, (kind,))
+    gateway = ProvenanceGateway(_provider_response("unused"), {value.ingredient_demand[0].ingredient_id: LLMProviderError("network", details={"failure_stage": "NETWORK"})})
+    item = IngredientSynthesisProvider(gateway, None).synthesize(value, built_facts)[0]
+    assert item.source == "deterministic_fallback" and expected in item.summary.lower()
