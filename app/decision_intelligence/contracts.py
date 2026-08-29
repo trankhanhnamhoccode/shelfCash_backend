@@ -221,7 +221,7 @@ class DecisionOverallSummaryLLMResponse(_Contract):
 
     headline: DecisionNarrativeClaim
     summary: DecisionNarrativeClaim
-    key_points: list[DecisionNarrativeClaim] = Field(default_factory=list)
+    key_points: list[DecisionNarrativeClaim] = Field(default_factory=list, max_length=3)
     warning_summary: DecisionNarrativeClaim | None = None
     used_evidence_ids: list[str]
 

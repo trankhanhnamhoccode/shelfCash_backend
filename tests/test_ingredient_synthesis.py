@@ -5,6 +5,7 @@ import pytest
 from app.core.exceptions import LLMProviderError
 from app.decision_intelligence.contracts import CriticBrief, DecisionBriefFacts, ForecastBrief, IngredientDemandBrief, RecommendationBrief, RiskBrief, RiskDetail
 from app.decision_intelligence.ingredient_synthesis import IngredientSynthesisProvider
+from app.decision_intelligence.risk_metadata import project_risk_details
 from app.decision_intelligence.semantic_evidence import DecisionSemanticEvidenceBuilder
 from app.decision_intelligence.style_examples import retrieve_style_examples
 
@@ -32,14 +33,14 @@ class Gateway:
         return self.responses.get(ingredient_id, {"headline": "Cần theo dõi", "summary": "Có nguy cơ thiếu hàng trong kỳ kế hoạch.", "claims": [{"type": "INGREDIENT_OPERATIONAL_RISK", "text": "Có nguy cơ thiếu hàng trong kỳ kế hoạch.", "evidence_ids": ids}], "used_evidence_ids": ids})
 
 
-def test_routing_uses_riskdetail_not_stockout_date():
+def test_routing_uses_riskdetail_not_raw_operational_evidence():
     n, w, c = brief(["n"]), brief(["w"]), brief(["c"], critical=("c",))
     ng, wg, cg = Gateway(), Gateway(), Gateway()
     nr = IngredientSynthesisProvider(ng, None).synthesize(n, facts(n))
     wr = IngredientSynthesisProvider(wg, None).synthesize(w, facts(w, ("w",)))
     cr = IngredientSynthesisProvider(cg, None).synthesize(c, facts(c, ("c",)))
     assert nr[0].importance == "normal" and nr[0].source == "rule_based" and not ng.calls
-    assert wr[0].importance == "watch" and wr[0].source == "rule_based" and not wg.calls
+    assert wr[0].importance == "normal" and wr[0].source == "rule_based" and not wg.calls
     assert cr[0].importance == "critical" and cr[0].source == "llm" and len(cg.calls) == 1
 
 
@@ -113,20 +114,20 @@ def test_run_diagnostics_aggregate_normal_watch_and_critical_items():
     provider = IngredientSynthesisProvider(Gateway(), None)
     provider.synthesize(value, facts(value, ("w2", "w3", "c1", "c2")))
     diagnostics = provider.last_diagnostics
-    assert (diagnostics["total_ingredient_count"], diagnostics["normal_count"], diagnostics["watch_count"], diagnostics["critical_count"]) == (7, 2, 3, 2)
+    assert (diagnostics["total_ingredient_count"], diagnostics["normal_count"], diagnostics["watch_count"], diagnostics["critical_count"]) == (7, 4, 1, 2)
     assert (diagnostics["eligible_count"], diagnostics["provider_call_count"], diagnostics["llm_success_count"], diagnostics["fallback_count"]) == (2, 2, 2, 0)
     assert diagnostics["status"] == "success" and len(diagnostics["items"]) == 2
 
 
-def test_representative_ten_ingredient_routing_uses_authoritative_critical_risk_only():
+def test_representative_ten_ingredient_routing_uses_riskdetail_authority_only():
     ids = ["n1", "n2", "w1", "w2", "w3", "w4", "w5", "c1", "c2", "c3"]
     value = brief(ids, critical=("c1", "c2", "c3"), warning=("w1", "w2"))
     provider = IngredientSynthesisProvider(Gateway(), None)
     result = provider.synthesize(value, facts(value, ("w3", "w4", "w5", "c1", "c2", "c3")))
     by_id = {item.ingredient_id: item for item in result}
-    assert [by_id[item].importance for item in ids] == ["normal", "normal", "watch", "watch", "watch", "watch", "watch", "critical", "critical", "critical"]
+    assert [by_id[item].importance for item in ids] == ["normal", "normal", "watch", "watch", "normal", "normal", "normal", "critical", "critical", "critical"]
     assert all(by_id[item].source == "rule_based" for item in ("w3", "w4", "w5"))
-    assert (provider.last_diagnostics["normal_count"], provider.last_diagnostics["watch_count"], provider.last_diagnostics["critical_count"], provider.last_diagnostics["eligible_count"], provider.last_diagnostics["provider_call_count"]) == (2, 5, 3, 3, 3)
+    assert (provider.last_diagnostics["normal_count"], provider.last_diagnostics["watch_count"], provider.last_diagnostics["critical_count"], provider.last_diagnostics["eligible_count"], provider.last_diagnostics["provider_call_count"]) == (5, 2, 3, 3, 3)
 
 
 def test_communication_plan_prioritizes_stockout_and_bounds_nonredundant_support():
@@ -187,3 +188,80 @@ def test_quality_guard_rejects_overlong_output_and_wrong_fill_rate_term(summary)
     risk = next(item["evidence_id"] for item in records if item["type"] == "INGREDIENT_OPERATIONAL_RISK")
     gateway.responses["a"] = {"headline": "Cần theo dõi", "summary": summary, "claims": [{"type": "INGREDIENT_OPERATIONAL_RISK", "text": summary, "evidence_ids": [risk]}], "used_evidence_ids": [risk]}
     assert provider.synthesize(value, built_facts)[0].source == "deterministic_fallback"
+
+
+def test_conservative_watch_wording_does_not_claim_selected_plan_shortage():
+    provider = IngredientSynthesisProvider(None, None)
+    value = brief(["matcha"])
+    record = {"evidence_id": "risk", "type": "INGREDIENT_OPERATIONAL_RISK", "ingredient_name": "Matcha", "unit": "kg", "first_stockout_date": "2026-08-21", "basis_kind": "conservative_design_scenario", "display_values": {"first_stockout_date": "21/08"}}
+    item = provider._rule(value, "matcha", [record], "watch")
+    assert "kịch bản nhu cầu bảo thủ" in item.summary.lower()
+    assert "kế hoạch hiện tại" not in item.summary.lower()
+
+
+def test_healthy_ingredient_remains_normal_without_risk_detail_or_operational_signal():
+    value = brief(["healthy"]); gateway = Gateway()
+    result = IngredientSynthesisProvider(gateway, None).synthesize(value, facts(value))
+    assert result[0].importance == "normal" and result[0].source == "rule_based" and not gateway.calls
+
+
+def test_matcha_like_conservative_shortage_is_watch_with_scenario_wording():
+    value = brief(["matcha"])
+    package = {"business_metrics": {"deterministic": {"ingredient_metrics": [{
+        "ingredient_id": "matcha", "unit": "kg", "basis_scenario_id": "P75",
+        "basis_kind": "conservative_design_scenario", "demand_quantity": 3,
+        "fulfilled_quantity": 2, "shortage_quantity": 1, "fill_rate": 2 / 3,
+        "first_stockout_date": "2026-08-21", "stockout_event_count": 1,
+        "scenario_metrics": [
+            {"scenario_id": "P25", "demand_quantity": 1, "fulfilled_quantity": 1, "shortage_quantity": 0, "fill_rate": 1},
+            {"scenario_id": "P50", "demand_quantity": 2, "fulfilled_quantity": 2, "shortage_quantity": 0, "fill_rate": 1},
+            {"scenario_id": "P75", "demand_quantity": 3, "fulfilled_quantity": 2, "shortage_quantity": 1, "fill_rate": 2 / 3},
+        ],
+    }]}}, "warnings": []}
+    built_facts = DecisionSemanticEvidenceBuilder().build(value, package)
+    value = value.model_copy(update={"risk_details": project_risk_details(value, built_facts)})
+    gateway = Gateway(); provider = IngredientSynthesisProvider(gateway, None)
+    item = provider.synthesize(value, built_facts)[0]
+    assert item.importance == "watch" and item.source == "rule_based" and not gateway.calls
+    assert "kịch bản nhu cầu bảo thủ" in item.summary.lower()
+    assert "kế hoạch hiện tại" not in item.summary.lower()
+    assert provider.last_diagnostics["routing"][0]["importance_reason"] == "ingredient_risk_detail_warning"
+
+
+def test_stress_only_warning_is_watch_with_stress_provenance():
+    value = brief(["stress"])
+    package = {"business_metrics": {"deterministic": {"ingredient_metrics": []}}, "stress_tests": {"results": [{
+        "scenario_id": "stress-1", "summary": {"by_key": [{"ingredient_id": "stress", "unit": "kg", "shortage_quantity": 1}]},
+    }]}, "warnings": []}
+    built_facts = DecisionSemanticEvidenceBuilder().build(value, package)
+    value = value.model_copy(update={"risk_details": project_risk_details(value, built_facts)})
+    gateway = Gateway(); item = IngredientSynthesisProvider(gateway, None).synthesize(value, built_facts)[0]
+    assert item.importance == "watch" and item.source == "rule_based" and not gateway.calls
+    assert "kịch bản kiểm tra sức chịu đựng" in item.summary.lower()
+    assert "kế hoạch hiện tại" not in item.summary.lower()
+
+
+def test_pack_size_rounding_without_ingredient_risk_detail_stays_normal():
+    value = brief(["rounded"])
+    package = {"recommended_plan": {"items": [{"ingredient_id": "rounded", "reason_codes": ["PACK_SIZE_ROUNDING"]}]}, "warnings": []}
+    built_facts = DecisionSemanticEvidenceBuilder().build(value, package)
+    assert not [fact for fact in built_facts if fact.entities.get("ingredient_id") == "rounded" and fact.fact_type == "INGREDIENT_OPERATIONAL_RISK"]
+    gateway = Gateway(); item = IngredientSynthesisProvider(gateway, None).synthesize(value, built_facts)[0]
+    assert item.importance == "normal" and item.source == "rule_based" and not gateway.calls
+
+
+def test_representative_ten_conservative_shortages_have_explicit_watch_authority():
+    ids = [f"i{index}" for index in range(10)]
+    value = brief(ids)
+    rows = [{
+        "ingredient_id": ingredient_id, "unit": "kg", "basis_kind": "conservative_design_scenario",
+        "shortage_quantity": 1, "stockout_event_count": 1, "first_stockout_date": "2026-08-21",
+    } for ingredient_id in ids]
+    built_facts = DecisionSemanticEvidenceBuilder().build(value, {"business_metrics": {"deterministic": {"ingredient_metrics": rows}}, "warnings": []})
+    value = value.model_copy(update={"risk_details": project_risk_details(value, built_facts)})
+    provider = IngredientSynthesisProvider(Gateway(), None)
+    result = provider.synthesize(value, built_facts)
+    assert {item.importance for item in result} == {"watch"}
+    assert (provider.last_diagnostics["normal_count"], provider.last_diagnostics["watch_count"], provider.last_diagnostics["critical_count"]) == (0, 10, 0)
+    assert {detail.code for detail in value.risk_details} == {"INGREDIENT_OPERATIONAL_RISK"}
+    assert {detail.severity for detail in value.risk_details} == {"warning"}

@@ -9,6 +9,7 @@ from app.decision_intelligence.contracts import (
     ProcurementRowBrief,
     RecommendationBrief,
     RiskBrief,
+    DecisionOverallSummaryLLMResponse,
 )
 from app.decision_intelligence.overall_summary import OverallSummaryProvider
 from app.decision_intelligence.display import purchase_cost_display
@@ -95,6 +96,50 @@ def test_overall_summary_accepts_grounded_observation_and_derived_comparison():
     assert "1,05" in summary.summary
     assert gateway.payload["communication_plan"]["decision"]
     assert gateway.payload["communication_plan"]["main_attention"] == []
+
+
+def test_overall_summary_schema_rejects_more_than_three_key_points():
+    brief = _brief(); facts = DecisionSemanticEvidenceBuilder().build(brief)
+    def verbose(payload):
+        response = _valid_response(payload)
+        response["key_points"] = [response["summary"] for _ in range(8)]
+        return response
+    assert OverallSummaryProvider(_Gateway(verbose), None).summarize(brief, facts).source == "deterministic_fallback"
+
+
+def test_overall_summary_rejects_duplicate_key_point_and_warning_text():
+    brief = _brief(); facts = DecisionSemanticEvidenceBuilder().build(brief)
+    def duplicate(payload):
+        response = _valid_response(payload)
+        response["key_points"] = [response["summary"]]
+        response["warning_summary"] = response["summary"]
+        return response
+    assert OverallSummaryProvider(_Gateway(duplicate), None).summarize(brief, facts).source == "deterministic_fallback"
+
+
+def _provenance_response(evidence_id, text):
+    claim = {"type": "INGREDIENT_OPERATIONAL_RISK", "text": text, "evidence_ids": [evidence_id]}
+    return DecisionOverallSummaryLLMResponse.model_validate({"headline": claim, "summary": claim, "key_points": [], "warning_summary": None, "used_evidence_ids": [evidence_id]})
+
+
+def test_conservative_and_stress_provenance_cannot_be_mislabeled_as_selected_plan():
+    conservative = {"evidence_id": "c", "type": "INGREDIENT_OPERATIONAL_RISK", "basis_kind": "conservative_design_scenario"}
+    stress = {"evidence_id": "s", "type": "STRESS_SHORTAGE_OBSERVED"}
+    OverallSummaryProvider._validate_expression(_provenance_response("c", "Trong kịch bản nhu cầu bảo thủ, mô phỏng ghi nhận nguy cơ thiếu."), {"c"}, [conservative])
+    OverallSummaryProvider._validate_expression(_provenance_response("s", "Kịch bản kiểm tra sức chịu đựng ghi nhận nguy cơ thiếu."), {"s"}, [stress])
+    import pytest
+    with pytest.raises(ValueError, match="conservative_mislabeled"):
+        OverallSummaryProvider._validate_expression(_provenance_response("c", "Kế hoạch hiện tại dự kiến thiếu."), {"c"}, [conservative])
+    with pytest.raises(ValueError, match="stress_mislabeled"):
+        OverallSummaryProvider._validate_expression(_provenance_response("s", "Kế hoạch hiện tại thiếu hàng."), {"s"}, [stress])
+
+
+def test_provenance_validation_is_input_order_independent():
+    selected = {"evidence_id": "p", "type": "PLAN_OVERVIEW"}
+    conservative = {"evidence_id": "c", "type": "INGREDIENT_OPERATIONAL_RISK", "basis_kind": "conservative_design_scenario"}
+    typed = _provenance_response("c", "Trong kịch bản nhu cầu bảo thủ, mô phỏng ghi nhận nguy cơ thiếu.")
+    OverallSummaryProvider._validate_expression(typed, {"c"}, [selected, conservative])
+    OverallSummaryProvider._validate_expression(typed, {"c"}, [conservative, selected])
 
 
 def test_overall_summary_falls_back_for_malformed_or_unsupported_causal_output():

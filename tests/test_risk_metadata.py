@@ -73,6 +73,17 @@ def test_stress_shortage_is_a_risk_without_inventing_probability():
     assert "xác suất" not in (detail.meaning or "").lower()
 
 
+def test_operational_ingredient_shortage_has_explicit_warning_metadata():
+    details = _details({"business_metrics": {"deterministic": {"ingredient_metrics": [{
+        "ingredient_id": "banana", "unit": "kg", "shortage_quantity": 1,
+        "stockout_event_count": 1, "first_stockout_date": "2026-08-21",
+    }]}}})
+    detail = next(item for item in details if item.code == "INGREDIENT_OPERATIONAL_RISK")
+    assert (detail.classification, detail.category, detail.severity, detail.ingredient_id) == (
+        "risk", "shortage", "warning", "banana",
+    )
+
+
 def test_duplicate_run_warning_codes_merge_evidence_but_entity_scoped_issues_do_not():
     merged = _details({
         "warnings": ["CAPACITY_NOT_EVALUATED"],

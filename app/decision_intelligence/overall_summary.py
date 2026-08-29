@@ -75,6 +75,14 @@ This includes hedges such as "có thể do" and "có khả năng do". OBSERVATIO
 evidence may describe a state only, never its cause.
 STYLE_EXAMPLES are non-authoritative wording patterns only. Never copy facts from them or cite
 their IDs; all factual text and all claim evidence IDs must come solely from EVIDENCE.
+COMMUNICATION_PLAN is authoritative: use decision first, then at most its one main risk,
+then its limitation. Do not substitute any other known fact. For modeled future outcomes,
+use projected language such as "mô phỏng ghi nhận" or "có nguy cơ". For fill rate use
+"tỷ lệ đáp ứng nhu cầu", never "tỷ lệ lấp kho".
+SCENARIO PROVENANCE: only evidence explicitly marked selected/recommended may be
+called the current plan. basis_kind=conservative_design_scenario must be labelled
+as a conservative demand scenario; stress evidence must be labelled as stress or
+adverse testing, never as a current-plan shortage.
 """
 
 
@@ -139,10 +147,10 @@ class OverallSummaryProvider:
             f"K\u1ebf ho\u1ea1ch hi\u1ec7n t\u1ea1i s\u1eed d\u1ee5ng chi\u1ebfn l\u01b0\u1ee3c {strategy}."
         ] if strategy else []
         if stress:
-            points.append(
-                "M\u1ed9t s\u1ed1 k\u1ecbch b\u1ea3n ki\u1ec3m tra ghi nh\u1eadn t\u00edn hi\u1ec7u thi\u1ebfu h\u00e0ng "
-                "ho\u1eb7c v\u01b0\u1ee3t s\u1ee9c ch\u1ee9a."
-            )
+            if any(fact.values.get("basis_kind") == "conservative_design_scenario" for fact in stress):
+                points.append("Trong kịch bản nhu cầu bảo thủ, mô phỏng ghi nhận tín hiệu thiếu hàng cần theo dõi.")
+            else:
+                points.append("Một số kịch bản kiểm tra ghi nhận tín hiệu thiếu hàng hoặc vượt sức chứa.")
         return AssistantSummary(
             headline=(
                 f"K\u1ebf ho\u1ea1ch nh\u1eadp h\u00e0ng {horizon} ng\u00e0y"
@@ -193,6 +201,7 @@ class OverallSummaryProvider:
             except Exception as exc:
                 failure_stage = LLMFailureStage.SCHEMA_VALIDATION.value
                 raise ValueError("overall_summary_schema_validation_failed") from exc
+            self._validate_expression(typed, set(plan.evidence_ids), selected)
             claims = [typed.headline, typed.summary, *typed.key_points]
             if typed.warning_summary is not None:
                 claims.append(typed.warning_summary)
@@ -220,6 +229,13 @@ class OverallSummaryProvider:
                 llm_diagnostics={
                     "status": "success",
                     "failure_stage": None,
+                    "communication_decision_role": "primary_decision",
+                    "communication_main_risk_role": "main_risk" if plan.main_risk else None,
+                    "communication_limitation_role": "limitation" if plan.limitation else None,
+                    "authorized_evidence_ids": plan.evidence_ids,
+                    "selected_style_example_ids": [item["example_id"] for item in payload["style_examples"]],
+                    "causal_allowed": False,
+                    "dedup_validation_status": "passed",
                     "metadata": request_context.get("openrouter_metadata", {}),
                 },
             )
@@ -258,6 +274,39 @@ class OverallSummaryProvider:
             self.llm_provider, SYSTEM_PROMPT, payload,
             task=LLMTask.PLAN_SUMMARY, request_context=request_context,
         )
+
+    @staticmethod
+    def _validate_expression(typed: DecisionOverallSummaryLLMResponse, authorized: set[str], selected: list[dict[str, Any]]) -> None:
+        """Small deterministic anti-duplication and plan-authority boundary."""
+        claims = [typed.headline, typed.summary, *typed.key_points]
+        if typed.warning_summary is not None:
+            claims.append(typed.warning_summary)
+        claimed_ids = {evidence_id for claim in claims for evidence_id in claim.evidence_ids}
+        if not set(typed.used_evidence_ids) <= authorized or not claimed_ids <= authorized:
+            raise ValueError("overall_summary_unauthorized_evidence")
+        texts = [claim.text.strip().lower() for claim in [*typed.key_points, *([typed.warning_summary] if typed.warning_summary else [])]]
+        if len(texts) != len(set(texts)):
+            raise ValueError("overall_summary_duplicate_output")
+        summary = typed.summary.text.strip().lower()
+        if any(point and point == summary for point in texts):
+            raise ValueError("overall_summary_duplicate_output")
+        all_text = " ".join([typed.headline.text, typed.summary.text, *[item.text for item in typed.key_points], *( [typed.warning_summary.text] if typed.warning_summary else [])]).lower()
+        if "tỷ lệ lấp kho" in all_text:
+            raise ValueError("overall_summary_invalid_fill_rate_terminology")
+        by_id = {item["evidence_id"]: item for item in selected}
+        for claim in claims:
+            cited = [by_id[item] for item in claim.evidence_ids if item in by_id]
+            text = claim.text.lower()
+            if any(item.get("basis_kind") == "conservative_design_scenario" for item in cited):
+                if "kế hoạch hiện tại" in text or "phương án được chọn" in text:
+                    raise ValueError("overall_summary_conservative_mislabeled_as_selected")
+                if "kịch bản" not in text:
+                    raise ValueError("overall_summary_conservative_provenance_missing")
+            if any(str(item.get("type", "")).startswith("STRESS_") for item in cited):
+                if "kế hoạch hiện tại" in text or "phương án được chọn" in text:
+                    raise ValueError("overall_summary_stress_mislabeled_as_selected")
+                if not any(token in text for token in ("kịch bản", "kiểm tra", "sức chịu đựng", "bất lợi")):
+                    raise ValueError("overall_summary_stress_provenance_missing")
 
     def _context(self, brief: DecisionBriefFacts, facts: list[SemanticFact]):
         evidence = self._adapter._evidence(brief, semantic_facts=facts)

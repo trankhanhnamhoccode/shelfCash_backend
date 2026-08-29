@@ -85,6 +85,7 @@ class IngredientSynthesisProvider:
         for ingredient_id in ingredient_ids:
             item_records = by_ingredient[ingredient_id]
             importance = self._importance(item_records, risk_by_ingredient[ingredient_id])
+            importance_reason = self._importance_reason(item_records, risk_by_ingredient[ingredient_id])
             plan = self._communication_plan(item_records) if importance == "critical" else None
             fallback = self._rule(brief, ingredient_id, item_records, importance, plan)
             prepared[ingredient_id] = (fallback, item_records, importance)
@@ -96,6 +97,13 @@ class IngredientSynthesisProvider:
                     "evidence": [record for record in item_records if record["evidence_id"] in set(plan["authorized_evidence_ids"])],
                 })
             logger.info("ingredient_synthesis_route decision_run_id=%s ingredient_id=%s importance=%s llm_eligible=%s evidence_ids=%s", brief.decision_run_id, ingredient_id, importance, importance == "critical", fallback.evidence_ids)
+            self.last_diagnostics["routing"].append({
+                "ingredient_id": ingredient_id, "importance": importance,
+                "importance_reason": importance_reason,
+                "risk_detail_codes": [detail.code for detail in risk_by_ingredient[ingredient_id]],
+                "risk_severities": [detail.severity for detail in risk_by_ingredient[ingredient_id]],
+                "presentation_provenance": self._presentation_provenance(item_records),
+            })
 
         diagnostics = self.last_diagnostics
         assert diagnostics is not None
@@ -143,6 +151,7 @@ class IngredientSynthesisProvider:
             "content_present": False,
             "raw_response": None,
             "items": [],
+            "routing": [],
         }
 
     def _records(self, brief, facts):
@@ -164,15 +173,34 @@ class IngredientSynthesisProvider:
 
     @staticmethod
     def _importance(records, risk_details) -> str:
-        operational = [item for item in records if item.get("type") == "INGREDIENT_OPERATIONAL_RISK"]
-        # A stockout date is an operational signal. Existing RiskDetail
-        # severity, derived from risk metadata, is the authoritative routing
-        # source for an LLM-critical item.
-        if any(item.severity == "critical" for item in risk_details):
+        # RiskDetail severity, projected from the semantic package through
+        # RISK_METADATA, is the sole authority for presentation routing.  An
+        # evidence row is not itself a presentation severity: this prevents a
+        # technical or otherwise unclassified row from silently inflating an
+        # ingredient to WATCH.
+        meaningful = [item for item in risk_details if item.classification != "unknown"]
+        if any(item.severity == "critical" for item in meaningful):
             return "critical"
-        if operational or any(item.severity == "warning" for item in risk_details):
+        if any(item.severity == "warning" for item in meaningful):
             return "watch"
         return "normal"
+
+    @staticmethod
+    def _importance_reason(records, risk_details) -> str:
+        meaningful = [item for item in risk_details if item.classification != "unknown"]
+        if any(item.severity == "critical" for item in meaningful):
+            return "ingredient_risk_detail_critical"
+        if any(item.severity == "warning" for item in meaningful):
+            return "ingredient_risk_detail_warning"
+        return "no_ingredient_risk_signal"
+
+    @staticmethod
+    def _presentation_provenance(records) -> str:
+        if any(item.get("type", "").startswith("STRESS_") for item in records):
+            return "STRESS"
+        if any(item.get("basis_kind") == "conservative_design_scenario" for item in records):
+            return "CONSERVATIVE_DESIGN"
+        return "SELECTED_PLAN"
 
     def _rule(self, brief, ingredient_id, records, importance, plan=None) -> IngredientSynthesis:
         by_type = {str(item["type"]): item for item in records}
@@ -197,6 +225,21 @@ class IngredientSynthesisProvider:
                 headline = "Rủi ro vận hành cần theo dõi"
                 summary = f"{name} có rủi ro vận hành cần được ưu tiên theo dõi trong kỳ kế hoạch."
             return IngredientSynthesis(ingredient_id=ingredient_id, ingredient_name=name, unit=unit, importance=importance, source="rule_based", headline=headline, summary=summary, evidence_ids=authorized)
+        if importance == "watch" and any(str(item.get("type", "")).startswith("STRESS_") for item in records):
+            return IngredientSynthesis(
+                ingredient_id=ingredient_id, ingredient_name=name, unit=unit, importance=importance,
+                source="rule_based", headline="Có tín hiệu cần theo dõi trong kỳ kế hoạch",
+                summary="Kịch bản kiểm tra sức chịu đựng ghi nhận rủi ro cần theo dõi đối với nguyên liệu này.",
+                evidence_ids=list(dict.fromkeys(ids)),
+            )
+        if importance == "watch" and risk and risk.get("first_stockout_date") and risk.get("basis_kind") == "conservative_design_scenario":
+            when = risk["display_values"].get("first_stockout_date", risk["first_stockout_date"])
+            return IngredientSynthesis(
+                ingredient_id=ingredient_id, ingredient_name=name, unit=unit, importance=importance,
+                source="rule_based", headline="Có tín hiệu cần theo dõi trong kỳ kế hoạch",
+                summary=f"Trong kịch bản nhu cầu bảo thủ, mô phỏng ghi nhận nguy cơ thiếu từ {when}. Cần theo dõi nguyên liệu này trong kỳ kế hoạch.",
+                evidence_ids=list(dict.fromkeys(ids)),
+            )
         if importance == "normal":
             headline = "Kế hoạch chưa ghi nhận rủi ro thiếu hàng đáng kể"
             if demand and demand.get("display_values", {}).get("p50_total"):

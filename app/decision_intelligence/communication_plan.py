@@ -16,13 +16,15 @@ class CommunicationPlan:
     limitation: list[str]
     supporting: list[str]
 
-    def as_payload(self) -> dict[str, list[str]]:
+    def as_payload(self) -> dict[str, Any]:
         return {
             "decision": self.decision,
             "main_risk": self.main_attention,
             "main_attention": self.main_attention,
             "limitation": self.limitation,
             "supporting": self.supporting,
+            "causal_allowed": False,
+            "authorized_evidence_ids": self.evidence_ids,
         }
 
     @property
@@ -65,12 +67,10 @@ def summary_communication_plan(records: list[dict[str, Any]]) -> CommunicationPl
         risk = _ids(records, lambda item: item.get("classification") == "RISK_SIGNAL", 1)
     limitation = _ids(records, lambda item: item.get("classification") == "LIMITATION", 1)
     selected = set(decision + supporting + risk + limitation)
-    supporting.extend(_ids(
-        records,
-        lambda item: item.get("evidence_id") not in selected
-        and item.get("type") in {"DEMAND_HORIZON_SUMMARY", "DEMAND_ORDER_ALIGNMENT", "NO_PLANNED_PURCHASE_BASELINE"},
-        3,
-    ))
+    if not supporting:
+        supporting = _ids(records, lambda item: item.get("evidence_id") not in selected and item.get("type") == "DEMAND_ORDER_ALIGNMENT", 1)
+        if not supporting:
+            supporting = _ids(records, lambda item: item.get("evidence_id") not in selected and item.get("type") in {"DEMAND_HORIZON_SUMMARY", "NO_PLANNED_PURCHASE_BASELINE"}, 1)
     return CommunicationPlan(decision, risk, limitation, supporting)
 
 

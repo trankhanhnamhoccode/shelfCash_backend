@@ -26,6 +26,7 @@ def _meta(classification, category, severity, title, meaning, action) -> RiskMet
 
 
 RISK_METADATA: dict[str, RiskMetadata] = {
+    "INGREDIENT_OPERATIONAL_RISK": _meta("risk", "shortage", "warning", "C\u00f3 t\u00edn hi\u1ec7u thi\u1ebfu h\u00e0ng theo k\u1ecbch b\u1ea3n", "M\u00f4 ph\u1ecfng c\u1ee7a k\u1ecbch b\u1ea3n tr\u00ecnh b\u00e0y ghi nh\u1eadn thi\u1ebfu h\u1ee5t ho\u1eb7c th\u1eddi \u0111i\u1ec3m h\u1ebft h\u00e0ng cho nguy\u00ean li\u1ec7u n\u00e0y.", "Theo d\u00f5i nguy\u00ean li\u1ec7u theo \u0111\u00fang b\u1ed1i c\u1ea3nh k\u1ecbch b\u1ea3n \u0111\u01b0\u1ee3c tr\u00ecnh b\u00e0y tr\u01b0\u1edbc khi duy\u1ec7t."),
     "AGGREGATE_MODEL_COUNTS_UNKNOWN_EXPIRY_LOT": _meta("limitation", "expiry", "warning", "Tồn kho chưa rõ hạn dùng", "Một phần tồn kho không có đủ thông tin hạn dùng để đánh giá đầy đủ ảnh hưởng của việc hết hạn.", "Kiểm tra và bổ sung hạn dùng cho các lô tồn kho liên quan."),
     "INBOUND_EXPIRY_NOT_EVALUATED": _meta("limitation", "expiry", "warning", "Chưa đánh giá hạn dùng hàng đang về", "Ảnh hưởng hạn dùng của một số lô hàng đang về chưa được đánh giá đầy đủ.", "Kiểm tra hạn dùng dự kiến của hàng đang về trước khi duyệt kế hoạch."),
     "PLANNED_PURCHASE_SHELF_LIFE_NOT_CONFIGURED": _meta("limitation", "expiry", "warning", "Thiếu thông tin hạn dùng hàng mua mới", "Một số hàng mua mới chưa có thông tin hạn dùng để đánh giá đầy đủ rủi ro tồn kho.", "Bổ sung thời hạn sử dụng cho hàng mua mới liên quan."),
