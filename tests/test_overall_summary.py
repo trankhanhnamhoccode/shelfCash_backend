@@ -14,6 +14,7 @@ from app.decision_intelligence.contracts import (
 )
 from app.decision_intelligence.overall_summary import OverallSummaryProvider
 from app.decision_intelligence.display import purchase_cost_display
+from app.decision_intelligence.style_examples import retrieve_style_examples
 from app.decision_intelligence.semantic_evidence import (
     DecisionSemanticEvidenceBuilder, SemanticFact, SemanticFactClassification,
     SemanticFactProvenance, SemanticFactScope,
@@ -216,6 +217,109 @@ def test_deterministic_fallback_preserves_selected_conservative_and_stress_prove
     assert "Kế hoạch hiện tại có" in " ".join(selected.key_points)
     assert "kịch bản nhu cầu bảo thủ" in " ".join(conservative.key_points)
     assert "kịch bản kiểm tra" in " ".join(stress.key_points)
+
+
+def test_conservative_payload_exposes_role_provenance_exact_display_and_matching_example():
+    provenance = SemanticFactProvenance(source_type="test", source_module="test", source_path="test")
+    facts = [
+        SemanticFact(
+            fact_id="plan", fact_type="PLAN_OVERVIEW", decision_run_id="overall-summary-run",
+            classification=SemanticFactClassification.OBSERVATION, scope=SemanticFactScope.RUN,
+            values={"strategy": "balanced", "horizon_days": 7, "ordered_ingredient_count": 1, "total_purchase_cost": 8338000}, provenance=provenance,
+        ),
+        SemanticFact(
+            fact_id="risk", fact_type="INGREDIENT_OPERATIONAL_RISK", decision_run_id="overall-summary-run",
+            classification=SemanticFactClassification.RISK_SIGNAL, scope=SemanticFactScope.INGREDIENT,
+            entities={"ingredient_id": "banana"},
+            values={"ingredient_name": "Chuối", "basis_kind": "conservative_design_scenario", "shortage_quantity": 3, "fill_rate": .7394, "first_stockout_date": "2026-08-14"}, provenance=provenance,
+        ),
+        SemanticFact(
+            fact_id="limit", fact_type="CAPACITY_NOT_EVALUATED", decision_run_id="overall-summary-run",
+            classification=SemanticFactClassification.LIMITATION, scope=SemanticFactScope.RUN,
+            values={"code": "CAPACITY_NOT_EVALUATED"}, provenance=provenance,
+        ),
+    ]
+    gateway = _Gateway(lambda _payload: {"bad": "response"})
+    OverallSummaryProvider(gateway, None).summarize(_brief(), facts)
+    payload = gateway.payload
+    roles = payload["communication_plan"]["presentation_roles"]
+    assert roles["main_risk"]["presentation_provenance"] == "CONSERVATIVE_DESIGN"
+    assert roles["main_risk"]["evidence_ids"]
+    assert payload["communication_plan"]["causal_allowed"] is False
+    assert payload["style_examples"][0]["example_id"] == "summary-conservative-design-risk"
+    risk = next(item for item in payload["evidence"] if item["type"] == "INGREDIENT_OPERATIONAL_RISK")
+    assert risk["display_values"]["fill_rate"] == "73,94%"
+
+
+def test_overall_summary_examples_are_provenance_specific_and_deterministic():
+    cases = {
+        "SELECTED_PLAN_RISK": "summary-selected-plan-risk",
+        "CONSERVATIVE_DESIGN_RISK": "summary-conservative-design-risk",
+        "STRESS_RISK": "summary-stress-risk",
+        "WITH_LIMITATION": "summary-limit",
+    }
+    for case, example_id in cases.items():
+        first = retrieve_style_examples(task="overall_summary", intent="SUMMARY", case=case, detail_level="simple")
+        assert first == retrieve_style_examples(task="overall_summary", intent="SUMMARY", case=case, detail_level="simple")
+        assert first[0]["example_id"] == example_id
+    assert "kịch bản nhu cầu bảo thủ" in retrieve_style_examples(task="overall_summary", intent="SUMMARY", case="CONSERVATIVE_DESIGN_RISK", detail_level="simple")[0]["template"]
+    assert "vượt công suất" not in retrieve_style_examples(task="overall_summary", intent="SUMMARY", case="WITH_LIMITATION", detail_level="simple")[0]["template"]
+
+
+@pytest.mark.parametrize(("risk_type", "risk_values", "expected_provenance", "risk_text"), [
+    ("INGREDIENT_OPERATIONAL_RISK", {"basis_kind": "conservative_design_scenario", "fill_rate": .7394, "first_stockout_date": "2026-08-14"}, "CONSERVATIVE_DESIGN", "Trong kịch bản nhu cầu bảo thủ, mô phỏng ghi nhận nguy cơ thiếu từ 14/08. Tỷ lệ đáp ứng nhu cầu là 73,94%."),
+    ("STRESS_SHORTAGE_OBSERVED", {}, "STRESS", "Trong kịch bản kiểm tra sức chịu đựng, mô phỏng ghi nhận nguy cơ thiếu."),
+    ("SELECTED_PLAN_RISK_METRICS", {}, "SELECTED_PLAN", "Kế hoạch hiện tại có một nguy cơ thiếu cần theo dõi."),
+])
+def test_provider_like_provenance_matched_risks_are_accepted(risk_type, risk_values, expected_provenance, risk_text):
+    provenance = SemanticFactProvenance(source_type="test", source_module="test", source_path="test")
+    facts = [
+        SemanticFact(fact_id="plan", fact_type="PLAN_OVERVIEW", decision_run_id="overall-summary-run", classification=SemanticFactClassification.OBSERVATION, scope=SemanticFactScope.RUN, values={"strategy": "balanced"}, provenance=provenance),
+        SemanticFact(fact_id="risk", fact_type=risk_type, decision_run_id="overall-summary-run", classification=SemanticFactClassification.RISK_SIGNAL, scope=SemanticFactScope.INGREDIENT, entities={"ingredient_id": "banana"}, values=risk_values, provenance=provenance),
+    ]
+    def response(payload):
+        by_type = {item["type"]: item["evidence_id"] for item in payload["evidence"]}
+        plan_id, risk_id = by_type["PLAN_OVERVIEW"], by_type[risk_type]
+        return {
+            "headline": {"type": "PLAN_OVERVIEW", "text": "ShelfCash đề xuất phương án hiện tại.", "evidence_ids": [plan_id]},
+            "summary": {"type": risk_type, "text": risk_text, "evidence_ids": [risk_id]},
+            "key_points": [], "warning_summary": None, "used_evidence_ids": [plan_id, risk_id],
+        }
+    gateway = _Gateway(response)
+    summary = OverallSummaryProvider(gateway, None).summarize(_brief(), facts)
+    assert gateway.payload["communication_plan"]["presentation_roles"]["main_risk"]["presentation_provenance"] == expected_provenance
+    assert summary.source == "llm"
+
+
+@pytest.mark.parametrize(("text", "expected_source"), [
+    ("Khả năng lưu trữ toàn kho hiện chưa được đánh giá đầy đủ.", "llm"),
+    ("Kho đã vượt công suất.", "deterministic_fallback"),
+    ("Khả năng lưu trữ chưa được đánh giá đầy đủ, nhưng kho đã vượt công suất.", "deterministic_fallback"),
+])
+def test_capacity_not_evaluated_is_not_mislabeled_as_capacity_failure(text, expected_source):
+    provenance = SemanticFactProvenance(source_type="test", source_module="test", source_path="test")
+    facts = [
+        SemanticFact(fact_id="plan", fact_type="PLAN_OVERVIEW", decision_run_id="overall-summary-run", classification=SemanticFactClassification.OBSERVATION, scope=SemanticFactScope.RUN, values={"strategy": "balanced"}, provenance=provenance),
+        SemanticFact(fact_id="limit", fact_type="CAPACITY_NOT_EVALUATED", decision_run_id="overall-summary-run", classification=SemanticFactClassification.LIMITATION, scope=SemanticFactScope.RUN, values={"code": "CAPACITY_NOT_EVALUATED"}, provenance=provenance),
+    ]
+    def response(payload):
+        by_type = {item["type"]: item["evidence_id"] for item in payload["evidence"]}
+        return {
+            "headline": {"type": "PLAN_OVERVIEW", "text": "ShelfCash đề xuất phương án hiện tại.", "evidence_ids": [by_type["PLAN_OVERVIEW"]]},
+            "summary": {"type": "CAPACITY_NOT_EVALUATED", "text": text, "evidence_ids": [by_type["CAPACITY_NOT_EVALUATED"]]},
+            "key_points": [], "warning_summary": None,
+            "used_evidence_ids": [by_type["PLAN_OVERVIEW"], by_type["CAPACITY_NOT_EVALUATED"]],
+        }
+    summary = OverallSummaryProvider(_Gateway(response), None).summarize(_brief(), facts)
+    assert summary.source == expected_source
+    if expected_source == "deterministic_fallback":
+        assert summary.llm_diagnostics["error_message"] == "overall_summary_capacity_not_evaluated_mislabeled_as_exceeded"
+
+
+def test_capacity_failure_words_remain_allowed_without_capacity_not_evaluated_authority():
+    claim = {"type": "STRESS_CAPACITY_VIOLATION", "text": "Trong kịch bản kiểm tra, kho đã vượt công suất.", "evidence_ids": ["stress"]}
+    typed = DecisionOverallSummaryLLMResponse.model_validate({"headline": claim, "summary": claim, "key_points": [], "warning_summary": None, "used_evidence_ids": ["stress"]})
+    OverallSummaryProvider._validate_expression(typed, {"stress"}, [{"evidence_id": "stress", "type": "STRESS_CAPACITY_VIOLATION"}])
 
 
 def test_overall_summary_falls_back_for_malformed_or_unsupported_causal_output():

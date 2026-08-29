@@ -16,8 +16,8 @@ class CommunicationPlan:
     limitation: list[str]
     supporting: list[str]
 
-    def as_payload(self) -> dict[str, Any]:
-        return {
+    def as_payload(self, *, presentation_roles: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
+        payload = {
             "decision": self.decision,
             "main_risk": self.main_attention,
             "main_attention": self.main_attention,
@@ -26,6 +26,11 @@ class CommunicationPlan:
             "causal_allowed": False,
             "authorized_evidence_ids": self.evidence_ids,
         }
+        if presentation_roles is not None:
+            # Additive, internal instruction metadata for model-facing roles.
+            # The original ID lists remain the authority and compatibility shape.
+            payload["presentation_roles"] = presentation_roles
+        return payload
 
     @property
     def main_risk(self) -> list[str]:

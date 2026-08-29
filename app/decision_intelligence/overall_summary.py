@@ -79,10 +79,16 @@ COMMUNICATION_PLAN is authoritative: use decision first, then at most its one ma
 then its limitation. Do not substitute any other known fact. For modeled future outcomes,
 use projected language such as "mô phỏng ghi nhận" or "có nguy cơ". For fill rate use
 "tỷ lệ đáp ứng nhu cầu", never "tỷ lệ lấp kho".
-SCENARIO PROVENANCE: only evidence explicitly marked selected/recommended may be
-called the current plan. basis_kind=conservative_design_scenario must be labelled
-as a conservative demand scenario; stress evidence must be labelled as stress or
-adverse testing, never as a current-plan shortage.
+PRESENTATION_ROLES is the instruction next to each COMMUNICATION_PLAN role. Follow its
+presentation_provenance and required_framing exactly. Only SELECTED_PLAN may be called
+"kế hoạch hiện tại" or "phương án được chọn". CONSERVATIVE_DESIGN must explicitly say
+"kịch bản" and frame the risk as conservative demand simulation, never as a selected-plan
+shortage. STRESS must explicitly frame it as stress/adverse testing, never as a selected-plan
+shortage. LIMITATION describes incomplete evaluation; CAPACITY_NOT_EVALUATED never means
+capacity has been exceeded. When causal_allowed=false, juxtapose authorized facts without
+using causal connectors. Copy a number only from display_values or allowed_numeric_mentions
+exactly: do not recalculate, re-round, or change decimal separators (for example 73,94% must
+not become 73.94% or 73,9%).
 """
 
 
@@ -192,13 +198,15 @@ class OverallSummaryProvider:
             plan = summary_communication_plan(structured)
             selected_ids = set(plan.evidence_ids)
             selected = [item for item in structured if item["evidence_id"] in selected_ids]
+            presentation_roles = self._presentation_roles(plan, selected)
+            main_risk_provenance = presentation_roles["main_risk"]["presentation_provenance"]
             summary_case = (
                 "NO_FEASIBLE" if not brief.recommendation.available else
-                "FEASIBLE_WITH_RISK" if plan.main_risk else
+                f"{main_risk_provenance}_RISK" if plan.main_risk else
                 "WITH_LIMITATION" if plan.limitation else "FEASIBLE"
             )
             payload = {
-                "language": "vi", "communication_plan": plan.as_payload(), "evidence": selected,
+                "language": "vi", "communication_plan": plan.as_payload(presentation_roles=presentation_roles), "evidence": selected,
                 "style_examples": retrieve_style_examples(
                     task="overall_summary", intent="SUMMARY", case=summary_case,
                     detail_level="simple",
@@ -289,6 +297,36 @@ class OverallSummaryProvider:
         )
 
     @staticmethod
+    def _presentation_roles(plan, selected: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+        """Internal model instructions derived only from selected structured evidence."""
+        by_id = {item["evidence_id"]: item for item in selected}
+
+        def role(ids: list[str], provenance: str, framing: str) -> dict[str, Any]:
+            return {
+                "evidence_ids": ids,
+                "presentation_provenance": provenance,
+                "required_framing": framing,
+            }
+
+        risk = by_id.get(plan.main_risk[0]) if plan.main_risk else None
+        risk_provenance = (
+            "CONSERVATIVE_DESIGN" if risk and risk.get("basis_kind") == "conservative_design_scenario" else
+            "STRESS" if risk and str(risk.get("type", "")).startswith("STRESS_") else
+            "SELECTED_PLAN"
+        )
+        risk_framing = {
+            "CONSERVATIVE_DESIGN": "Explicitly say this is a conservative demand scenario (kịch bản nhu cầu bảo thủ), not the current plan.",
+            "STRESS": "Explicitly say this is a stress/adverse testing scenario (kịch bản kiểm tra sức chịu đựng), not the current plan.",
+            "SELECTED_PLAN": "Selected/current-plan wording is allowed only for this risk.",
+        }[risk_provenance]
+        return {
+            "decision": role(plan.decision, "SELECTED_PLAN", "State the selected recommendation first."),
+            "main_risk": role(plan.main_risk, risk_provenance, risk_framing),
+            "limitation": role(plan.limitation, "LIMITATION", "Describe incomplete evaluation only; do not turn it into an operational failure."),
+            "supporting": role(plan.supporting, "SUPPORTING", "Use only as non-authoritative support."),
+        }
+
+    @staticmethod
     def _validate_expression(typed: DecisionOverallSummaryLLMResponse, authorized: set[str], selected: list[dict[str, Any]]) -> None:
         """Small deterministic anti-duplication and plan-authority boundary."""
         claims = [typed.headline, typed.summary, *typed.key_points]
@@ -320,6 +358,16 @@ class OverallSummaryProvider:
                     raise ValueError("overall_summary_stress_mislabeled_as_selected")
                 if not any(token in text for token in ("kịch bản", "kiểm tra", "sức chịu đựng", "bất lợi")):
                     raise ValueError("overall_summary_stress_provenance_missing")
+            if any(item.get("type") == "CAPACITY_NOT_EVALUATED" for item in cited):
+                # This limitation states that store-level capacity was not
+                # evaluated; it is not evidence of an exceeded capacity.
+                exceeded_capacity_markers = (
+                    "vượt công suất", "quá tải", "vượt sức chứa",
+                    "khả năng lưu trữ đã bị vượt", "warehouse over capacity",
+                    "storage exceeded", "capacity exceeded",
+                )
+                if any(marker in text for marker in exceeded_capacity_markers):
+                    raise ValueError("overall_summary_capacity_not_evaluated_mislabeled_as_exceeded")
 
     def _context(self, brief: DecisionBriefFacts, facts: list[SemanticFact]):
         evidence = self._adapter._evidence(brief, semantic_facts=facts)
