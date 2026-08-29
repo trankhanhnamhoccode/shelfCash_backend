@@ -165,6 +165,18 @@ class StrategyComparisonBrief(_Contract):
     candidates: list[StrategyCandidateBrief] = Field(default_factory=list)
     selection_reason: StrategySelectionReasonBrief
 
+class BriefStrategyReason(_Contract):
+    kind: str; code: str; values: dict[str, float | str] = Field(default_factory=dict)
+class BriefStrategyPresentation(_Contract):
+    headline: str; summary: str; reason_messages: list[str] = Field(default_factory=list)
+
+class BriefStrategyEvaluation(_Contract):
+    strategy: str; label: str; status: Literal["selected", "feasible_not_selected", "rejected", "technical_failure", "not_evaluated"]
+    selected: bool; feasible: bool | None = None; purchase_cost: float | None = None
+    reason_status: Literal["verified", "partial", "code_only", "unavailable"]
+    reasons: list[BriefStrategyReason] = Field(default_factory=list)
+    presentation: BriefStrategyPresentation | None = None
+
 
 class CriticBrief(_Contract):
     hard_violations: list[str] = Field(default_factory=list); warnings: list[str] = Field(default_factory=list)
@@ -187,6 +199,7 @@ class DecisionBriefFacts(_Contract):
     ingredient_synthesis: list[IngredientSynthesis] = Field(default_factory=list)
     presented_warnings: list[PresentedWarning] = Field(default_factory=list)
     strategy_comparison: StrategyComparisonBrief | None = None
+    strategy_evaluations: list[BriefStrategyEvaluation] = Field(default_factory=list)
     evidence: list[EvidenceBrief] = Field(default_factory=list)
     data_availability: dict[str, str] = Field(default_factory=dict)
     assistant_summary: AssistantSummary | None = None

@@ -72,6 +72,9 @@ class DecisionBriefBuilder:
         facts = DecisionSemanticEvidenceBuilder().build(brief, package)
         risk_details = project_risk_details(brief, facts)
         strategy_comparison = project_strategy_comparison(brief, facts)
+        from app.decision_intelligence.strategy_evaluation_projection import project_strategy_evaluations
+        from app.decision_intelligence.strategy_presentation import present_all
+        strategy_evaluations = present_all(project_strategy_evaluations(package))
         summaries = [
             IngredientDemandSummaryBrief(
                 ingredient_id=fact.entities["ingredient_id"],
@@ -104,6 +107,7 @@ class DecisionBriefBuilder:
             "ingredient_demand_summary": summaries,
             "risk_details": risk_details,
             "strategy_comparison": strategy_comparison,
+            "strategy_evaluations": strategy_evaluations,
             "assistant_summary": assistant_summary,
             "ingredient_synthesis": ingredient_synthesis,
             # The Brief is a manager-facing route. Technical projections stay
