@@ -109,7 +109,9 @@ async def test_task_requests_use_strict_schema_reasoning_off_and_required_parame
     assert "column_mapping" in mapping["response_format"]["json_schema"]["schema"]["properties"]
     assert "used_evidence_ids" in narrative["response_format"]["json_schema"]["schema"]["properties"]
     assert "headline" in summary["response_format"]["json_schema"]["schema"]["properties"]
-    assert "items" in ingredient_synthesis["response_format"]["json_schema"]["schema"]["properties"]
+    ingredient_schema = ingredient_synthesis["response_format"]["json_schema"]["schema"]["properties"]
+    assert {"headline", "summary", "claims", "used_evidence_ids"} <= set(ingredient_schema)
+    assert "items" not in ingredient_schema
     await provider.close()
 
 
@@ -466,7 +468,7 @@ async def test_rapid_sequential_requests_keep_independent_contexts(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_owner_loop_accepts_concurrent_summary_and_ingredient_tasks(monkeypatch):
+async def test_owner_loop_keeps_summary_then_repeated_ingredient_tasks_alive(monkeypatch):
     provider = OpenRouterQwenProvider(Settings(openrouter_api_key="mock-key"))
 
     async def mock_post(url, json, **_kwargs):
@@ -479,15 +481,17 @@ async def test_owner_loop_accepts_concurrent_summary_and_ingredient_tasks(monkey
 
     client = await provider._get_client()
     monkeypatch.setattr(client, "post", mock_post)
-    summary_context, ingredient_context = {"correlation_id": "summary-A"}, {"correlation_id": "ingredient-B"}
-    summary, ingredient = await asyncio.gather(
-        provider.generate_json("system", {}, task=LLMTask.PLAN_SUMMARY, request_context=summary_context),
-        provider.generate_json("system", {"ingredients": []}, task=LLMTask.INGREDIENT_SYNTHESIS, request_context=ingredient_context),
-    )
+    summary_context = {"correlation_id": "summary-A"}
+    ingredient_context = {"correlation_id": "ingredient-B"}
+    second_ingredient_context = {"correlation_id": "ingredient-C"}
+    summary = await provider.generate_json("system", {}, task=LLMTask.PLAN_SUMMARY, request_context=summary_context)
+    ingredient = await provider.generate_json("system", {"ingredient_id": "B"}, task=LLMTask.INGREDIENT_SYNTHESIS, request_context=ingredient_context)
+    second_ingredient = await provider.generate_json("system", {"ingredient_id": "C"}, task=LLMTask.INGREDIENT_SYNTHESIS, request_context=second_ingredient_context)
 
-    assert summary == ingredient == {}
+    assert summary == ingredient == second_ingredient == {}
     assert summary_context["openrouter_diagnostics"]["resolved_provider"] == "provider-plan_summary"
     assert ingredient_context["openrouter_diagnostics"]["resolved_provider"] == "provider-ingredient_synthesis"
+    assert second_ingredient_context["openrouter_diagnostics"]["resolved_provider"] == "provider-ingredient_synthesis"
     await provider.close()
 
 

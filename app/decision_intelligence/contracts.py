@@ -226,18 +226,13 @@ class DecisionOverallSummaryLLMResponse(_Contract):
     used_evidence_ids: list[str]
 
 
-class IngredientSynthesisLLMItem(_Contract):
-    ingredient_id: str
+class IngredientSynthesisLLMResponse(_Contract):
+    """Small provider-facing contract for one backend-owned ingredient."""
+
     headline: str
     summary: str
     claims: list[DecisionNarrativeClaim]
     used_evidence_ids: list[str]
-
-
-class IngredientSynthesisLLMResponse(_Contract):
-    items: list[IngredientSynthesisLLMItem]
-
-
 class DecisionExplanationResponse(_Contract):
     # Legacy fields are retained for existing clients.
     source: str; language: str; detail_level: str; summary: str

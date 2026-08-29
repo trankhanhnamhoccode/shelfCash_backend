@@ -100,6 +100,31 @@ def test_ingredient_synthesis_diagnostics_stay_in_decision_package_not_brief(cli
     assert diagnostics["raw_response"] not in brief.text
 
 
+def test_legacy_brief_read_reconstructs_ingredient_synthesis_without_provider_call(client):
+    class Provider:
+        available = True
+        calls = 0
+        async def generate_json(self, *_args, **_kwargs):
+            self.calls += 1
+            raise AssertionError("legacy brief reads must not invoke the provider")
+
+    package = {
+        "decision_run_id": "legacy-synthesis-read", "store_id": "STORE_001", "status": "completed",
+        "recommended_strategy": "balanced", "recommended_plan": {"items": []},
+        "ingredient_demand": [{"ingredient_id": "legacy-ingredient", "target_date": "2026-08-21", "unit": "kg", "p25": 1, "p50": 2, "p75": 3, "contributions": []}],
+        "business_metrics": {}, "inventory_risk": {}, "critic": {"findings": [], "warnings": []},
+        "reason_codes": [], "warnings": [],
+    }
+    with client.app.state.session_factory() as session:
+        session.add(_run("legacy-synthesis-read", package)); session.commit()
+    provider = Provider()
+    client.app.state.decision_planning_service.llm_provider = provider
+    response = client.get("/api/v1/decision-runs/legacy-synthesis-read/brief")
+    assert response.status_code == 200
+    assert response.json()["ingredient_synthesis"][0]["source"] == "rule_based"
+    assert provider.calls == 0
+
+
 def test_what_if_invalid_mutations_return_422(client):
     for payload in ({"demand_multiplier": -1}, {"supplier_delay_days": -3}, {"budget_limit": -100}, {"strategy": "unknown"}):
         response = client.post("/api/v1/decision-runs/does-not-matter/what-if", json=payload)
