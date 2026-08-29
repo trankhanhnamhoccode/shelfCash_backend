@@ -3,9 +3,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from collections import defaultdict
 from typing import Any
 
+from pydantic import ValidationError as PydanticValidationError
+
+from app.core.exceptions import LLMUnavailableError
+from app.core.logging_context import get_request_id
 from app.decision_intelligence.adapter import ShelfCashDecisionIntelligenceAdapter
 from app.decision_intelligence.contracts import (
     DecisionBriefFacts, IngredientSynthesis, IngredientSynthesisLLMResponse,
@@ -33,6 +38,10 @@ class IngredientSynthesisProvider:
         self.settings = settings
         self.adapter = ShelfCashDecisionIntelligenceAdapter()
         self.guard = DecisionNarrativeProvider(None, settings)
+        # This is deliberately request-scoped state on a short-lived provider.
+        # It is persisted by the decision planning service as internal package
+        # metadata, never returned in the manager-facing Decision Brief.
+        self.last_diagnostics: dict[str, Any] | None = None
 
     def synthesize(self, brief: DecisionBriefFacts, facts: list[SemanticFact]) -> list[IngredientSynthesis]:
         records, evidence_items = self._records(brief, facts)
@@ -53,6 +62,8 @@ class IngredientSynthesisProvider:
             if detail.ingredient_id:
                 risk_by_ingredient[detail.ingredient_id].append(detail)
 
+        self.last_diagnostics = self._new_diagnostics(brief, ingredient_ids)
+
         prepared: dict[str, tuple[IngredientSynthesis, list[dict[str, Any]], str]] = {}
         eligible: list[dict[str, Any]] = []
         for ingredient_id in ingredient_ids:
@@ -68,9 +79,50 @@ class IngredientSynthesisProvider:
                 })
             logger.info("ingredient_synthesis_route decision_run_id=%s ingredient_id=%s importance=%s llm_eligible=%s evidence_ids=%s", brief.decision_run_id, ingredient_id, importance, importance == "critical", fallback.evidence_ids)
 
-        if not eligible or not self.llm_provider or not self.llm_provider.available:
+        diagnostics = self.last_diagnostics
+        assert diagnostics is not None
+        diagnostics["eligible_count"] = len(eligible)
+        diagnostics["eligible_ingredient_ids"] = [entry["ingredient_id"] for entry in eligible]
+        if not eligible:
+            diagnostics.update(status="not_attempted", failure_stage="NOT_ATTEMPTED")
+            return [prepared[item][0] for item in ingredient_ids]
+        if not self.llm_provider or not self.llm_provider.available:
+            diagnostics.update(status="not_attempted", failure_stage="PROVIDER_UNAVAILABLE")
+            diagnostics["items"] = [
+                self._item_diagnostic(prepared[entry["ingredient_id"]][0], "fallback", "PROVIDER_UNAVAILABLE", "provider_unavailable")
+                for entry in eligible
+            ]
             return [prepared[item][0] for item in ingredient_ids]
         return self._batch_or_fallback(brief, prepared, eligible, evidence_items, ingredient_ids)
+
+    def _new_diagnostics(self, brief: DecisionBriefFacts, ingredient_ids: list[str]) -> dict[str, Any]:
+        configured_model = "qwen/qwen3.5-9b"
+        if self.llm_provider and hasattr(self.llm_provider, "task_profile"):
+            try:
+                configured_model = self.llm_provider.task_profile(LLMTask.INGREDIENT_SYNTHESIS).model
+            except Exception:
+                # Diagnostics must never change the existing fallback path.
+                pass
+        return {
+            "decision_run_id": brief.decision_run_id,
+            "correlation_id": get_request_id(),
+            "task": LLMTask.INGREDIENT_SYNTHESIS.value,
+            "llm_attempted": False,
+            "total_ingredient_count": len(ingredient_ids),
+            "eligible_count": 0,
+            "eligible_ingredient_ids": [],
+            "provider_call_count": 0,
+            "attempt_count": 0,
+            "configured_model": configured_model,
+            "resolved_model": None,
+            "provider": None,
+            "status": "not_attempted",
+            "failure_stage": "NOT_ATTEMPTED",
+            "raw_response_present": False,
+            "content_present": False,
+            "raw_response": None,
+            "items": [],
+        }
 
     def _records(self, brief, facts):
         evidence = self.adapter._evidence(brief, semantic_facts=facts)
@@ -132,13 +184,27 @@ class IngredientSynthesisProvider:
         return {"primary": primary, "supporting": supporting, "causal_allowed": False}
 
     def _batch_or_fallback(self, brief, prepared, eligible, evidence_items, ingredient_ids):
-        context: dict[str, Any] = {"decision_run_id": brief.decision_run_id}
+        diagnostics = self.last_diagnostics
+        assert diagnostics is not None
+        context: dict[str, Any] = {
+            "decision_run_id": brief.decision_run_id,
+            "correlation_id": diagnostics["correlation_id"],
+        }
+        diagnostics.update(llm_attempted=True, provider_call_count=1, status="failed", failure_stage=None)
         logger.info("ingredient_synthesis_batch_started decision_run_id=%s eligible_count=%s task=%s", brief.decision_run_id, len(eligible), LLMTask.INGREDIENT_SYNTHESIS.value)
         try:
             raw = self._run({"task": "ingredient_synthesis", "language": "vi", "ingredients": eligible, "style_examples": retrieve_style_examples(task="ingredient_synthesis", intent="INGREDIENT", case="DEFAULT", detail_level="simple")}, context)
+            self._apply_gateway_diagnostics(diagnostics, context)
             typed = IngredientSynthesisLLMResponse.model_validate(raw)
         except Exception as exc:
-            logger.warning("ingredient_synthesis_batch_fallback decision_run_id=%s eligible_count=%s reason=%s", brief.decision_run_id, len(eligible), type(exc).__name__)
+            self._apply_gateway_diagnostics(diagnostics, context)
+            stage = self._batch_failure_stage(exc, context)
+            diagnostics.update(status="failed", failure_stage=stage)
+            diagnostics["items"] = [
+                self._item_diagnostic(prepared[entry["ingredient_id"]][0], "fallback", stage, f"batch_{stage.lower()}")
+                for entry in eligible
+            ]
+            logger.warning("ingredient_synthesis_batch_fallback decision_run_id=%s eligible_count=%s failure_stage=%s reason=%s", brief.decision_run_id, len(eligible), stage, type(exc).__name__)
             return [self._fallback(prepared[item][0]) if item in {entry["ingredient_id"] for entry in eligible} else prepared[item][0] for item in ingredient_ids]
         returned = {item.ingredient_id: item for item in typed.items}
         results = []
@@ -156,11 +222,100 @@ class IngredientSynthesisProvider:
                     raise ValueError("ingredient_evidence_entity_mismatch")
                 guarded = self.guard._guard({"answer": f"{item.headline}. {item.summary}", "claims": [claim.model_dump(mode="json") for claim in item.claims], "used_evidence_ids": item.used_evidence_ids}, records, evidence_items, brief, "vi", "simple", "INGREDIENT_SYNTHESIS", target_ingredient_id=ingredient_id)
                 results.append(IngredientSynthesis(ingredient_id=ingredient_id, ingredient_name=fallback.ingredient_name, unit=fallback.unit, importance=importance, source="llm", headline=item.headline, summary=item.summary, evidence_ids=[citation.evidence_id for citation in guarded.citations]))
+                diagnostics["items"].append(self._item_diagnostic(fallback, "llm_success", None, None, item.used_evidence_ids))
                 logger.info("ingredient_synthesis_item decision_run_id=%s ingredient_id=%s validation=passed source=llm", brief.decision_run_id, ingredient_id)
             except Exception as exc:
-                logger.warning("ingredient_synthesis_item decision_run_id=%s ingredient_id=%s validation=failed fallback_reason=%s", brief.decision_run_id, ingredient_id, type(exc).__name__)
+                stage, reason = self._item_failure(exc)
+                diagnostics["items"].append(self._item_diagnostic(fallback, "fallback", stage, reason, item.used_evidence_ids if item else []))
+                logger.warning("ingredient_synthesis_item decision_run_id=%s ingredient_id=%s validation=failed failure_stage=%s fallback_reason=%s", brief.decision_run_id, ingredient_id, stage, reason)
                 results.append(self._fallback(fallback))
+        succeeded = sum(1 for item in diagnostics["items"] if item["status"] == "llm_success")
+        diagnostics.update(status="success" if succeeded == len(eligible) else "partial_success" if succeeded else "failed", failure_stage=None)
+        logger.info("ingredient_synthesis_batch_completed decision_run_id=%s eligible=%s llm_success=%s fallback=%s batch_status=%s", brief.decision_run_id, len(eligible), succeeded, len(eligible) - succeeded, diagnostics["status"])
         return results
+
+    @staticmethod
+    def _item_diagnostic(item, status: str, failure_stage: str | None, fallback_reason: str | None, used_evidence_ids: list[str] | None = None) -> dict[str, Any]:
+        return {
+            "ingredient_id": item.ingredient_id,
+            "ingredient_name": item.ingredient_name,
+            "status": status,
+            "failure_stage": failure_stage,
+            "fallback_reason": fallback_reason,
+            "used_evidence_ids": list(used_evidence_ids or []),
+        }
+
+    @staticmethod
+    def _batch_failure_stage(exc: Exception, context: dict[str, Any]) -> str:
+        details = getattr(exc, "details", None)
+        if isinstance(details, dict) and details.get("failure_stage"):
+            stage = str(details["failure_stage"])
+            http_status = getattr(exc, "http_status", None)
+            gateway = context.get("openrouter_diagnostics")
+            if isinstance(gateway, dict):
+                http_status = gateway.get("http_status") or http_status
+            if stage == "HTTP" and http_status == 429:
+                return "RATE_LIMIT"
+            if stage == "HTTP" and isinstance(http_status, int) and http_status >= 500:
+                return "PROVIDER_UNAVAILABLE"
+            return stage
+        gateway = context.get("openrouter_diagnostics")
+        if isinstance(gateway, dict) and gateway.get("failure_category"):
+            return str(gateway["failure_category"])
+        if isinstance(exc, PydanticValidationError):
+            return "SCHEMA_VALIDATION"
+        if isinstance(exc, LLMUnavailableError):
+            return "PROVIDER_UNAVAILABLE"
+        return "UNKNOWN"
+
+    @staticmethod
+    def _item_failure(exc: Exception) -> tuple[str, str]:
+        message = str(exc).lower()
+        if "numeric" in message or "range_semantic" in message:
+            return "NUMERIC_GROUNDING", "unsupported_numeric_claim"
+        if "causal" in message:
+            return "CAUSAL_GROUNDING", "unsupported_causal_claim"
+        if "entity" in message or "ingredient_evidence" in message:
+            return "ENTITY_GROUNDING", "ingredient_evidence_entity_mismatch"
+        if "claim" in message or "evidence" in message or "ground" in message:
+            return "GROUNDING", "grounding_validation_failed"
+        return "BUSINESS_VALIDATION", type(exc).__name__
+
+    @staticmethod
+    def _safe_raw_response(value: Any) -> str | None:
+        if not isinstance(value, str) or not value:
+            return None
+        # Gateways only place response bodies/content here, never request
+        # headers. Redact defensively before persisting developer metadata.
+        redacted = re.sub(
+            r'''(?i)(["']?(?:authorization|api[_-]?key)["']?\s*[:=]\s*["']?)(?:bearer\s+)?[^,\s"'}]+''',
+            r"\1[REDACTED]",
+            value,
+        )
+        return redacted[:20000]
+
+    def _apply_gateway_diagnostics(self, diagnostics: dict[str, Any], context: dict[str, Any]) -> None:
+        gateway = context.get("openrouter_diagnostics")
+        if isinstance(gateway, dict):
+            diagnostics["attempt_count"] = int(gateway.get("attempt_count") or diagnostics["attempt_count"])
+            diagnostics["correlation_id"] = gateway.get("correlation_id") or diagnostics["correlation_id"]
+            diagnostics["resolved_model"] = gateway.get("resolved_model") or diagnostics["resolved_model"]
+            diagnostics["provider"] = gateway.get("resolved_provider") or diagnostics["provider"]
+            diagnostics["raw_response_present"] = bool(gateway.get("raw_response_present", diagnostics["raw_response_present"]))
+            diagnostics["content_present"] = bool(gateway.get("content_present", diagnostics["content_present"]))
+            if gateway.get("http_status") is not None:
+                diagnostics["http_status"] = gateway["http_status"]
+        metadata = context.get("openrouter_metadata")
+        if isinstance(metadata, dict):
+            diagnostics["resolved_model"] = metadata.get("resolved_model") or diagnostics["resolved_model"]
+            diagnostics["provider"] = metadata.get("resolved_provider") or diagnostics["provider"]
+            if metadata.get("finish_reason") is not None:
+                diagnostics["finish_reason"] = metadata["finish_reason"]
+        raw = context.get("openrouter_raw_content") or context.get("openrouter_raw_response")
+        safe_raw = self._safe_raw_response(raw)
+        if safe_raw is not None:
+            diagnostics["raw_response"] = safe_raw
+            diagnostics["raw_response_present"] = True
 
     @staticmethod
     def _fallback(item):

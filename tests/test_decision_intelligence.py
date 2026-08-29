@@ -78,6 +78,28 @@ def test_brief_keeps_daily_ingredient_demand_dates_order_and_evidence_identity(c
     assert len({item["evidence_id"] for item in demand_evidence}) == 7
 
 
+def test_ingredient_synthesis_diagnostics_stay_in_decision_package_not_brief(client):
+    sf = client.app.state.session_factory
+    diagnostics = {
+        "task": "ingredient_synthesis", "raw_response": '{"items": []}',
+        "failure_stage": "JSON_PARSE", "items": [{"ingredient_id": "milk", "status": "fallback"}],
+    }
+    package = {
+        "decision_run_id": "internal-synthesis-diagnostics", "store_id": "STORE_001", "status": "completed",
+        "recommended_strategy": None, "recommended_plan": {"items": []}, "ingredient_demand": [],
+        "business_metrics": {}, "inventory_risk": {}, "critic": {"findings": [], "warnings": []},
+        "reason_codes": [], "warnings": [], "assistant": {"ingredient_synthesis_diagnostics": diagnostics},
+    }
+    with sf() as session:
+        session.add(_run("internal-synthesis-diagnostics", package)); session.commit()
+    stored = client.get("/api/v1/decision-runs/internal-synthesis-diagnostics")
+    brief = client.get("/api/v1/decision-runs/internal-synthesis-diagnostics/brief")
+    assert stored.status_code == 200 and stored.json()["assistant"]["ingredient_synthesis_diagnostics"] == diagnostics
+    assert brief.status_code == 200
+    assert "ingredient_synthesis_diagnostics" not in brief.json()
+    assert diagnostics["raw_response"] not in brief.text
+
+
 def test_what_if_invalid_mutations_return_422(client):
     for payload in ({"demand_multiplier": -1}, {"supplier_delay_days": -3}, {"budget_limit": -100}, {"strategy": "unknown"}):
         response = client.post("/api/v1/decision-runs/does-not-matter/what-if", json=payload)

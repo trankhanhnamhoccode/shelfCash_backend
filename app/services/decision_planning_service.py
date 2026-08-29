@@ -292,8 +292,17 @@ class DecisionPlanningService:
    brief=DecisionBriefBuilder().build(s,run)
    facts=DecisionSemanticEvidenceBuilder().build(brief,package)
    summary=AssistantSummary.model_validate(assistant["overall_summary"]) if isinstance(assistant.get("overall_summary"),dict) else OverallSummaryProvider(self.llm_provider,self.settings).summarize(brief,facts)
-   synthesis=IngredientSynthesisProvider(self.llm_provider,self.settings).synthesize(brief,facts)
-   package["assistant"]={**assistant,"overall_summary":summary.model_dump(mode="json"),"ingredient_synthesis":[item.model_dump(mode="json") for item in synthesis]}
+   synthesis_provider=IngredientSynthesisProvider(self.llm_provider,self.settings)
+   synthesis=synthesis_provider.synthesize(brief,facts)
+   # Developer-only metadata stays in the immutable Decision Run package.  The
+   # DecisionBriefBuilder reads only assistant.ingredient_synthesis, keeping
+   # OpenRouter transport details and raw content out of the FE /brief contract.
+   package["assistant"]={
+    **assistant,
+    "overall_summary":summary.model_dump(mode="json"),
+    "ingredient_synthesis":[item.model_dump(mode="json") for item in synthesis],
+    "ingredient_synthesis_diagnostics":synthesis_provider.last_diagnostics,
+   }
    run.package_json=dump(package)
    s.commit()
 
