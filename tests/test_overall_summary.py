@@ -322,6 +322,82 @@ def test_capacity_failure_words_remain_allowed_without_capacity_not_evaluated_au
     OverallSummaryProvider._validate_expression(typed, {"stress"}, [{"evidence_id": "stress", "type": "STRESS_CAPACITY_VIOLATION"}])
 
 
+def _authorization_boundary_facts():
+    provenance = SemanticFactProvenance(source_type="test", source_module="test", source_path="test")
+    return [
+        SemanticFact(fact_id="plan", fact_type="PLAN_OVERVIEW", decision_run_id="overall-summary-run", classification=SemanticFactClassification.OBSERVATION, scope=SemanticFactScope.RUN, values={"strategy": "balanced", "horizon_days": 7, "total_purchase_cost": 4_680_000}, provenance=provenance),
+        SemanticFact(fact_id="risk-a", fact_type="INGREDIENT_OPERATIONAL_RISK", decision_run_id="overall-summary-run", classification=SemanticFactClassification.RISK_SIGNAL, scope=SemanticFactScope.INGREDIENT, entities={"ingredient_id": "banana"}, values={"ingredient_name": "Chuoi", "basis_kind": "conservative_design_scenario", "shortage_quantity": 2, "fill_rate": .6396, "first_stockout_date": "2026-08-14"}, provenance=provenance),
+        SemanticFact(fact_id="risk-b", fact_type="INGREDIENT_OPERATIONAL_RISK", decision_run_id="overall-summary-run", classification=SemanticFactClassification.RISK_SIGNAL, scope=SemanticFactScope.INGREDIENT, entities={"ingredient_id": "milk"}, values={"ingredient_name": "Sua khac", "shortage_quantity": 1, "fill_rate": .8, "first_stockout_date": "2026-08-17"}, provenance=provenance),
+        SemanticFact(fact_id="capacity", fact_type="CAPACITY_NOT_EVALUATED", decision_run_id="overall-summary-run", classification=SemanticFactClassification.LIMITATION, scope=SemanticFactScope.RUN, values={"code": "CAPACITY_NOT_EVALUATED"}, provenance=provenance),
+    ]
+
+
+def test_actual_gateway_payload_is_exactly_communication_plan_authorized_evidence():
+    facts = _authorization_boundary_facts()
+
+    def response(payload):
+        plan = payload["communication_plan"]
+        by_id = {item["evidence_id"]: item for item in payload["evidence"]}
+        decision, risk, limitation = plan["decision"][0], plan["main_risk"][0], plan["limitation"][0]
+        return {
+            "headline": {"type": by_id[decision]["type"], "text": "ShelfCash de xuat ke hoach hien tai.", "evidence_ids": [decision]},
+            "summary": {"type": by_id[risk]["type"], "text": "Trong kịch bản nhu cầu bảo thủ, mô phỏng ghi nhận nguy cơ thiếu từ 14/08.", "evidence_ids": [risk]},
+            "key_points": [],
+            "warning_summary": {"type": by_id[limitation]["type"], "text": "Kha nang luu tru hien chua duoc danh gia day du.", "evidence_ids": [limitation]},
+            "used_evidence_ids": [decision, risk, limitation],
+        }
+
+    gateway = _Gateway(response)
+    summary = OverallSummaryProvider(gateway, None).summarize(_brief(), facts)
+    payload = gateway.payload
+    authorized = set(payload["communication_plan"]["authorized_evidence_ids"])
+    visible = {item["evidence_id"] for item in payload["evidence"]}
+    records = OverallSummaryProvider(None, None)._context(_brief(), facts)[1]
+    alternate = next(item for item in records if item.get("ingredient_id") == "milk")
+
+    assert summary.source == "llm"
+    assert visible == authorized
+    assert alternate["evidence_id"] not in visible
+    serialized = json.dumps(payload, ensure_ascii=False, default=str)
+    assert alternate["evidence_id"] not in serialized
+    assert "Sua khac" not in serialized and "17/08" not in serialized
+    assert payload["communication_plan"]["presentation_roles"]["main_risk"]["presentation_provenance"] == "CONSERVATIVE_DESIGN"
+    assert payload["communication_plan"]["presentation_roles"]["limitation"]["presentation_provenance"] == "LIMITATION"
+
+
+def test_unauthorized_real_alternate_evidence_is_rejected_after_payload_filtering():
+    facts = _authorization_boundary_facts()
+
+    def response(payload):
+        plan = payload["communication_plan"]
+        decision = plan["decision"][0]
+        # This is a real semantic ID from the universe, deliberately absent
+        # from the selected Overall Summary payload and plan authority.
+        alternate = next(item for item in OverallSummaryProvider(None, None)._context(_brief(), facts)[1] if item.get("ingredient_id") == "milk")["evidence_id"]
+        return {
+            "headline": {"type": "PLAN_OVERVIEW", "text": "ShelfCash de xuat ke hoach hien tai.", "evidence_ids": [decision]},
+            "summary": {"type": "INGREDIENT_OPERATIONAL_RISK", "text": "Mot rui ro khac can theo doi.", "evidence_ids": [alternate]},
+            "key_points": [], "warning_summary": None,
+            "used_evidence_ids": [decision, alternate],
+        }
+
+    summary = OverallSummaryProvider(_Gateway(response), None).summarize(_brief(), facts)
+    assert summary.source == "deterministic_fallback"
+    assert summary.llm_diagnostics["error_message"] == "overall_summary_unauthorized_evidence"
+    assert summary.llm_diagnostics["failure_stage"] == "GROUNDING"
+
+
+def test_authorization_and_visible_payload_are_independent_of_global_fact_order():
+    facts = _authorization_boundary_facts()
+    payloads = []
+    for values in (facts, list(reversed(facts))):
+        gateway = _Gateway(lambda payload: {"bad": "response"})
+        OverallSummaryProvider(gateway, None).summarize(_brief(), values)
+        payloads.append(gateway.payload)
+    assert [set(payload["communication_plan"]["authorized_evidence_ids"]) for payload in payloads][0] == [set(payload["communication_plan"]["authorized_evidence_ids"]) for payload in payloads][1]
+    assert [{item["evidence_id"] for item in payload["evidence"]} for payload in payloads][0] == [{item["evidence_id"] for item in payload["evidence"]} for payload in payloads][1]
+
+
 def test_overall_summary_falls_back_for_malformed_or_unsupported_causal_output():
     brief = _brief()
     facts = DecisionSemanticEvidenceBuilder().build(brief)

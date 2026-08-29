@@ -222,7 +222,15 @@ class OverallSummaryProvider:
             except Exception as exc:
                 failure_stage = LLMFailureStage.SCHEMA_VALIDATION.value
                 raise ValueError("overall_summary_schema_validation_failed") from exc
-            self._validate_expression(typed, set(plan.evidence_ids), selected)
+            try:
+                self._validate_expression(typed, set(plan.evidence_ids), selected)
+            except ValueError as exc:
+                # The response referenced an ID outside the authoritative
+                # CommunicationPlan.  This is grounding/authorization, not an
+                # unknown provider failure.
+                if str(exc) == "overall_summary_unauthorized_evidence":
+                    failure_stage = LLMFailureStage.GROUNDING.value
+                raise
             claims = [typed.headline, typed.summary, *typed.key_points]
             if typed.warning_summary is not None:
                 claims.append(typed.warning_summary)
