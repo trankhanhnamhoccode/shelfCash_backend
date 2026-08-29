@@ -5,6 +5,7 @@ import json
 import logging
 import random
 import re
+import threading
 import time
 from typing import Any
 
@@ -35,12 +36,66 @@ class OpenRouterLLMGateway(LLMProvider):
         self.base_url = (getattr(settings, "openrouter_base_url", None) or "https://openrouter.ai/api/v1").rstrip("/")
         self.model = getattr(settings, "openrouter_model", None) or "qwen/qwen3.5-9b"
         self._client: httpx.AsyncClient | None = None
+        self._owner_loop: asyncio.AbstractEventLoop | None = None
+        self._owner_thread: threading.Thread | None = None
+        self._owner_ready = threading.Event()
+        self._owner_lock = threading.Lock()
 
     @property
     def available(self) -> bool:
         return bool(self.api_key)
 
-    async def _get_client(self) -> httpx.AsyncClient:
+    def _ensure_owner_loop(self) -> asyncio.AbstractEventLoop:
+        """Own the shared HTTP pool on one long-lived gateway loop."""
+        with self._owner_lock:
+            if self._owner_loop is not None and self._owner_loop.is_running():
+                return self._owner_loop
+            self._owner_ready.clear()
+
+            def run_owner_loop() -> None:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                self._owner_loop = loop
+                self._owner_ready.set()
+                loop.run_forever()
+                loop.close()
+
+            self._owner_thread = threading.Thread(
+                target=run_owner_loop, name="shelfcash-openrouter", daemon=True,
+            )
+            self._owner_thread.start()
+        if not self._owner_ready.wait(timeout=5):
+            raise RuntimeError("OpenRouter owner event loop did not start")
+        assert self._owner_loop is not None
+        return self._owner_loop
+
+    def _on_owner_loop(self) -> bool:
+        try:
+            return asyncio.get_running_loop() is self._owner_loop
+        except RuntimeError:
+            return False
+
+    async def _await_on_owner_loop(self, coroutine):
+        if self._on_owner_loop():
+            return await coroutine
+        loop = self._ensure_owner_loop()
+        try:
+            future = asyncio.run_coroutine_threadsafe(coroutine, loop)
+        except Exception:
+            coroutine.close()
+            raise
+        return await asyncio.wrap_future(future)
+
+    def _run_on_owner_loop(self, coroutine):
+        loop = self._ensure_owner_loop()
+        try:
+            future = asyncio.run_coroutine_threadsafe(coroutine, loop)
+        except Exception:
+            coroutine.close()
+            raise
+        return future.result()
+
+    async def _get_client_on_owner_loop(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
             self._client = httpx.AsyncClient(
                 timeout=httpx.Timeout(getattr(self.settings, "openrouter_timeout_seconds", 60), connect=10.0),
@@ -55,6 +110,10 @@ class OpenRouterLLMGateway(LLMProvider):
                 },
             )
         return self._client
+
+    async def _get_client(self) -> httpx.AsyncClient:
+        """Test/support accessor; production calls stay on the owner loop."""
+        return await self._await_on_owner_loop(self._get_client_on_owner_loop())
 
     def health(self) -> dict[str, Any]:
         # Keep the existing public health response stable.
@@ -238,6 +297,35 @@ class OpenRouterLLMGateway(LLMProvider):
         task: LLMTask = LLMTask.EXCEL_MAPPING,
         request_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        return await self._await_on_owner_loop(
+            self._generate_json_on_owner_loop(
+                system, payload, task=task, request_context=request_context,
+            )
+        )
+
+    def generate_json_sync(
+        self,
+        system: str,
+        payload: dict[str, Any],
+        *,
+        task: LLMTask = LLMTask.EXCEL_MAPPING,
+        request_context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Synchronous business callers use the gateway-owned loop, never asyncio.run."""
+        return self._run_on_owner_loop(
+            self._generate_json_on_owner_loop(
+                system, payload, task=task, request_context=request_context,
+            )
+        )
+
+    async def _generate_json_on_owner_loop(
+        self,
+        system: str,
+        payload: dict[str, Any],
+        *,
+        task: LLMTask = LLMTask.EXCEL_MAPPING,
+        request_context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         if not self.available:
             raise LLMUnavailableError("OpenRouter API key is not configured")
 
@@ -304,7 +392,7 @@ class OpenRouterLLMGateway(LLMProvider):
             profile.structured_output, profile.strict_schema, profile.require_parameters,
         )
         try:
-            client = await self._get_client()
+            client = await self._get_client_on_owner_loop()
         except Exception as exc:
             raise self._normalized_runtime_error(
                 exc, stage=LLMFailureStage.INTERNAL_RUNTIME, task=task,
@@ -598,10 +686,25 @@ class OpenRouterLLMGateway(LLMProvider):
         threshold = getattr(self.settings, "rule_confidence_threshold", 0.82)
         return finalize_mapping(profile, suggestion, threshold)
 
+    async def load(self) -> None:
+        self._ensure_owner_loop()
+
     async def close(self) -> None:
-        if self._client is not None and not self._client.is_closed:
-            await self._client.aclose()
+        loop, thread = self._owner_loop, self._owner_thread
+        if loop is None or thread is None:
+            return
+
+        async def close_client() -> None:
+            if self._client is not None and not self._client.is_closed:
+                await self._client.aclose()
             self._client = None
+
+        await self._await_on_owner_loop(close_client())
+        loop.call_soon_threadsafe(loop.stop)
+        await asyncio.to_thread(thread.join, 5)
+        with self._owner_lock:
+            self._owner_loop = None
+            self._owner_thread = None
 
 
 # Compatibility for internal imports and downstream extensions using the old name.

@@ -20,6 +20,7 @@ from app.decision_intelligence.narrative import DecisionNarrativeProvider
 from app.decision_intelligence.semantic_evidence import SemanticFact
 from app.decision_intelligence.style_examples import retrieve_style_examples
 from app.llm.tasks import LLMFailureStage, LLMTask
+from app.llm.runtime import generate_json_sync
 
 try:
     import httpx
@@ -367,11 +368,7 @@ class IngredientSynthesisProvider:
         return item.model_copy(update={"source": "deterministic_fallback"})
 
     def _run(self, payload, context):
-        coroutine = self.llm_provider.generate_json(SYSTEM_PROMPT, payload, task=LLMTask.INGREDIENT_SYNTHESIS, request_context=context)
-        try:
-            asyncio.get_running_loop()
-        except RuntimeError:
-            return asyncio.run(coroutine)
-        import concurrent.futures
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            return pool.submit(lambda: asyncio.run(coroutine)).result()
+        return generate_json_sync(
+            self.llm_provider, SYSTEM_PROMPT, payload,
+            task=LLMTask.INGREDIENT_SYNTHESIS, request_context=context,
+        )

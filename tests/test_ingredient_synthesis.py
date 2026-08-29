@@ -1,13 +1,18 @@
 from datetime import date, datetime, timezone
+import asyncio
 import httpx
+import pytest
+from app.config import Settings
 from app.core.exceptions import LLMProviderError
 from app.decision_intelligence.contracts import (
     CriticBrief, DecisionBriefFacts, ForecastBrief, IngredientDemandBrief,
     ProcurementRowBrief, RecommendationBrief, RiskBrief,
 )
 from app.decision_intelligence.ingredient_synthesis import IngredientSynthesisProvider
+from app.decision_intelligence.overall_summary import OverallSummaryProvider
 from app.decision_intelligence.semantic_evidence import DecisionSemanticEvidenceBuilder
 from app.decision_intelligence.warning_presentation import present_warnings
+from app.llm.openrouter_qwen import OpenRouterLLMGateway
 
 
 def _brief():
@@ -259,3 +264,70 @@ def test_unclassified_internal_runtime_exception_is_observable_not_unknown():
     assert diagnostics["failure_stage"] == "INTERNAL_RUNTIME"
     assert diagnostics["exception_type"] == "RuntimeError"
     assert diagnostics["exception_message"] == "synthetic internal failure"
+
+
+def test_old_temporary_loop_bridge_reuses_a_loop_bound_transport_after_close():
+    class _LoopBoundTransport:
+        def __init__(self):
+            self.owner_loop = None
+
+        async def post(self):
+            loop = asyncio.get_running_loop()
+            if self.owner_loop is None:
+                self.owner_loop = loop
+            if self.owner_loop.is_closed():
+                raise RuntimeError("Event loop is closed")
+            return "ok"
+
+    transport = _LoopBoundTransport()
+
+    def old_feature_bridge():
+        return asyncio.run(transport.post())
+
+    assert old_feature_bridge() == "ok"
+    with pytest.raises(RuntimeError, match="Event loop is closed"):
+        old_feature_bridge()
+
+
+def test_shared_gateway_owner_loop_keeps_summary_and_repeated_synthesis_alive(monkeypatch):
+    provider = OpenRouterLLMGateway(Settings(openrouter_api_key="mock-key"))
+
+    async def mock_post(url, json, **_kwargs):
+        task = json["response_format"]["json_schema"]["name"]
+        payload = __import__("json").loads(json["messages"][1]["content"])
+        if task == "plan_summary":
+            overview = next(item for item in payload["evidence"] if item["type"] == "PLAN_OVERVIEW")
+            claim = {"type": "PLAN_OVERVIEW", "text": "Ke hoach hien tai su dung chien luoc Can bang.", "evidence_ids": [overview["evidence_id"]]}
+            response = {"headline": claim, "summary": claim, "key_points": [], "warning_summary": None, "used_evidence_ids": [overview["evidence_id"]]}
+        else:
+            response = {"items": [
+                {
+                    "ingredient_id": item["ingredient_id"], "headline": f"{item['evidence'][0].get('ingredient_name') or item['ingredient_id']} can theo doi",
+                    "summary": f"{item['evidence'][0].get('ingredient_name') or item['ingredient_id']} co the thieu hang trong ky ke hoach.",
+                    "claims": [{"type": "INGREDIENT_OPERATIONAL_RISK", "text": f"{item['evidence'][0].get('ingredient_name') or item['ingredient_id']} co the thieu hang trong ky ke hoach.", "evidence_ids": item["communication_plan"]["primary"]}],
+                    "used_evidence_ids": item["communication_plan"]["primary"],
+                }
+                for item in payload["ingredients"]
+            ]}
+        return httpx.Response(200, json={"id": "generation-test", "model": "qwen/qwen3.5-9b", "provider": "test-provider", "choices": [{"finish_reason": "stop", "message": {"content": __import__("json").dumps(response)}}]}, request=httpx.Request("POST", url))
+
+    client = asyncio.run(provider._get_client())
+    monkeypatch.setattr(client, "post", mock_post)
+    summary_brief = _brief()
+    summary = OverallSummaryProvider(provider, None).summarize(
+        summary_brief, DecisionSemanticEvidenceBuilder().build(summary_brief),
+    )
+    brief, facts = _critical_batch()
+    first = IngredientSynthesisProvider(provider, None)
+    second = IngredientSynthesisProvider(provider, None)
+    first_result = first.synthesize(brief, facts)
+    second_result = second.synthesize(brief, facts)
+
+    assert summary.source == "llm"
+    assert any(item.source == "llm" for item in first_result)
+    assert any(item.source == "llm" for item in second_result)
+    assert first.last_diagnostics["provider"] == "test-provider"
+    assert first.last_diagnostics["resolved_model"] == "qwen/qwen3.5-9b"
+    assert first.last_diagnostics["raw_response_present"] is True
+    assert first.last_diagnostics["content_present"] is True
+    asyncio.run(provider.close())

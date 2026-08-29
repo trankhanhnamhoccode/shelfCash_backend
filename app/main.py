@@ -76,6 +76,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         engine = create_engine_from_settings(active_settings)
         session_factory = create_session_factory(engine)
         provider = create_llm_provider(active_settings)
+        await provider.load()
         app.state.settings = active_settings
         app.state.engine = engine
         app.state.session_factory = session_factory

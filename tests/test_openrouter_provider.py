@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import pytest
@@ -461,6 +462,32 @@ async def test_rapid_sequential_requests_keep_independent_contexts(monkeypatch):
     assert second["openrouter_raw_content"] == '{"name":"B"}'
     assert first["openrouter_diagnostics"]["resolved_provider"] == "provider-A"
     assert second["openrouter_diagnostics"]["resolved_provider"] == "provider-B"
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_owner_loop_accepts_concurrent_summary_and_ingredient_tasks(monkeypatch):
+    provider = OpenRouterQwenProvider(Settings(openrouter_api_key="mock-key"))
+
+    async def mock_post(url, json, **_kwargs):
+        task = json["response_format"]["json_schema"]["name"]
+        return httpx.Response(
+            200,
+            json={"model": "qwen/qwen3.5-9b", "provider": f"provider-{task}", "choices": [{"finish_reason": "stop", "message": {"content": "{}"}}]},
+            request=httpx.Request("POST", url),
+        )
+
+    client = await provider._get_client()
+    monkeypatch.setattr(client, "post", mock_post)
+    summary_context, ingredient_context = {"correlation_id": "summary-A"}, {"correlation_id": "ingredient-B"}
+    summary, ingredient = await asyncio.gather(
+        provider.generate_json("system", {}, task=LLMTask.PLAN_SUMMARY, request_context=summary_context),
+        provider.generate_json("system", {"ingredients": []}, task=LLMTask.INGREDIENT_SYNTHESIS, request_context=ingredient_context),
+    )
+
+    assert summary == ingredient == {}
+    assert summary_context["openrouter_diagnostics"]["resolved_provider"] == "provider-plan_summary"
+    assert ingredient_context["openrouter_diagnostics"]["resolved_provider"] == "provider-ingredient_synthesis"
     await provider.close()
 
 

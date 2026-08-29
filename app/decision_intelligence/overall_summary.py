@@ -1,7 +1,6 @@
 """One-time, grounded overall summaries for persisted Decision Runs."""
 from __future__ import annotations
 
-import asyncio
 import logging
 from typing import Any
 
@@ -21,6 +20,7 @@ from app.decision_intelligence.semantic_evidence import (
 )
 from app.decision_intelligence.style_examples import retrieve_style_examples
 from app.llm.tasks import LLMFailureStage, LLMTask
+from app.llm.runtime import generate_json_sync
 
 logger = logging.getLogger("shelfcash.overall_summary")
 
@@ -254,18 +254,10 @@ class OverallSummaryProvider:
             })
 
     def _run_gateway(self, payload: dict[str, Any], request_context: dict[str, Any]) -> dict[str, Any]:
-        coroutine = self.llm_provider.generate_json(
-            SYSTEM_PROMPT, payload, task=LLMTask.PLAN_SUMMARY, request_context=request_context,
+        return generate_json_sync(
+            self.llm_provider, SYSTEM_PROMPT, payload,
+            task=LLMTask.PLAN_SUMMARY, request_context=request_context,
         )
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            loop = None
-        if loop and loop.is_running():
-            import concurrent.futures
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                return pool.submit(lambda: asyncio.run(coroutine)).result()
-        return asyncio.run(coroutine)
 
     def _context(self, brief: DecisionBriefFacts, facts: list[SemanticFact]):
         evidence = self._adapter._evidence(brief, semantic_facts=facts)
