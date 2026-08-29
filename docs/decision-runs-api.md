@@ -22,3 +22,20 @@ The current what-if response is explicitly read-only and uses a persisted exact
 stress result when one matches; it does not mutate inventory, orders, or the
 source decision run. A re-optimization snapshot path is still required for
 arbitrary budget/strategy what-ifs.
+
+## Deterministic ingredient-metric basis
+
+For newly created Decision Runs, each item in
+`business_metrics.deterministic.ingredient_metrics` is mathematically coherent:
+its flat `demand_quantity`, `fulfilled_quantity`, `shortage_quantity`,
+`fill_rate`, stockout, expiry, waste, and inventory fields all come from the
+single scenario identified by `basis_scenario_id`, `basis_scenario_name`, and
+`basis_kind`. The deterministic conservative selector chooses that complete
+scenario by lowest fill rate, then highest shortage, then earliest stockout,
+then scenario ID; it never uses scenario input order.
+
+`scenario_metrics` retains each complete design-scenario row. `worst_case`
+contains independently conservative values (`minimum_fill_rate`,
+`maximum_shortage_quantity`, and `earliest_stockout`), each with the scenario
+that supplied it. Those values are not a single algebraically comparable row.
+Existing persisted packages are read as stored and are not rewritten by GET.

@@ -6,6 +6,7 @@ from app.core.exceptions import LLMProviderError
 from app.decision_intelligence.contracts import CriticBrief, DecisionBriefFacts, ForecastBrief, IngredientDemandBrief, RecommendationBrief, RiskBrief, RiskDetail
 from app.decision_intelligence.ingredient_synthesis import IngredientSynthesisProvider
 from app.decision_intelligence.semantic_evidence import DecisionSemanticEvidenceBuilder
+from app.decision_intelligence.style_examples import retrieve_style_examples
 
 
 def brief(ids, critical=(), warning=()):
@@ -26,7 +27,7 @@ class Gateway:
     async def generate_json(self, _system, payload, *, request_context, **_kwargs):
         ingredient_id = payload["ingredient_id"]; self.calls.append(payload)
         if ingredient_id in self.failures: raise self.failures[ingredient_id]
-        ids = payload["communication_plan"]["primary"]
+        ids = payload["communication_plan"]["primary"]["evidence_ids"]
         request_context["openrouter_diagnostics"] = {"attempt_count": 1, "resolved_model": "qwen/qwen3.5-9b", "resolved_provider": "fake", "raw_response_present": True, "content_present": True}
         return self.responses.get(ingredient_id, {"headline": "Cần theo dõi", "summary": "Có nguy cơ thiếu hàng trong kỳ kế hoạch.", "claims": [{"type": "INGREDIENT_OPERATIONAL_RISK", "text": "Có nguy cơ thiếu hàng trong kỳ kế hoạch.", "evidence_ids": ids}], "used_evidence_ids": ids})
 
@@ -126,3 +127,63 @@ def test_representative_ten_ingredient_routing_uses_authoritative_critical_risk_
     assert [by_id[item].importance for item in ids] == ["normal", "normal", "watch", "watch", "watch", "watch", "watch", "critical", "critical", "critical"]
     assert all(by_id[item].source == "rule_based" for item in ("w3", "w4", "w5"))
     assert (provider.last_diagnostics["normal_count"], provider.last_diagnostics["watch_count"], provider.last_diagnostics["critical_count"], provider.last_diagnostics["eligible_count"], provider.last_diagnostics["provider_call_count"]) == (2, 5, 3, 3, 3)
+
+
+def test_communication_plan_prioritizes_stockout_and_bounds_nonredundant_support():
+    records = [
+        {"evidence_id": "risk", "type": "INGREDIENT_OPERATIONAL_RISK", "first_stockout_date": "2026-08-21"},
+        {"evidence_id": "order", "type": "PROCUREMENT_QUANTITY"},
+        {"evidence_id": "alignment", "type": "DEMAND_ORDER_ALIGNMENT"},
+        {"evidence_id": "demand", "type": "DEMAND_HORIZON_SUMMARY"},
+    ]
+    plan = IngredientSynthesisProvider._communication_plan(records)
+    assert plan["primary"] == {"role": "stockout_timing", "evidence_ids": ["risk"]}
+    assert [item["role"] for item in plan["supporting"]] == ["procurement_quantity", "procurement_alignment"]
+    assert len(plan["supporting"]) == 2 and "demand" not in plan["authorized_evidence_ids"]
+    assert plan["causal_allowed"] is False
+    assert IngredientSynthesisProvider._classify_case(plan) == "STOCKOUT_BEFORE_RECEIPT"
+
+
+def test_case_classifier_and_style_retrieval_are_deterministic_and_placeholder_only():
+    material = {"primary": {"role": "shortage_risk", "evidence_ids": ["risk"]}, "supporting": [], "limitation": None, "causal_allowed": False, "authorized_evidence_ids": ["risk"]}
+    limited = {"primary": {"role": "other_critical_operational_risk", "evidence_ids": ["risk"]}, "supporting": [], "limitation": {"role": "ingredient_limitation", "evidence_ids": ["limit"]}, "causal_allowed": False, "authorized_evidence_ids": ["risk", "limit"]}
+    assert IngredientSynthesisProvider._classify_case(material) == "MATERIAL_SHORTAGE"
+    assert IngredientSynthesisProvider._classify_case(limited) == "LIMITED_EVIDENCE"
+    examples = retrieve_style_examples(task="ingredient_synthesis", intent="SYNTHESIS", case="STOCKOUT_BEFORE_RECEIPT", detail_level="simple", limit=2)
+    assert examples == retrieve_style_examples(task="ingredient_synthesis", intent="SYNTHESIS", case="STOCKOUT_BEFORE_RECEIPT", detail_level="simple", limit=2)
+    assert 1 <= len(examples) <= 2
+    assert all("<" in item["template"] and "Ingredient a" not in item["template"] for item in examples)
+
+
+def test_known_but_communication_plan_unauthorized_evidence_falls_back():
+    value = brief(["a"], critical=("a",)); gateway = Gateway(); provider = IngredientSynthesisProvider(gateway, None)
+    built_facts = facts(value, ("a",)); records, _ = provider._records(value, built_facts)
+    risk = next(item["evidence_id"] for item in records if item["type"] == "INGREDIENT_OPERATIONAL_RISK")
+    demand = next(item["evidence_id"] for item in records if item["type"] == "DEMAND_HORIZON_SUMMARY")
+    provider._communication_plan = lambda _records: {"primary": {"role": "stockout_timing", "evidence_ids": [risk]}, "supporting": [], "limitation": None, "causal_allowed": False, "authorized_evidence_ids": [risk]}
+    gateway.responses["a"] = {"headline": "Cần theo dõi", "summary": "Có nguy cơ thiếu hàng trong kỳ kế hoạch.", "claims": [{"type": "DEMAND_HORIZON_SUMMARY", "text": "Có nguy cơ thiếu hàng trong kỳ kế hoạch.", "evidence_ids": [demand]}], "used_evidence_ids": [demand]}
+    result = provider.synthesize(value, built_facts)
+    assert result[0].source == "deterministic_fallback"
+    assert provider.last_diagnostics["items"][0]["failure_stage"] == "GROUNDING"
+
+
+def test_quality_diagnostics_and_fallback_share_the_selected_primary_fact():
+    value = brief(["a"], critical=("a",)); provider = IngredientSynthesisProvider(Gateway(), None)
+    result = provider.synthesize(value, facts(value, ("a",)))
+    item = provider.last_diagnostics["items"][0]
+    assert result[0].source == "llm"
+    assert item["communication_primary_role"] == "stockout_timing"
+    assert item["case_archetype"] == "MATERIAL_SHORTAGE"
+    assert item["selected_style_example_ids"]
+
+
+@pytest.mark.parametrize("summary", [
+    "Một. Hai. Ba. Bốn.",
+    "Tỷ lệ lấp kho cần được theo dõi trong kỳ kế hoạch.",
+])
+def test_quality_guard_rejects_overlong_output_and_wrong_fill_rate_term(summary):
+    value = brief(["a"], critical=("a",)); gateway = Gateway(); provider = IngredientSynthesisProvider(gateway, None)
+    built_facts = facts(value, ("a",)); records, _ = provider._records(value, built_facts)
+    risk = next(item["evidence_id"] for item in records if item["type"] == "INGREDIENT_OPERATIONAL_RISK")
+    gateway.responses["a"] = {"headline": "Cần theo dõi", "summary": summary, "claims": [{"type": "INGREDIENT_OPERATIONAL_RISK", "text": summary, "evidence_ids": [risk]}], "used_evidence_ids": [risk]}
+    assert provider.synthesize(value, built_facts)[0].source == "deterministic_fallback"

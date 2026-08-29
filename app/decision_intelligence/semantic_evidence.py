@@ -176,6 +176,15 @@ class DecisionSemanticEvidenceBuilder:
                 entities={"ingredient_id": ingredient_id},
                 values={
                     "ingredient_name": names.get(ingredient_id), "unit": row.get("unit"),
+                    # These values are emitted only from the flat coherent
+                    # basis scenario selected by business_metrics_service.
+                    # Carry its identity so downstream presentation cannot
+                    # mistake it for an unlabelled cross-scenario aggregate.
+                    "basis_scenario_id": row.get("basis_scenario_id"),
+                    "basis_scenario_name": row.get("basis_scenario_name"),
+                    "basis_kind": row.get("basis_kind"),
+                    "demand_quantity": _number(row.get("demand_quantity")),
+                    "fulfilled_quantity": _number(row.get("fulfilled_quantity")),
                     "fill_rate": _number(row.get("fill_rate")), "shortage_quantity": shortage,
                     "first_stockout_date": first, "stockout_event_count": events,
                 },

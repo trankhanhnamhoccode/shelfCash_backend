@@ -16,6 +16,12 @@ class StyleExample:
 
 
 _BANK = (
+    # Ingredient examples are non-authoritative wording patterns only.
+    StyleExample("ingredient-stockout-before-receipt", "ingredient_synthesis", "SYNTHESIS", "STOCKOUT_BEFORE_RECEIPT", "simple", "<INGREDIENT> cần được theo dõi sát khi mô phỏng ghi nhận nguy cơ thiếu từ <DATE>. Lô nhập <ORDER_QUANTITY> dự kiến đến <ARRIVAL_DATE>."),
+    StyleExample("ingredient-material-shortage", "ingredient_synthesis", "SYNTHESIS", "MATERIAL_SHORTAGE", "simple", "<INGREDIENT> có thiếu hụt đáng chú ý trong kỳ mô phỏng. Mức thiếu được ghi nhận là <SHORTAGE>."),
+    StyleExample("ingredient-shortage-with-order", "ingredient_synthesis", "SYNTHESIS", "SHORTAGE_WITH_ORDER", "simple", "<INGREDIENT> có nguy cơ thiếu trong kỳ mô phỏng; kế hoạch hiện có lô nhập <ORDER_QUANTITY> để theo dõi cùng rủi ro này."),
+    StyleExample("ingredient-limited-evidence", "ingredient_synthesis", "SYNTHESIS", "LIMITED_EVIDENCE", "simple", "<INGREDIENT> có rủi ro vận hành cần ưu tiên theo dõi. Dữ liệu hiện có chỉ đủ để mô tả tín hiệu này, không xác nhận nguyên nhân."),
+    StyleExample("ingredient-critical-generic", "ingredient_synthesis", "SYNTHESIS", "DEFAULT", "simple", "<INGREDIENT> có tín hiệu vận hành cần được ưu tiên theo dõi trong kỳ kế hoạch."),
     StyleExample("summary-feasible", "overall_summary", "SUMMARY", "FEASIBLE", "simple", "ShelfCash đề xuất kế hoạch <STRATEGY> với chi phí nhập <COST> cho <HORIZON>."),
     StyleExample("summary-risk", "overall_summary", "SUMMARY", "FEASIBLE_WITH_RISK", "simple", "Cần lưu ý <INGREDIENT> có thể bắt đầu thiếu từ <DATE>."),
     StyleExample("summary-limit", "overall_summary", "SUMMARY", "WITH_LIMITATION", "simple", "<LIMITATION>."),

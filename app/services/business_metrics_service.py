@@ -2,6 +2,59 @@
 
 from __future__ import annotations
 
+from datetime import date
+
+
+def _scenario_metric(item, scenario_id: str) -> dict:
+    """Copy one complete InventoryKeySummary without cross-scenario aggregation."""
+    return {
+        "scenario_id": scenario_id,
+        "demand_quantity": item.total_demand,
+        "fulfilled_quantity": item.fulfilled_quantity,
+        "shortage_quantity": item.shortage_quantity,
+        "expired_quantity": item.expired_quantity,
+        "waste_quantity": item.explicit_waste_quantity,
+        "ending_quantity": item.ending_inventory,
+        "days_of_supply": item.days_of_supply,
+        "first_stockout_date": item.projected_stockout_date,
+        "stockout_event_count": item.stockout_event_count,
+        "fill_rate": item.fill_rate,
+    }
+
+
+def _risk_key(row: dict) -> tuple:
+    """Stable conservative selector for one *complete* design-scenario row.
+
+    These dimensions preserve the former projection's existing conservative
+    semantics (minimum fill, then maximum shortage, then earliest stockout),
+    but select an entire scenario instead of mixing its fields.  Scenario ID
+    is a deterministic final tie-breaker, deliberately not input position.
+    """
+    stockout = row["first_stockout_date"]
+    return (
+        row["fill_rate"],
+        -row["shortage_quantity"],
+        stockout is None,
+        stockout or date.max,
+        row["scenario_id"],
+    )
+
+
+def _worst_case(rows: list[dict]) -> dict:
+    """Independent conservative values with source scenario provenance."""
+    minimum_fill = min(rows, key=lambda row: (row["fill_rate"], row["scenario_id"]))
+    maximum_shortage = min(rows, key=lambda row: (-row["shortage_quantity"], row["scenario_id"]))
+    dated = [row for row in rows if row["first_stockout_date"] is not None]
+    earliest_stockout = min(dated, key=lambda row: (row["first_stockout_date"], row["scenario_id"])) if dated else None
+    return {
+        "minimum_fill_rate": {"value": minimum_fill["fill_rate"], "scenario_id": minimum_fill["scenario_id"]},
+        "maximum_shortage_quantity": {"value": maximum_shortage["shortage_quantity"], "scenario_id": maximum_shortage["scenario_id"]},
+        "earliest_stockout": (
+            {"value": earliest_stockout["first_stockout_date"], "scenario_id": earliest_stockout["scenario_id"]}
+            if earliest_stockout else {"value": None, "scenario_id": None}
+        ),
+    }
+
 
 def build_business_metrics(*, purchase_cost, simulation, recommended: bool,
                            risk_simulation=None, risk_metadata=None):
@@ -10,29 +63,35 @@ def build_business_metrics(*, purchase_cost, simulation, recommended: bool,
                 "probabilistic": {"status": "not_evaluated", "reason": "no_recommended_candidate",
                                   "stockout_probability": None, "expected_fill_rate": None,
                                   "expected_shortage": None, "expected_waste_quantity": None}}
-    grouped = {}
+    grouped: dict[tuple[str, str, str], list[dict]] = {}
     for result in simulation.results:
         for item in result.summary.by_key:
-            key = (item.ingredient_id, item.unit)
-            current = grouped.get(key)
-            row = {"ingredient_id": item.ingredient_id, "unit": item.unit,
-                   "fill_rate": item.fill_rate, "demand_quantity": item.total_demand,
-                   "fulfilled_quantity": item.fulfilled_quantity, "shortage_quantity": item.shortage_quantity,
-                   "expired_quantity": item.expired_quantity, "waste_quantity": item.explicit_waste_quantity,
-                   "ending_quantity": item.ending_inventory, "days_of_supply": item.days_of_supply,
-                   "first_stockout_date": item.projected_stockout_date,
-                   "stockout_event_count": item.stockout_event_count}
-            if current is None:
-                grouped[key] = row
-            else:  # deterministic design scenarios: preserve conservative per-unit values, never sum scenarios.
-                current["fill_rate"] = min(current["fill_rate"], row["fill_rate"])
-                for field in ("shortage_quantity", "expired_quantity", "waste_quantity", "stockout_event_count"):
-                    current[field] = max(current[field], row[field])
-                dates = [x for x in (current["first_stockout_date"], row["first_stockout_date"]) if x is not None]
-                current["first_stockout_date"] = min(dates) if dates else None
-                values = [x for x in (current["days_of_supply"], row["days_of_supply"]) if x is not None]
-                current["days_of_supply"] = min(values) if values else None
-    ingredients = sorted(grouped.values(), key=lambda x: (x["fill_rate"], x["ingredient_id"]))
+            # Store is part of the simulation key.  Current decision runs are
+            # single-store, but never conflate rows if this helper is reused.
+            key = (item.store_id, item.ingredient_id, item.unit)
+            grouped.setdefault(key, []).append(_scenario_metric(item, result.scenario_id))
+
+    ingredients = []
+    for (store_id, ingredient_id, unit), scenario_rows in grouped.items():
+        scenario_metrics = sorted(scenario_rows, key=lambda row: row["scenario_id"])
+        basis = min(scenario_metrics, key=_risk_key)
+        # Flat compatibility fields are a verbatim copy from one selected
+        # summary. Cross-scenario conservatism is retained only in worst_case.
+        ingredients.append({
+            "ingredient_id": ingredient_id,
+            "unit": unit,
+            "basis_scenario_id": basis["scenario_id"],
+            "basis_scenario_name": basis["scenario_id"],
+            "basis_kind": "conservative_design_scenario",
+            **{key: basis[key] for key in (
+                "fill_rate", "demand_quantity", "fulfilled_quantity", "shortage_quantity",
+                "expired_quantity", "waste_quantity", "ending_quantity", "days_of_supply",
+                "first_stockout_date", "stockout_event_count",
+            )},
+            "scenario_metrics": scenario_metrics,
+            "worst_case": _worst_case(scenario_metrics),
+        })
+    ingredients.sort(key=lambda row: (row["fill_rate"], row["ingredient_id"], row["unit"]))
     stockouts = [x for x in ingredients if x["stockout_event_count"] or x["shortage_quantity"] > 0]
     expiry = [x for x in ingredients if x["expired_quantity"] > 0]
     waste = [x for x in ingredients if x["waste_quantity"] > 0]

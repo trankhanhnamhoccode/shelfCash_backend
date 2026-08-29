@@ -18,6 +18,7 @@ from app.decision_intelligence.contracts import (
 from app.decision_intelligence.display import add_numeric_display_contract
 from app.decision_intelligence.narrative import DecisionNarrativeProvider
 from app.decision_intelligence.semantic_evidence import SemanticFact
+from app.decision_intelligence.style_examples import retrieve_style_examples
 from app.llm.tasks import LLMFailureStage, LLMTask
 from app.llm.runtime import generate_json_sync
 
@@ -35,6 +36,16 @@ không phân loại mức độ quan trọng, không đổi kế hoạch, không
 không được dùng từ chỉ quan hệ nguyên nhân như 'vì', 'do' nếu causal_allowed=false.
 Trả về JSON đúng schema: mỗi item phải có headline, summary, claims và used_evidence_ids.
 Mọi con số, ngày và đơn vị phải lặp lại nguyên văn display_values trong evidence."""
+
+SYSTEM_PROMPT += """
+
+COMMUNICATION_PLAN is authoritative: express its primary fact first and use
+only its supporting or limitation facts when useful. Do not replace it with
+other facts, calculate, or add recommendations. STYLE_EXAMPLES are wording
+patterns, not evidence: never copy their names, dates, quantities, percentages,
+or causes. Keep headline short and summary to one to three short sentences.
+For fill rate, use "tỷ lệ đáp ứng nhu cầu", never "tỷ lệ lấp kho".
+"""
 
 
 class IngredientSynthesisProvider:
@@ -74,13 +85,15 @@ class IngredientSynthesisProvider:
         for ingredient_id in ingredient_ids:
             item_records = by_ingredient[ingredient_id]
             importance = self._importance(item_records, risk_by_ingredient[ingredient_id])
-            fallback = self._rule(brief, ingredient_id, item_records, importance)
+            plan = self._communication_plan(item_records) if importance == "critical" else None
+            fallback = self._rule(brief, ingredient_id, item_records, importance, plan)
             prepared[ingredient_id] = (fallback, item_records, importance)
             if importance == "critical":
                 eligible.append({
                     "ingredient_id": ingredient_id,
-                    "communication_plan": self._communication_plan(item_records),
-                    "evidence": item_records,
+                    "communication_plan": plan,
+                    "case_archetype": self._classify_case(plan),
+                    "evidence": [record for record in item_records if record["evidence_id"] in set(plan["authorized_evidence_ids"])],
                 })
             logger.info("ingredient_synthesis_route decision_run_id=%s ingredient_id=%s importance=%s llm_eligible=%s evidence_ids=%s", brief.decision_run_id, ingredient_id, importance, importance == "critical", fallback.evidence_ids)
 
@@ -145,7 +158,7 @@ class IngredientSynthesisProvider:
             item = item_by_fact.get(fact.fact_id)
             if item is None:
                 continue
-            record = {"evidence_id": item.evidence_id, "evidence_ids": [item.evidence_id], "type": fact.fact_type, **fact.entities, **fact.values}
+            record = {"evidence_id": item.evidence_id, "evidence_ids": [item.evidence_id], "type": fact.fact_type, "classification": fact.classification.value, **fact.entities, **fact.values}
             records.append(add_numeric_display_contract(record))
         return records, evidence.items
 
@@ -161,13 +174,29 @@ class IngredientSynthesisProvider:
             return "watch"
         return "normal"
 
-    def _rule(self, brief, ingredient_id, records, importance) -> IngredientSynthesis:
+    def _rule(self, brief, ingredient_id, records, importance, plan=None) -> IngredientSynthesis:
         by_type = {str(item["type"]): item for item in records}
         demand = by_type.get("DEMAND_HORIZON_SUMMARY")
         risk = by_type.get("INGREDIENT_OPERATIONAL_RISK")
         name = next((str(item.get("ingredient_name")) for item in records if item.get("ingredient_name")), ingredient_id)
         unit = next((str(item.get("unit")) for item in records if item.get("unit")), None)
         ids = [str(item["evidence_id"]) for item in records if item["type"] in {"INGREDIENT_OPERATIONAL_RISK", "DEMAND_HORIZON_SUMMARY", "PROCUREMENT_QUANTITY", "DEMAND_ORDER_ALIGNMENT"}]
+        if importance == "critical" and plan:
+            selected = {item["evidence_id"]: item for item in records}
+            primary = selected.get(next(iter(plan["primary"]["evidence_ids"]), ""), {})
+            primary_role = plan["primary"]["role"]
+            authorized = list(plan["authorized_evidence_ids"])
+            if primary_role == "stockout_timing" and primary.get("first_stockout_date"):
+                when = primary.get("display_values", {}).get("first_stockout_date", primary["first_stockout_date"])
+                headline = "Nguy cơ thiếu trong kỳ kế hoạch"
+                summary = f"{name} có nguy cơ thiếu từ {when} trong kỳ kế hoạch."
+            elif primary_role == "shortage_risk":
+                headline = "Thiếu hụt cần được ưu tiên theo dõi"
+                summary = f"{name} có rủi ro thiếu hụt cần được ưu tiên theo dõi trong kỳ kế hoạch."
+            else:
+                headline = "Rủi ro vận hành cần theo dõi"
+                summary = f"{name} có rủi ro vận hành cần được ưu tiên theo dõi trong kỳ kế hoạch."
+            return IngredientSynthesis(ingredient_id=ingredient_id, ingredient_name=name, unit=unit, importance=importance, source="rule_based", headline=headline, summary=summary, evidence_ids=authorized)
         if importance == "normal":
             headline = "Kế hoạch chưa ghi nhận rủi ro thiếu hàng đáng kể"
             if demand and demand.get("display_values", {}).get("p50_total"):
@@ -190,9 +219,51 @@ class IngredientSynthesisProvider:
 
     @staticmethod
     def _communication_plan(records):
-        primary = [item["evidence_id"] for item in records if item["type"] == "INGREDIENT_OPERATIONAL_RISK"][:1]
-        supporting = [item["evidence_id"] for item in records if item["type"] in {"PROCUREMENT_QUANTITY", "DEMAND_HORIZON_SUMMARY", "DEMAND_ORDER_ALIGNMENT"}][:3]
-        return {"primary": primary, "supporting": supporting, "causal_allowed": False}
+        """Select the small fact set that an ingredient brief may express."""
+        by_type: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for record in records:
+            by_type[str(record["type"])].append(record)
+        operational = by_type.get("INGREDIENT_OPERATIONAL_RISK", [])
+        primary_record = operational[0] if operational else (records[0] if records else {})
+        primary_role = "stockout_timing" if primary_record.get("first_stockout_date") else "shortage_risk"
+        primary = {"role": primary_role, "evidence_ids": [primary_record["evidence_id"]] if primary_record else []}
+
+        supporting: list[dict[str, Any]] = []
+        # Receipt/order context adds value to a modeled stockout, while demand
+        # alignment is a compact fallback when no procurement record exists.
+        for role, type_ in (("procurement_quantity", "PROCUREMENT_QUANTITY"), ("procurement_alignment", "DEMAND_ORDER_ALIGNMENT"), ("shortage_context", "DEMAND_HORIZON_SUMMARY")):
+            candidate = next((item for item in by_type.get(type_, []) if item["evidence_id"] not in primary["evidence_ids"]), None)
+            if candidate is not None and all(candidate["evidence_id"] not in item["evidence_ids"] for item in supporting):
+                supporting.append({"role": role, "evidence_ids": [candidate["evidence_id"]]})
+            if len(supporting) == 2:
+                break
+        limitation_record = next((item for item in records if item.get("classification") == "LIMITATION"), None)
+        limitation = None if limitation_record is None else {"role": "ingredient_limitation", "evidence_ids": [limitation_record["evidence_id"]]}
+        authorized = [*primary["evidence_ids"], *(evidence_id for item in supporting for evidence_id in item["evidence_ids"])]
+        if limitation:
+            authorized.extend(limitation["evidence_ids"])
+        return {
+            "primary": primary,
+            "supporting": supporting,
+            "limitation": limitation,
+            "causal_allowed": False,
+            "authorized_evidence_ids": list(dict.fromkeys(authorized)),
+        }
+
+    @staticmethod
+    def _classify_case(plan: dict[str, Any]) -> str:
+        roles = {item["role"] for item in plan["supporting"]}
+        if plan["primary"]["role"] == "stockout_timing" and roles & {"procurement_quantity", "procurement_alignment"}:
+            return "STOCKOUT_BEFORE_RECEIPT"
+        if plan["primary"]["role"] == "stockout_timing":
+            return "MATERIAL_SHORTAGE"
+        if plan["primary"]["role"] == "shortage_risk" and roles & {"procurement_quantity", "procurement_alignment"}:
+            return "SHORTAGE_WITH_ORDER"
+        if plan["primary"]["role"] == "shortage_risk":
+            return "MATERIAL_SHORTAGE"
+        if plan["limitation"]:
+            return "LIMITED_EVIDENCE"
+        return "OTHER_CRITICAL_OPERATIONAL_RISK"
 
     def _per_item_or_fallback(self, brief, prepared, eligible, evidence_items, ingredient_ids):
         diagnostics = self.last_diagnostics
@@ -205,15 +276,27 @@ class IngredientSynthesisProvider:
             context = {"decision_run_id": brief.decision_run_id, "correlation_id": diagnostics["correlation_id"], "ingredient_id": ingredient_id}
             item_diagnostic = self._item_diagnostic(fallback, "fallback", None, None)
             item_diagnostic.update(llm_attempted=True, provider_call_count=1, raw_response_present=False, content_present=False, attempt_count=0)
+            plan = entry["communication_plan"]
+            examples = retrieve_style_examples(task="ingredient_synthesis", intent="SYNTHESIS", case=entry["case_archetype"], detail_level="simple", limit=1)
+            item_diagnostic.update(
+                communication_primary_role=plan["primary"]["role"],
+                communication_supporting_roles=[item["role"] for item in plan["supporting"]],
+                communication_limitation_role=plan["limitation"]["role"] if plan["limitation"] else None,
+                causal_allowed=plan["causal_allowed"],
+                case_archetype=entry["case_archetype"],
+                selected_style_example_ids=[item["example_id"] for item in examples],
+            )
             diagnostics["provider_call_count"] += 1
             try:
-                raw = self._run({"task": "ingredient_synthesis", "language": "vi", "ingredient_id": ingredient_id, "communication_plan": entry["communication_plan"], "evidence": entry["evidence"], "style_examples": []}, context)
+                raw = self._run({"task": "ingredient_synthesis", "language": "vi", "ingredient_id": ingredient_id, "communication_plan": plan, "evidence": entry["evidence"], "style_examples": examples}, context)
                 self._apply_item_gateway_diagnostics(item_diagnostic, context)
                 item = IngredientSynthesisLLMResponse.model_validate(raw)
-                allowed = {record["evidence_id"] for record in records}
-                if not set(item.used_evidence_ids) <= allowed:
-                    raise ValueError("ingredient_evidence_entity_mismatch")
-                guarded = self.guard._guard({"answer": f"{item.headline}. {item.summary}", "claims": [claim.model_dump(mode="json") for claim in item.claims], "used_evidence_ids": item.used_evidence_ids}, records, evidence_items, brief, "vi", "simple", "INGREDIENT_SYNTHESIS", target_ingredient_id=ingredient_id)
+                self._validate_presentation(item)
+                allowed = set(plan["authorized_evidence_ids"])
+                claim_ids = {evidence_id for claim in item.claims for evidence_id in claim.evidence_ids}
+                if not set(item.used_evidence_ids) <= allowed or not claim_ids <= allowed:
+                    raise ValueError("communication_plan_unauthorized_evidence")
+                guarded = self.guard._guard({"answer": f"{item.headline}. {item.summary}", "claims": [claim.model_dump(mode="json") for claim in item.claims], "used_evidence_ids": item.used_evidence_ids}, entry["evidence"], evidence_items, brief, "vi", "simple", "INGREDIENT_SYNTHESIS", target_ingredient_id=ingredient_id)
                 results[ingredient_id] = IngredientSynthesis(ingredient_id=ingredient_id, ingredient_name=fallback.ingredient_name, unit=fallback.unit, importance=importance, source="llm", headline=item.headline, summary=item.summary, evidence_ids=[citation.evidence_id for citation in guarded.citations])
                 item_diagnostic.update(status="llm_success", failure_stage=None, used_evidence_ids=list(item.used_evidence_ids))
             except Exception as exc:
@@ -246,6 +329,17 @@ class IngredientSynthesisProvider:
             "fallback_reason": fallback_reason,
             "used_evidence_ids": list(used_evidence_ids or []),
         }
+
+    @staticmethod
+    def _validate_presentation(item: IngredientSynthesisLLMResponse) -> None:
+        summary = item.summary.strip()
+        if len(item.headline.strip()) > 120 or len(summary) > 600:
+            raise ValueError("ingredient_synthesis_overlong_output")
+        sentences = [part for part in re.split(r"[.!?]+", summary) if part.strip()]
+        if len(sentences) > 3:
+            raise ValueError("ingredient_synthesis_overlong_output")
+        if "tỷ lệ lấp kho" in f"{item.headline} {summary}".lower():
+            raise ValueError("ingredient_synthesis_invalid_fill_rate_terminology")
 
     @staticmethod
     def _batch_failure_stage(exc: Exception, context: dict[str, Any]) -> str:
