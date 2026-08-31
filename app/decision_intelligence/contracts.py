@@ -248,11 +248,14 @@ class DecisionNarrativeLLMResponse(_Contract):
 class DecisionOverallSummaryLLMResponse(_Contract):
     """Strict internal schema for an overall grounded assistant summary."""
 
+    # Transitional tolerance for historical provider fixtures: the generated
+    # OpenRouter schema omits this legacy bookkeeping field.
+    model_config = ConfigDict(extra="ignore")
+
     headline: DecisionNarrativeClaim
     summary: DecisionNarrativeClaim
     key_points: list[DecisionNarrativeClaim] = Field(default_factory=list, max_length=3)
     warning_summary: DecisionNarrativeClaim | None = None
-    used_evidence_ids: list[str]
 
 
 class IngredientSynthesisLLMResponse(_Contract):

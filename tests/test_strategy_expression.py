@@ -26,7 +26,7 @@ def test_selected_grounded_success_and_payload_is_manager_safe():
     gateway = Gateway({"strategies": [{"strategy": "protected", "headline": "An toàn được chọn", "summary": "Đây là phương án hợp lệ có chi phí nhập thấp nhất.", "reason_messages": ["Chi phí nhập dự kiến là 4,68 triệu đồng."]}]})
     provider = StrategyExpressionProvider(gateway, SimpleNamespace())
     result = provider.express([source], "run")
-    assert result[0].presentation.headline == "An toàn được chọn", provider.last_diagnostics
+    assert result[0].presentation.headline == "An toàn được chọn"
     payload = gateway.calls[0][1]
     rendered = str(payload)
     assert "critic" not in rendered and "evidence_id" not in rendered and "strategies" in payload
@@ -42,7 +42,24 @@ def test_feasible_failure_and_invented_number_use_whole_set_fallback():
     ]})
     result = StrategyExpressionProvider(gateway, SimpleNamespace()).express([one, two])
     assert [item.presentation for item in result] == [item.presentation for item in [one, two]]
-    assert StrategyExpressionProvider(gateway, SimpleNamespace()).last_diagnostics == {}
+
+
+def test_diagnostics_are_request_scoped_for_success_fallback_and_skip():
+    success = StrategyExpressionProvider(Gateway({"strategies": [{"strategy": "protected", "headline": "An toàn được chọn", "summary": "Đây là phương án hợp lệ có chi phí nhập thấp nhất.", "reason_messages": []}]}), SimpleNamespace()).express_result([row()])
+    invalid = StrategyExpressionProvider(Gateway({"strategies": []}), SimpleNamespace()).express_result([row()])
+    skipped = StrategyExpressionProvider(None, SimpleNamespace()).express_result([row()])
+    assert success.diagnostics["status"] == "success" and success.diagnostics["source"] == "llm"
+    assert invalid.diagnostics["status"] == "fallback" and invalid.diagnostics["fallback_used"] is True
+    assert invalid.diagnostics["failure_stage"] == "BUSINESS_VALIDATION"
+    assert skipped.diagnostics == {"attempted": False, "status": "skipped", "source": "deterministic", "fallback_used": False, "skip_reason": "provider_disabled", "strategy_count": 1, "selected_style_example_ids": []}
+
+
+def test_result_diagnostics_cannot_be_overwritten_by_later_invocation():
+    provider = StrategyExpressionProvider(Gateway({"strategies": [{"strategy": "protected", "headline": "An toàn được chọn", "summary": "Đây là phương án hợp lệ có chi phí nhập thấp nhất.", "reason_messages": []}]}), SimpleNamespace())
+    first = provider.express_result([row()])
+    second = provider.express_result([])
+    assert first.diagnostics["status"] == "success"
+    assert second.diagnostics["skip_reason"] == "empty_strategy_set"
 
 
 def test_technical_infeasible_and_missing_strategy_fall_back():

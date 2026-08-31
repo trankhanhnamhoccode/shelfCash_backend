@@ -100,7 +100,7 @@ def test_ingredient_synthesis_diagnostics_stay_in_decision_package_not_brief(cli
     assert diagnostics["raw_response"] not in brief.text
 
 
-def test_strategy_expression_brief_read_never_persists_expression_artifacts(client):
+def test_strategy_expression_brief_read_never_persists_expression_artifacts(client, caplog):
     """Expression is request-local even when the Brief has strategy evaluations."""
     package = {
         "decision_run_id": "strategy-expression-read", "store_id": "STORE_001", "status": "completed",
@@ -113,11 +113,15 @@ def test_strategy_expression_brief_read_never_persists_expression_artifacts(clie
     with client.app.state.session_factory() as session:
         session.add(_run("strategy-expression-read", package)); session.commit()
     before = client.get("/api/v1/decision-runs/strategy-expression-read").json()
+    import logging
+    caplog.set_level(logging.INFO, logger="shelfcash.planning")
     response = client.get("/api/v1/decision-runs/strategy-expression-read/brief")
     after = client.get("/api/v1/decision-runs/strategy-expression-read").json()
     assert response.status_code == 200
     assert after == before
     assert "strategy_expression" not in after.get("assistant", {})
+    event = next(record.message for record in caplog.records if "event=strategy_expression.completed" in record.message)
+    assert "status=skipped" in event and "skip_reason=provider_unavailable" in event
 
 
 def test_legacy_brief_read_reconstructs_ingredient_synthesis_without_provider_call(client):

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from typing import Any
 
 from app.decision_intelligence.contracts import (
@@ -72,16 +73,28 @@ def _forbidden(row: BriefStrategyEvaluation) -> list[str]:
     return []
 
 
+@dataclass(frozen=True)
+class StrategyExpressionResult:
+    presentations: list[BriefStrategyEvaluation]
+    diagnostics: dict[str, Any]
+
+
 class StrategyExpressionProvider:
     def __init__(self, llm_provider, settings):
         self.llm_provider, self.settings = llm_provider, settings
-        self.last_diagnostics: dict[str, Any] = {}
 
     def express(self, rows: list[BriefStrategyEvaluation], decision_run_id: str | None = None) -> list[BriefStrategyEvaluation]:
+        """Compatibility wrapper; callers needing audit data use express_result."""
+        return self.express_result(rows, decision_run_id).presentations
+
+    def express_result(self, rows: list[BriefStrategyEvaluation], decision_run_id: str | None = None) -> "StrategyExpressionResult":
         fallback = rows
-        if not rows or not self.llm_provider or not getattr(self.llm_provider, "available", False):
-            self.last_diagnostics = {"llm_attempted": False, "llm_status": "disabled" if rows else "not_applicable"}
-            return fallback
+        if not rows:
+            return StrategyExpressionResult(fallback, {"attempted": False, "status": "skipped", "source": "deterministic", "fallback_used": False, "skip_reason": "empty_strategy_set", "strategy_count": 0, "selected_style_example_ids": []})
+        if not self.llm_provider:
+            return StrategyExpressionResult(fallback, {"attempted": False, "status": "skipped", "source": "deterministic", "fallback_used": False, "skip_reason": "provider_disabled", "strategy_count": len(rows), "selected_style_example_ids": []})
+        if not getattr(self.llm_provider, "available", False):
+            return StrategyExpressionResult(fallback, {"attempted": False, "status": "skipped", "source": "deterministic", "fallback_used": False, "skip_reason": "provider_unavailable", "strategy_count": len(rows), "selected_style_example_ids": []})
         context: dict[str, Any] = {"decision_run_id": decision_run_id}
         stage = LLMFailureStage.UNKNOWN.value
         profile_getter = getattr(self.llm_provider, "task_profile", None)
@@ -101,14 +114,25 @@ class StrategyExpressionProvider:
                 raise
             rendered = {item.strategy: BriefStrategyPresentation(headline=item.headline, summary=item.summary, reason_messages=item.reason_messages) for item in typed.strategies}
             metadata = context.get("openrouter_metadata", {})
-            self.last_diagnostics = {"llm_attempted": True, "llm_status": "success", "provider": metadata.get("resolved_provider") if isinstance(metadata, dict) else None, "requested_model": getattr(profile, "model", None), "resolved_model": metadata.get("resolved_model") if isinstance(metadata, dict) else None, "failure_stage": None, "selected_style_example_ids": [x["example_id"] for x in payload["style_examples"]], "metadata": metadata}
-            return [row.model_copy(update={"presentation": rendered[row.strategy]}) for row in rows]
+            return StrategyExpressionResult([row.model_copy(update={"presentation": rendered[row.strategy]}) for row in rows], self._diagnostics(True, "success", "llm", False, None, None, profile, metadata, rows, payload))
         except Exception as exc:
             details = getattr(exc, "details", {})
             if stage == LLMFailureStage.UNKNOWN.value and isinstance(details, dict): stage = str(details.get("failure_stage") or stage)
             metadata = context.get("openrouter_metadata", {})
-            self.last_diagnostics = {"llm_attempted": True, "llm_status": "fallback", "provider": metadata.get("resolved_provider") if isinstance(metadata, dict) else None, "requested_model": getattr(profile, "model", None), "resolved_model": metadata.get("resolved_model") if isinstance(metadata, dict) else None, "failure_stage": stage, "error_message": str(exc), "metadata": metadata}
-            return fallback
+            return StrategyExpressionResult(fallback, self._diagnostics(True, "fallback", "deterministic_fallback", True, stage, str(exc), profile, metadata, rows, locals().get("payload")))
+
+    @staticmethod
+    def _diagnostics(attempted, status, source, fallback_used, stage, error, profile, metadata, rows, payload):
+        metadata = metadata if isinstance(metadata, dict) else {}
+        return {
+            "attempted": attempted, "status": status, "source": source, "fallback_used": fallback_used,
+            "failure_stage": stage, "error_message": " ".join(str(error).split())[:240] if error else None,
+            "provider": metadata.get("resolved_provider"), "requested_model": getattr(profile, "model", None),
+            "resolved_model": metadata.get("resolved_model"), "finish_reason": metadata.get("finish_reason"),
+            "strategy_count": len(rows), "selected_style_example_ids": [x["example_id"] for x in (payload or {}).get("style_examples", [])],
+            "prompt_tokens": metadata.get("prompt_tokens"), "completion_tokens": metadata.get("completion_tokens"),
+            "total_tokens": metadata.get("total_tokens"), "reasoning_tokens": metadata.get("reasoning_tokens"), "cost": metadata.get("cost"),
+        }
 
     def _payload(self, rows: list[BriefStrategyEvaluation]) -> dict[str, Any]:
         strategies = []

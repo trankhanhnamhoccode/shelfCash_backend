@@ -209,6 +209,43 @@ def _risk_fact(fact_type, *, basis_kind=None):
     )
 
 
+def _selection_fact(fact_id, fact_type, classification, *, unit="kg", value=1):
+    return SemanticFact(
+        fact_id=fact_id, fact_type=fact_type, decision_run_id="selection-run",
+        classification=classification, scope=SemanticFactScope.INGREDIENT,
+        entities={"ingredient_id": fact_id, "ingredient_name": fact_id, "unit": unit},
+        values={"p50_total": value, "shortage_quantity": value}, source_evidence_ids=[],
+        provenance=SemanticFactProvenance(source_type="test", source_module="test", source_path="test"),
+    )
+
+
+def test_select_facts_keeps_more_than_three_cross_unit_candidates():
+    facts = [
+        _selection_fact("count", "DEMAND_HORIZON_SUMMARY", SemanticFactClassification.DERIVED, unit="cái", value=1200),
+        _selection_fact("litre", "DEMAND_HORIZON_SUMMARY", SemanticFactClassification.DERIVED, unit="lít", value=20),
+        _selection_fact("kg", "DEMAND_HORIZON_SUMMARY", SemanticFactClassification.DERIVED, unit="kg", value=.8),
+        _selection_fact("small", "DEMAND_HORIZON_SUMMARY", SemanticFactClassification.DERIVED, unit="kg", value=.1),
+    ]
+    selected = OverallSummaryProvider._select_facts(facts)
+    assert {fact.fact_id for fact in selected} == {fact.fact_id for fact in facts}
+
+
+def test_select_facts_keeps_more_than_three_limitations_without_alphabetical_cutoff():
+    facts = [
+        _selection_fact(name, name, SemanticFactClassification.LIMITATION)
+        for name in ("AAA_LIMIT", "BBB_LIMIT", "CCC_LIMIT", "ZZZ_LIMIT")
+    ]
+    selected = OverallSummaryProvider._select_facts(facts)
+    assert {fact.fact_id for fact in selected} == {fact.fact_id for fact in facts}
+
+
+def test_overall_summary_prompt_has_one_nested_claim_contract():
+    from app.decision_intelligence import overall_summary
+    assert "DecisionNarrativeClaim" in overall_summary.SYSTEM_PROMPT
+    assert "main_attention" not in overall_summary.SYSTEM_PROMPT
+    assert "mảng claims ở cấp cao nhất" in overall_summary.SYSTEM_PROMPT
+
+
 def test_deterministic_fallback_preserves_selected_conservative_and_stress_provenance():
     provider = OverallSummaryProvider(None, None)
     selected = provider.deterministic_fallback(_brief(), [_risk_fact("SELECTED_PLAN_RISK_METRICS")])

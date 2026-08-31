@@ -8,6 +8,7 @@ from uuid import uuid4
 from sqlalchemy import delete, select
 
 from app.core.exceptions import PlanningError
+from app.core.logging_context import get_request_id
 from app.core.provenance import canonical_hash
 from app.models.operations import ForecastPredictionModel,ForecastRunModel,PlanRunModel,RecommendationModel
 from app.models.business import IngredientModel,SupplierModel
@@ -265,8 +266,10 @@ class DecisionPlanningService:
    brief=DecisionBriefBuilder().build(s,run)
    # Optional expression is read-only: it may replace only presentation text
    # in this response and never writes the Decision Package.
-   expression_provider=StrategyExpressionProvider(self.llm_provider,self.settings)
-   brief=brief.model_copy(update={"strategy_evaluations":expression_provider.express(brief.strategy_evaluations,brief.decision_run_id)})
+   expression_result=StrategyExpressionProvider(self.llm_provider,self.settings).express_result(brief.strategy_evaluations,brief.decision_run_id)
+   diagnostics=expression_result.diagnostics
+   logger.info("event=strategy_expression.completed decision_run_id=%s request_id=%s attempted=%s status=%s source=%s fallback_used=%s skip_reason=%s failure_stage=%s provider=%s requested_model=%s resolved_model=%s finish_reason=%s strategy_count=%s selected_style_example_ids=%s error_message=%s",brief.decision_run_id,get_request_id(),diagnostics.get("attempted"),diagnostics.get("status"),diagnostics.get("source"),diagnostics.get("fallback_used"),diagnostics.get("skip_reason"),diagnostics.get("failure_stage"),diagnostics.get("provider"),diagnostics.get("requested_model"),diagnostics.get("resolved_model"),diagnostics.get("finish_reason"),diagnostics.get("strategy_count"),diagnostics.get("selected_style_example_ids"),diagnostics.get("error_message"))
+   brief=brief.model_copy(update={"strategy_evaluations":expression_result.presentations})
    if brief.assistant_summary is None:
     package=json.loads(run.package_json)
     facts=DecisionSemanticEvidenceBuilder().build(brief,package)

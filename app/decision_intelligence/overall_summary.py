@@ -6,7 +6,8 @@ from typing import Any
 
 from app.decision_intelligence.adapter import ShelfCashDecisionIntelligenceAdapter
 from app.decision_intelligence.communication_plan import summary_communication_plan
-from app.decision_intelligence.display import add_numeric_display_contract, purchase_cost_display, vi_number
+from app.decision_intelligence.display import add_numeric_display_contract, purchase_cost_display
+from app.decision_intelligence.strategy_comparison import strategy_label
 from app.decision_intelligence.contracts import (
     AssistantSummary,
     DecisionBriefFacts,
@@ -25,79 +26,17 @@ from app.llm.runtime import generate_json_sync
 logger = logging.getLogger("shelfcash.overall_summary")
 
 
-SYSTEM_PROMPT = """Bạn là lớp diễn đạt cuối cùng của ShelfCash dành cho quản lý cửa hàng.
+SYSTEM_PROMPT = """Bạn là lớp diễn đạt cuối cùng cho quản lý cửa hàng. Backend đã hoàn tất dự báo, mô phỏng và quyết định; bạn chỉ diễn đạt facts được cung cấp, không tính toán hay tự quyết định.
 
-ShelfCash đã hoàn tất dự báo, mô phỏng và lập kế hoạch trước khi gọi bạn. Công
-việc duy nhất của bạn là diễn đạt facts được cung cấp thành một brief ngắn, tự
-nhiên và hữu ích; không tính toán hay tự ra quyết định.
+COMMUNICATION_PLAN là authority: nói decision trước, chỉ dùng main_risk khi có, limitation khi có, và supporting chỉ để hỗ trợ. Không thay thế role backend đã chọn.
 
-Nếu có COMMUNICATION_PLAN, hãy tuân theo thứ tự của nó: decision phải được nói
-trước, main_attention tiếp theo, limitation chỉ nói khi có; supporting chỉ để
-hỗ trợ và không bắt buộc phải nhắc. Không thay decision/risk backend đã chọn
-bằng fact khác và không cố sử dụng toàn bộ facts.
+Chỉ dùng EVIDENCE được cung cấp. Sao chép số/ngày đúng từ display_values hoặc allowed_numeric_mentions; không tính lại, làm tròn, đổi đơn vị hoặc đổi dấu phân cách. STYLE_EXAMPLES chỉ là văn phong. OBSERVATION và DERIVED không được dùng ngôn ngữ nguyên nhân; chỉ CAUSAL hoặc PROCUREMENT_REASON được phép. Dùng “tỷ lệ đáp ứng nhu cầu”, không dùng “tỷ lệ lấp kho”. CONSERVATIVE_DESIGN phải nói rõ là kịch bản nhu cầu bảo thủ; STRESS phải nói rõ là kịch bản kiểm tra sức chịu đựng; CAPACITY_NOT_EVALUATED chỉ là chưa đánh giá đầy đủ.
 
-Headline nói decision hoặc trạng thái chính. Summary dài 1-3 câu ngắn: câu đầu
-nói đề xuất; câu sau chỉ nêu điểm vận hành cần chú ý; câu cuối chỉ nêu limitation
-nếu thật sự quan trọng. key_points có 0-3 ý và không được lặp lại summary.
-warning_summary chỉ có khi risk/limitation quan trọng, nếu không trả null.
-
-Viết như trợ lý vận hành brief nhanh: "ShelfCash đề xuất...", "Cần lưu ý...",
-"... hiện chưa được đánh giá đầy đủ." Không đọc tên field JSON, machine code,
-UUID, evidence, prompt, model, database hoặc implementation. Không markdown.
-
-Chỉ dùng supplied facts và display values đã có; không cộng, trừ, đổi đơn vị,
-đổi phần trăm hoặc làm tròn mới. OBSERVATION và DERIVED chỉ hỗ trợ statement
-factual/comparison. Chỉ CAUSAL mới được hỗ trợ ngôn ngữ nguyên nhân như vì, do,
-nên, do đó, dẫn đến, khiến, để tránh. Không suy luận nguyên nhân từ facts cùng
-xuất hiện.
-
-Claims là lớp grounding nội bộ: mỗi displayed field phải có claim và evidence
-ID hợp lệ, nhưng headline/summary/key_points phải giữ văn phong tự nhiên. Chỉ
-trả một JSON object đúng schema."""
-
-
-SYSTEM_PROMPT += """
-
-COMMUNICATION PLAN ORDER: use decision for the first sentence. Use main_risk only for the
-second operational-risk sentence when it is non-empty; do not replace it with supporting
-or other risk evidence. Use limitation only for the final limitation sentence when non-empty.
-When main_risk is empty, do not invent a warning.
-
-CLAIM TYPE CONTRACT: headline, summary, key_points, warning_summary are presentation fields,
-not claim types. claims[].type must exactly equal the semantic type of at least one cited
-evidence_id. Never use HEADLINE, SUMMARY, KEY_POINT, or WARNING_SUMMARY as a claim type.
-Good: evidence PLAN_OVERVIEW -> claim PLAN_OVERVIEW. Good: evidence
-INGREDIENT_OPERATIONAL_RISK -> claim INGREDIENT_OPERATIONAL_RISK. Bad: summary -> SUMMARY.
-
-CAUSAL SAFETY: unless the cited evidence is CAUSAL or PROCUREMENT_REASON, never use causal
-language: vì, do, bởi, nên, do đó, dẫn đến, khiến, để tránh, nguyên nhân, xuất phát từ.
-This includes hedges such as "có thể do" and "có khả năng do". OBSERVATION and DERIVED
-evidence may describe a state only, never its cause.
-STYLE_EXAMPLES are non-authoritative wording patterns only. Never copy facts from them or cite
-their IDs; all factual text and all claim evidence IDs must come solely from EVIDENCE.
-COMMUNICATION_PLAN is authoritative: use decision first, then at most its one main risk,
-then its limitation. Do not substitute any other known fact. For modeled future outcomes,
-use projected language such as "mô phỏng ghi nhận" or "có nguy cơ". For fill rate use
-"tỷ lệ đáp ứng nhu cầu", never "tỷ lệ lấp kho".
-PRESENTATION_ROLES is the instruction next to each COMMUNICATION_PLAN role. Follow its
-presentation_provenance and required_framing exactly. Only SELECTED_PLAN may be called
-"kế hoạch hiện tại" or "phương án được chọn". CONSERVATIVE_DESIGN must explicitly say
-"kịch bản" and frame the risk as conservative demand simulation, never as a selected-plan
-shortage. STRESS must explicitly frame it as stress/adverse testing, never as a selected-plan
-shortage. LIMITATION describes incomplete evaluation; CAPACITY_NOT_EVALUATED never means
-capacity has been exceeded. When causal_allowed=false, juxtapose authorized facts without
-using causal connectors. Copy a number only from display_values or allowed_numeric_mentions
-exactly: do not recalculate, re-round, or change decimal separators (for example 73,94% must
-not become 73.94% or 73,9%).
-"""
+Trả về đúng một JSON object: headline và summary là DecisionNarrativeClaim; key_points là tối đa 3 DecisionNarrativeClaim; warning_summary là DecisionNarrativeClaim hoặc null. Mỗi DecisionNarrativeClaim gồm type, text, evidence_ids; type phải đúng semantic type của ít nhất một evidence_id. Không có mảng claims ở cấp cao nhất, không có used_evidence_ids ở cấp cao nhất, không markdown."""
 
 
 def _strategy_label(strategy: str | None) -> str | None:
-    return {
-        "protected": "An to\u00e0n",
-        "balanced": "C\u00e2n b\u1eb1ng",
-        "lean": "Tinh g\u1ecdn",
-    }.get(strategy or "")
+    return strategy_label(strategy) if strategy else None
 
 
 class OverallSummaryProvider:
@@ -234,10 +173,13 @@ class OverallSummaryProvider:
             claims = [typed.headline, typed.summary, *typed.key_points]
             if typed.warning_summary is not None:
                 claims.append(typed.warning_summary)
+            used_evidence_ids = list(dict.fromkeys(
+                evidence_id for claim in claims for evidence_id in claim.evidence_ids
+            ))
             guard_raw = {
                 "answer": typed.summary.text,
                 "claims": [claim.model_dump(mode="json") for claim in claims],
-                "used_evidence_ids": typed.used_evidence_ids,
+                "used_evidence_ids": used_evidence_ids,
             }
             # Reuse the established claim/evidence/numeric/entity/causal guard.
             try:
@@ -341,7 +283,7 @@ class OverallSummaryProvider:
         if typed.warning_summary is not None:
             claims.append(typed.warning_summary)
         claimed_ids = {evidence_id for claim in claims for evidence_id in claim.evidence_ids}
-        if not set(typed.used_evidence_ids) <= authorized or not claimed_ids <= authorized:
+        if not claimed_ids <= authorized:
             raise ValueError("overall_summary_unauthorized_evidence")
         texts = [claim.text.strip().lower() for claim in [*typed.key_points, *([typed.warning_summary] if typed.warning_summary else [])]]
         if len(texts) != len(set(texts)):
@@ -397,48 +339,22 @@ class OverallSummaryProvider:
                 **fact.entities,
                 **fact.values,
             }
+            record = add_numeric_display_contract(record)
             self._add_display_values(record)
-            records.append(add_numeric_display_contract(record))
+            records.append(record)
         return evidence, records
 
     @staticmethod
     def _select_facts(facts: list[SemanticFact]) -> list[SemanticFact]:
         overview = [fact for fact in facts if fact.fact_type == "PLAN_OVERVIEW"]
-        demand = sorted(
-            (fact for fact in facts if fact.fact_type == "DEMAND_HORIZON_SUMMARY"),
-            key=lambda fact: float(fact.values.get("p50_total") or 0), reverse=True,
-        )[:3]
-        alignment = sorted(
-            (fact for fact in facts if fact.fact_type == "DEMAND_ORDER_ALIGNMENT"),
-            key=lambda fact: float(fact.values.get("absolute_gap_magnitude") or 0), reverse=True,
-        )[:3]
-        baseline = sorted(
-            (
-                fact for fact in facts
-                if fact.fact_type == "NO_PLANNED_PURCHASE_BASELINE"
-                and fact.scope is SemanticFactScope.INGREDIENT
-                and float(fact.values.get("shortage_quantity") or 0) > 0
-            ),
-            key=lambda fact: float(fact.values.get("shortage_quantity") or 0), reverse=True,
-        )[:3]
+        demand = [fact for fact in facts if fact.fact_type == "DEMAND_HORIZON_SUMMARY"]
+        alignment = [fact for fact in facts if fact.fact_type == "DEMAND_ORDER_ALIGNMENT"]
+        baseline = [fact for fact in facts if fact.fact_type == "NO_PLANNED_PURCHASE_BASELINE" and fact.scope is SemanticFactScope.INGREDIENT and float(fact.values.get("shortage_quantity") or 0) > 0]
         operational_risk = [
             fact for fact in facts if fact.fact_type == "INGREDIENT_OPERATIONAL_RISK"
         ]
-        risk = sorted(
-            (
-                fact for fact in facts
-                if fact.classification is SemanticFactClassification.RISK_SIGNAL
-                and fact.fact_type != "INGREDIENT_OPERATIONAL_RISK"
-            ),
-            key=lambda fact: max(
-                float(fact.values.get("shortage_quantity") or 0),
-                float(fact.values.get("capacity_violation_quantity") or 0),
-            ), reverse=True,
-        )[:3]
-        limitations = sorted(
-            (fact for fact in facts if fact.classification is SemanticFactClassification.LIMITATION),
-            key=lambda fact: fact.fact_type,
-        )[:3]
+        risk = [fact for fact in facts if fact.classification is SemanticFactClassification.RISK_SIGNAL and fact.fact_type != "INGREDIENT_OPERATIONAL_RISK"]
+        limitations = [fact for fact in facts if fact.classification is SemanticFactClassification.LIMITATION]
         selected_risk = [fact for fact in facts if fact.fact_type == "SELECTED_PLAN_RISK_METRICS"]
         # Preserve every selected-plan operational candidate: communication-plan
         # ranking must see the full set before it chooses one main risk.
@@ -446,20 +362,13 @@ class OverallSummaryProvider:
 
     @staticmethod
     def _add_display_values(record: dict[str, Any]) -> None:
-        cost = record.get("total_purchase_cost")
-        if isinstance(cost, (int, float)):
-            if cost >= 1_000_000:
-                display_value = round(float(cost) / 1_000_000, 2)
-                record["total_purchase_cost_display"] = purchase_cost_display(cost)
-                record["total_purchase_cost_display_value"] = display_value
-            else:
-                record["total_purchase_cost_display"] = purchase_cost_display(cost)
-                record["total_purchase_cost_display_value"] = float(cost)
-        rate = record.get("expected_fill_rate")
-        if isinstance(rate, (int, float)):
-            display_value = round(float(rate) * 100, 1)
-            record["expected_fill_rate_display"] = f"{vi_number(display_value, 1)}%"
-            record["expected_fill_rate_display_value"] = display_value
-        stockout_date = record.get("first_stockout_date")
-        if isinstance(stockout_date, str) and len(stockout_date) == 10 and stockout_date[4] == "-" and stockout_date[7] == "-":
-            record["first_stockout_date_display"] = f"{stockout_date[8:10]}/{stockout_date[5:7]}"
+        # Compatibility aliases only; display.py remains the formatter.
+        if not isinstance(record.get("display_values"), dict):
+            add_numeric_display_contract(record)
+        display = record.get("display_values", {})
+        if "total_purchase_cost" in display:
+            record["total_purchase_cost_display"] = display["total_purchase_cost"]
+        if "expected_fill_rate" in display:
+            record["expected_fill_rate_display"] = display["expected_fill_rate"]
+        if "first_stockout_date" in display:
+            record["first_stockout_date_display"] = display["first_stockout_date"]
