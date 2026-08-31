@@ -256,12 +256,17 @@ class DecisionPlanningService:
  def get_decision_brief(self,rid):
   from app.decision_intelligence import DecisionBriefBuilder, ShelfCashDecisionIntelligenceAdapter
   from app.decision_intelligence.ingredient_synthesis import IngredientSynthesisProvider
+  from app.decision_intelligence.strategy_expression import StrategyExpressionProvider
   from app.decision_intelligence.overall_summary import OverallSummaryProvider
   from app.decision_intelligence.semantic_evidence import DecisionSemanticEvidenceBuilder
   with self.factory() as s:
    run=s.get(DecisionRunModel,rid)
    if not run:raise PlanningError("DECISION_RUN_NOT_FOUND","Decision run not found.",{"decision_run_id":rid},http_status=404)
    brief=DecisionBriefBuilder().build(s,run)
+   # Optional expression is read-only: it may replace only presentation text
+   # in this response and never writes the Decision Package.
+   expression_provider=StrategyExpressionProvider(self.llm_provider,self.settings)
+   brief=brief.model_copy(update={"strategy_evaluations":expression_provider.express(brief.strategy_evaluations,brief.decision_run_id)})
    if brief.assistant_summary is None:
     package=json.loads(run.package_json)
     facts=DecisionSemanticEvidenceBuilder().build(brief,package)

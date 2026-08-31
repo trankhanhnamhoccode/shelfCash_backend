@@ -100,6 +100,26 @@ def test_ingredient_synthesis_diagnostics_stay_in_decision_package_not_brief(cli
     assert diagnostics["raw_response"] not in brief.text
 
 
+def test_strategy_expression_brief_read_never_persists_expression_artifacts(client):
+    """Expression is request-local even when the Brief has strategy evaluations."""
+    package = {
+        "decision_run_id": "strategy-expression-read", "store_id": "STORE_001", "status": "completed",
+        "recommended_strategy": "protected", "recommended_plan": {"items": []}, "ingredient_demand": [],
+        "business_metrics": {}, "inventory_risk": {}, "critic": {"findings": [], "warnings": []},
+        "reason_codes": [], "warnings": [],
+        "strategies": {"protected": {"is_feasible": True, "purchase_cost": 4_680_000, "critic": {"findings": [], "warnings": []}}},
+        "strategy_selection": {"rule": "lowest_exact_valid_candidate_cost_then_strategy_name", "selected_strategy": "protected", "eligible_candidates": ["protected"]},
+    }
+    with client.app.state.session_factory() as session:
+        session.add(_run("strategy-expression-read", package)); session.commit()
+    before = client.get("/api/v1/decision-runs/strategy-expression-read").json()
+    response = client.get("/api/v1/decision-runs/strategy-expression-read/brief")
+    after = client.get("/api/v1/decision-runs/strategy-expression-read").json()
+    assert response.status_code == 200
+    assert after == before
+    assert "strategy_expression" not in after.get("assistant", {})
+
+
 def test_legacy_brief_read_reconstructs_ingredient_synthesis_without_provider_call(client):
     class Provider:
         available = True

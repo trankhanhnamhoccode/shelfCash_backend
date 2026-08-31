@@ -11,6 +11,7 @@ class LLMTask(str, Enum):
     DECISION_NARRATIVE = "decision_narrative"
     PLAN_SUMMARY = "plan_summary"
     INGREDIENT_SYNTHESIS = "ingredient_synthesis"
+    STRATEGY_EXPRESSION = "strategy_expression"
 
 
 class LLMFailureStage(str, Enum):

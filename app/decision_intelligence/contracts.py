@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import date, datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from app.schemas.decision import WhatIfRequest
 
 
@@ -176,6 +176,22 @@ class BriefStrategyEvaluation(_Contract):
     reason_status: Literal["verified", "partial", "code_only", "unavailable"]
     reasons: list[BriefStrategyReason] = Field(default_factory=list)
     presentation: BriefStrategyPresentation | None = None
+
+class StrategyExpressionItem(_Contract):
+    strategy: str
+    headline: str = Field(min_length=1, max_length=100)
+    summary: str = Field(min_length=1, max_length=400)
+    reason_messages: list[str] = Field(default_factory=list, max_length=5)
+
+    @field_validator("reason_messages")
+    @classmethod
+    def bounded_messages(cls, values: list[str]) -> list[str]:
+        if any(not value or len(value) > 220 for value in values):
+            raise ValueError("strategy_expression_reason_message_length")
+        return values
+
+class StrategyExpressionLLMResponse(_Contract):
+    strategies: list[StrategyExpressionItem] = Field(max_length=3)
 
 
 class CriticBrief(_Contract):

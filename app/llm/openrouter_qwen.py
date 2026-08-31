@@ -19,6 +19,7 @@ from app.decision_intelligence.contracts import (
     IngredientSynthesisLLMResponse,
     DecisionNarrativeLLMResponse,
     DecisionOverallSummaryLLMResponse,
+    StrategyExpressionLLMResponse,
 )
 from app.llm.base import LLMProvider
 from app.llm.tasks import LLMFailureStage, LLMTask, OpenRouterTaskProfile
@@ -125,13 +126,14 @@ class OpenRouterLLMGateway(LLMProvider):
         }
 
     def task_profile(self, task: LLMTask) -> OpenRouterTaskProfile:
-        if task not in (LLMTask.EXCEL_MAPPING, LLMTask.DECISION_NARRATIVE, LLMTask.PLAN_SUMMARY, LLMTask.INGREDIENT_SYNTHESIS):
+        if task not in (LLMTask.EXCEL_MAPPING, LLMTask.DECISION_NARRATIVE, LLMTask.PLAN_SUMMARY, LLMTask.INGREDIENT_SYNTHESIS, LLMTask.STRATEGY_EXPRESSION):
             raise ValueError(f"Unsupported LLM task: {task}")
         prefix = {
             LLMTask.EXCEL_MAPPING: "openrouter_mapping",
             LLMTask.DECISION_NARRATIVE: "openrouter_narrative",
             LLMTask.PLAN_SUMMARY: "openrouter_summary",
             LLMTask.INGREDIENT_SYNTHESIS: "openrouter_narrative",
+            LLMTask.STRATEGY_EXPRESSION: "openrouter_narrative",
         }[task]
         # Task models own routing.  Do not let a legacy OPENROUTER_MODEL value
         # silently switch either current production task to another model.
@@ -157,6 +159,8 @@ class OpenRouterLLMGateway(LLMProvider):
             return DecisionOverallSummaryLLMResponse.model_json_schema()
         if task is LLMTask.INGREDIENT_SYNTHESIS:
             return IngredientSynthesisLLMResponse.model_json_schema()
+        if task is LLMTask.STRATEGY_EXPRESSION:
+            return StrategyExpressionLLMResponse.model_json_schema()
         raise ValueError(f"Unsupported LLM task: {task}")
 
     @staticmethod
