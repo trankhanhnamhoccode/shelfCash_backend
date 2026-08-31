@@ -32,7 +32,7 @@ COMMUNICATION_PLAN là authority: nói decision trước, chỉ dùng main_risk 
 
 Chỉ dùng EVIDENCE được cung cấp. Sao chép số/ngày đúng từ display_values hoặc allowed_numeric_mentions; không tính lại, làm tròn, đổi đơn vị hoặc đổi dấu phân cách. STYLE_EXAMPLES chỉ là văn phong. OBSERVATION và DERIVED không được dùng ngôn ngữ nguyên nhân; chỉ CAUSAL hoặc PROCUREMENT_REASON được phép. Dùng “tỷ lệ đáp ứng nhu cầu”, không dùng “tỷ lệ lấp kho”. CONSERVATIVE_DESIGN phải nói rõ là kịch bản nhu cầu bảo thủ; STRESS phải nói rõ là kịch bản kiểm tra sức chịu đựng; CAPACITY_NOT_EVALUATED chỉ là chưa đánh giá đầy đủ.
 
-Trả về đúng một JSON object: headline và summary là DecisionNarrativeClaim; key_points là tối đa 3 DecisionNarrativeClaim; warning_summary là DecisionNarrativeClaim hoặc null. Mỗi DecisionNarrativeClaim gồm type, text, evidence_ids; type phải đúng semantic type của ít nhất một evidence_id. Không có mảng claims ở cấp cao nhất, không có used_evidence_ids ở cấp cao nhất, không markdown."""
+Trả về đúng một JSON object: headline và summary là DecisionNarrativeClaim; key_points là tối đa 3 DecisionNarrativeClaim; warning_summary là DecisionNarrativeClaim hoặc null. Mỗi DecisionNarrativeClaim gồm type, text, evidence_ids; evidence_ids phải sao chép đúng các chuỗi evidence_id của EVIDENCE, không dùng semantic type như PLAN_OVERVIEW làm ID; type phải đúng semantic type của ít nhất một evidence_id. Không có mảng claims ở cấp cao nhất, không có used_evidence_ids ở cấp cao nhất, không markdown."""
 
 
 def _strategy_label(strategy: str | None) -> str | None:
@@ -130,6 +130,7 @@ class OverallSummaryProvider:
             return fallback
         request_context: dict[str, Any] = {"decision_run_id": brief.decision_run_id}
         failure_stage = LLMFailureStage.UNKNOWN.value
+        authorization_diagnostics: dict[str, Any] = {}
         try:
             evidence, structured = self._context(brief, facts)
             if not structured:
@@ -151,6 +152,10 @@ class OverallSummaryProvider:
                     detail_level="simple",
                 ),
             }
+            visible_ids = {str(item["evidence_id"]) for item in selected}
+            authorized_ids = set(plan.evidence_ids)
+            if visible_ids != authorized_ids:
+                raise ValueError("overall_summary_payload_authorization_mismatch")
             logger.info(
                 "overall_summary_communication_plan decision_run_id=%s decision=%s main_risk=%s limitation=%s supporting=%s",
                 brief.decision_run_id, plan.decision, plan.main_risk, plan.limitation, plan.supporting,
@@ -161,6 +166,7 @@ class OverallSummaryProvider:
             except Exception as exc:
                 failure_stage = LLMFailureStage.SCHEMA_VALIDATION.value
                 raise ValueError("overall_summary_schema_validation_failed") from exc
+            authorization_diagnostics = self._authorization_diagnostics(plan, selected, typed)
             try:
                 self._validate_expression(typed, set(plan.evidence_ids), selected)
             except ValueError as exc:
@@ -208,6 +214,7 @@ class OverallSummaryProvider:
                     "causal_allowed": False,
                     "dedup_validation_status": "passed",
                     "metadata": request_context.get("openrouter_metadata", {}),
+                    "authorization": authorization_diagnostics,
                 },
             )
         except Exception as exc:
@@ -219,10 +226,10 @@ class OverallSummaryProvider:
             metadata = request_context.get("openrouter_metadata")
             metadata = metadata if isinstance(metadata, dict) else {}
             logger.warning(
-                "overall_summary_fallback decision_run_id=%s task=%s configured_model=%s resolved_provider=%s failure_stage=%s reason=%s",
+                "overall_summary_fallback decision_run_id=%s task=%s configured_model=%s resolved_provider=%s failure_stage=%s reason=%s authorized_evidence_ids=%s model_visible_evidence_ids=%s model_used_evidence_ids=%s unauthorized_model_used_ids=%s communication_plan=%s",
                 brief.decision_run_id, LLMTask.PLAN_SUMMARY.value,
                 getattr(profile, "model", None), metadata.get("resolved_provider"),
-                failure_stage, type(exc).__name__,
+                failure_stage, type(exc).__name__, authorization_diagnostics.get("authorized_evidence_ids"), authorization_diagnostics.get("model_visible_evidence_ids"), authorization_diagnostics.get("model_used_evidence_ids"), authorization_diagnostics.get("unauthorized_model_used_ids"), authorization_diagnostics.get("communication_plan"),
             )
             raw_response = request_context.get("openrouter_raw_content")
             if raw_response is None:
@@ -237,6 +244,7 @@ class OverallSummaryProvider:
                     "http_status": getattr(exc, "http_status", None),
                     "details": details if isinstance(details, dict) else {},
                     "metadata": metadata,
+                    "authorization": authorization_diagnostics,
                 },
             })
 
@@ -245,6 +253,22 @@ class OverallSummaryProvider:
             self.llm_provider, SYSTEM_PROMPT, payload,
             task=LLMTask.PLAN_SUMMARY, request_context=request_context,
         )
+
+    @staticmethod
+    def _authorization_diagnostics(plan, selected: list[dict[str, Any]], typed: DecisionOverallSummaryLLMResponse) -> dict[str, Any]:
+        claims = [typed.headline, typed.summary, *typed.key_points]
+        if typed.warning_summary is not None:
+            claims.append(typed.warning_summary)
+        authorized = list(plan.evidence_ids)
+        visible = [str(item["evidence_id"]) for item in selected]
+        used = list(dict.fromkeys(evidence_id for claim in claims for evidence_id in claim.evidence_ids))
+        return {
+            "authorized_evidence_ids": authorized,
+            "model_visible_evidence_ids": visible,
+            "model_used_evidence_ids": used,
+            "unauthorized_model_used_ids": [item for item in used if item not in set(authorized)],
+            "communication_plan": {"decision": plan.decision, "main_risk": plan.main_risk, "limitation": plan.limitation, "supporting": plan.supporting},
+        }
 
     @staticmethod
     def _presentation_roles(plan, selected: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:

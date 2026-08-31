@@ -422,6 +422,9 @@ def test_unauthorized_real_alternate_evidence_is_rejected_after_payload_filterin
     assert summary.source == "deterministic_fallback"
     assert summary.llm_diagnostics["error_message"] == "overall_summary_unauthorized_evidence"
     assert summary.llm_diagnostics["failure_stage"] == "GROUNDING"
+    audit = summary.llm_diagnostics["authorization"]
+    assert len(audit["unauthorized_model_used_ids"]) == 1
+    assert set(audit["authorized_evidence_ids"]) == set(audit["model_visible_evidence_ids"])
 
 
 def test_authorization_and_visible_payload_are_independent_of_global_fact_order():
