@@ -257,20 +257,24 @@ class DecisionPlanningService:
  def get_decision_brief(self,rid):
   from app.decision_intelligence import DecisionBriefBuilder, ShelfCashDecisionIntelligenceAdapter
   from app.decision_intelligence.ingredient_synthesis import IngredientSynthesisProvider
-  from app.decision_intelligence.strategy_expression import StrategyExpressionProvider
   from app.decision_intelligence.overall_summary import OverallSummaryProvider
   from app.decision_intelligence.semantic_evidence import DecisionSemanticEvidenceBuilder
   with self.factory() as s:
    run=s.get(DecisionRunModel,rid)
    if not run:raise PlanningError("DECISION_RUN_NOT_FOUND","Decision run not found.",{"decision_run_id":rid},http_status=404)
    brief=DecisionBriefBuilder().build(s,run)
-   # Optional expression is read-only: it may replace only presentation text
-   # in this response and never writes the Decision Package.
-   expression_result=StrategyExpressionProvider(self.llm_provider,self.settings).express_result(brief.strategy_evaluations,brief.decision_run_id)
-   diagnostics=expression_result.diagnostics
-   details=diagnostics.get("details") or {}
-   logger.info("event=strategy_expression.completed decision_run_id=%s request_id=%s attempted=%s status=%s source=%s fallback_used=%s skip_reason=%s failure_stage=%s provider=%s requested_model=%s resolved_model=%s finish_reason=%s strategy_count=%s selected_style_example_ids=%s error_message=%s offending_strategy=%s offending_field=%s offending_numeric_mentions=%s numeric_failure_kind=%s detected_phrase=%s authorized_reason_codes=%s offending_entity=%s authorized_entities=%s",brief.decision_run_id,get_request_id(),diagnostics.get("attempted"),diagnostics.get("status"),diagnostics.get("source"),diagnostics.get("fallback_used"),diagnostics.get("skip_reason"),diagnostics.get("failure_stage"),diagnostics.get("provider"),diagnostics.get("requested_model"),diagnostics.get("resolved_model"),diagnostics.get("finish_reason"),diagnostics.get("strategy_count"),diagnostics.get("selected_style_example_ids"),diagnostics.get("error_message"),details.get("offending_strategy"),details.get("offending_field"),details.get("offending_numeric_mentions"),details.get("numeric_failure_kind"),details.get("detected_phrase"),details.get("authorized_reason_codes"),details.get("offending_entity"),details.get("authorized_entities"))
-   brief=brief.model_copy(update={"strategy_evaluations":expression_result.presentations})
+   strategy_expression_mode=self.settings.strategy_expression_mode
+   if strategy_expression_mode == "llm_polish":
+    # Optional expression is read-only: it may replace only presentation text
+    # in this response and never writes the Decision Package.
+    from app.decision_intelligence.strategy_expression import StrategyExpressionProvider
+    expression_result=StrategyExpressionProvider(self.llm_provider,self.settings).express_result(brief.strategy_evaluations,brief.decision_run_id)
+    diagnostics=expression_result.diagnostics
+    details=diagnostics.get("details") or {}
+    logger.info("event=strategy_expression.completed decision_run_id=%s request_id=%s attempted=%s status=%s source=%s fallback_used=%s skip_reason=%s failure_stage=%s provider=%s requested_model=%s resolved_model=%s finish_reason=%s strategy_count=%s selected_style_example_ids=%s error_message=%s offending_strategy=%s offending_field=%s offending_numeric_mentions=%s numeric_failure_kind=%s detected_phrase=%s authorized_reason_codes=%s offending_entity=%s authorized_entities=%s",brief.decision_run_id,get_request_id(),diagnostics.get("attempted"),diagnostics.get("status"),diagnostics.get("source"),diagnostics.get("fallback_used"),diagnostics.get("skip_reason"),diagnostics.get("failure_stage"),diagnostics.get("provider"),diagnostics.get("requested_model"),diagnostics.get("resolved_model"),diagnostics.get("finish_reason"),diagnostics.get("strategy_count"),diagnostics.get("selected_style_example_ids"),diagnostics.get("error_message"),details.get("offending_strategy"),details.get("offending_field"),details.get("offending_numeric_mentions"),details.get("numeric_failure_kind"),details.get("detected_phrase"),details.get("authorized_reason_codes"),details.get("offending_entity"),details.get("authorized_entities"))
+    brief=brief.model_copy(update={"strategy_evaluations":expression_result.presentations})
+   else:
+    logger.info("event=strategy_presentation.completed decision_run_id=%s request_id=%s mode=deterministic source=deterministic strategy_count=%s",brief.decision_run_id,get_request_id(),len(brief.strategy_evaluations))
    if brief.assistant_summary is None:
     package=json.loads(run.package_json)
     facts=DecisionSemanticEvidenceBuilder().build(brief,package)

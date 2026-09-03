@@ -1,6 +1,9 @@
 import json
 from datetime import date, datetime, timezone
 
+import pytest
+
+from app.config import Settings
 from app.models.business import IngredientModel, SupplierModel
 from app.models.decision import DecisionRunModel
 
@@ -100,16 +103,20 @@ def test_ingredient_synthesis_diagnostics_stay_in_decision_package_not_brief(cli
     assert diagnostics["raw_response"] not in brief.text
 
 
-def test_strategy_expression_brief_read_never_persists_expression_artifacts(client, caplog):
-    """Expression is request-local even when the Brief has strategy evaluations."""
-    package = {
-        "decision_run_id": "strategy-expression-read", "store_id": "STORE_001", "status": "completed",
+def _strategy_expression_package(run_id="strategy-expression-read"):
+    return {
+        "decision_run_id": run_id, "store_id": "STORE_001", "status": "completed",
         "recommended_strategy": "protected", "recommended_plan": {"items": []}, "ingredient_demand": [],
         "business_metrics": {}, "inventory_risk": {}, "critic": {"findings": [], "warnings": []},
         "reason_codes": [], "warnings": [],
         "strategies": {"protected": {"is_feasible": True, "purchase_cost": 4_680_000, "critic": {"findings": [], "warnings": []}}},
         "strategy_selection": {"rule": "lowest_exact_valid_candidate_cost_then_strategy_name", "selected_strategy": "protected", "eligible_candidates": ["protected"]},
     }
+
+
+def test_strategy_expression_brief_default_is_deterministic_and_never_persists_expression_artifacts(client, caplog):
+    """Default Brief reads render IS-4.4 without inspecting the provider."""
+    package = _strategy_expression_package()
     with client.app.state.session_factory() as session:
         session.add(_run("strategy-expression-read", package)); session.commit()
     before = client.get("/api/v1/decision-runs/strategy-expression-read").json()
@@ -120,8 +127,95 @@ def test_strategy_expression_brief_read_never_persists_expression_artifacts(clie
     assert response.status_code == 200
     assert after == before
     assert "strategy_expression" not in after.get("assistant", {})
-    event = next(record.message for record in caplog.records if "event=strategy_expression.completed" in record.message)
-    assert "status=skipped" in event and "skip_reason=provider_unavailable" in event
+    event = next(record.message for record in caplog.records if "event=strategy_presentation.completed" in record.message)
+    assert "mode=deterministic" in event and "source=deterministic" in event
+
+
+def test_strategy_expression_default_uses_zero_calls_with_available_unavailable_and_throwing_providers(client):
+    class Provider:
+        def __init__(self, available=True, throws=False):
+            self.available, self.throws, self.calls = available, throws, 0
+
+        def generate_json_sync(self, *_args, **_kwargs):
+            self.calls += 1
+            if self.throws:
+                raise AssertionError("deterministic strategy rendering must not call a provider")
+            return {"strategies": []}
+
+    sf = client.app.state.session_factory
+    with sf() as session:
+        for run_id in ("strategy-default-available", "strategy-default-unavailable", "strategy-default-throwing"):
+            session.add(_run(run_id, _strategy_expression_package(run_id)))
+        session.commit()
+
+    service = client.app.state.decision_planning_service
+    service.settings.strategy_expression_mode = "deterministic"
+    expected = None
+    for run_id, provider in (
+        ("strategy-default-available", Provider()),
+        ("strategy-default-unavailable", Provider(available=False)),
+        ("strategy-default-throwing", Provider(throws=True)),
+    ):
+        service.llm_provider = provider
+        first = client.get(f"/api/v1/decision-runs/{run_id}/brief")
+        second = client.get(f"/api/v1/decision-runs/{run_id}/brief")
+        assert first.status_code == 200 and second.status_code == 200
+        presentations = [item["presentation"] for item in first.json()["strategy_evaluations"]]
+        assert presentations == [item["presentation"] for item in second.json()["strategy_evaluations"]]
+        assert provider.calls == 0
+        expected = expected or presentations
+        assert presentations == expected
+
+
+def test_strategy_expression_explicit_llm_polish_uses_validated_qwen_or_whole_set_fallback(client, caplog):
+    class Provider:
+        available = True
+
+        def __init__(self, response):
+            self.response, self.calls = response, 0
+
+        def generate_json_sync(self, *_args, **_kwargs):
+            self.calls += 1
+            return self.response
+
+    sf = client.app.state.session_factory
+    with sf() as session:
+        session.add(_run("strategy-polish-valid", _strategy_expression_package("strategy-polish-valid")))
+        session.add(_run("strategy-polish-invalid", _strategy_expression_package("strategy-polish-invalid")))
+        session.commit()
+
+    service = client.app.state.decision_planning_service
+    canonical = client.get("/api/v1/decision-runs/strategy-polish-valid/brief").json()["strategy_evaluations"]
+    valid = Provider({"strategies": [{
+        "strategy": item["strategy"],
+        "headline": item["presentation"]["headline"],
+        "summary": item["presentation"]["summary"],
+        "reason_messages": item["presentation"]["reason_messages"],
+    } for item in canonical]})
+    import logging
+    caplog.set_level(logging.INFO, logger="shelfcash.planning")
+    service.settings.strategy_expression_mode = "llm_polish"
+    service.llm_provider = valid
+    polished = client.get("/api/v1/decision-runs/strategy-polish-valid/brief")
+    assert polished.status_code == 200 and valid.calls == 1
+    assert polished.json()["strategy_evaluations"] == canonical
+    assert any("event=strategy_expression.completed" in record.message and "status=success" in record.message and "source=llm" in record.message for record in caplog.records)
+
+    invalid = Provider({"strategies": []})
+    service.llm_provider = invalid
+    fallback = client.get("/api/v1/decision-runs/strategy-polish-invalid/brief")
+    assert fallback.status_code == 200 and invalid.calls == 1
+    # Restore deterministic mode before obtaining the canonical baseline so the
+    # optional read-time polish path cannot participate in this assertion.
+    service.settings.strategy_expression_mode = "deterministic"
+    canonical = client.get("/api/v1/decision-runs/strategy-polish-invalid/brief").json()["strategy_evaluations"]
+    assert fallback.json()["strategy_evaluations"] == canonical
+
+
+def test_strategy_expression_mode_rejects_unknown_value():
+    assert Settings(_env_file=None).strategy_expression_mode == "deterministic"
+    with pytest.raises(ValueError):
+        Settings(strategy_expression_mode="llm-polsh")
 
 
 def test_legacy_brief_read_reconstructs_ingredient_synthesis_without_provider_call(client):

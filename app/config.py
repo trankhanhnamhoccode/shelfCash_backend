@@ -1,5 +1,6 @@
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -45,6 +46,9 @@ class Settings(BaseSettings):
     openrouter_summary_structured_output: bool = True
     openrouter_summary_strict_schema: bool = True
     openrouter_summary_require_parameters: bool = True
+    # Manager-facing strategy wording is deterministic unless an explicit,
+    # validated opt-in enables the existing guarded Qwen polish path.
+    strategy_expression_mode: Literal["deterministic", "llm_polish"] = "deterministic"
     # Retained for callers/configuration that used the old setting. Narrative
     # requests now use OPENROUTER_NARRATIVE_MAX_TOKENS.
     decision_narrative_max_new_tokens: int = 1200
