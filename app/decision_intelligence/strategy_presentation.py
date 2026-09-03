@@ -1,8 +1,8 @@
 """Deterministic Vietnamese phrasing for manager-safe strategy evaluations only."""
 from app.decision_intelligence.contracts import BriefStrategyEvaluation, BriefStrategyPresentation
-from app.decision_intelligence.display import purchase_cost_display, vi_number
+from app.decision_intelligence.display import date_display, percentage_display, purchase_cost_display, vi_number
 def _money(v): return (f"{vi_number(v/1000,0)} nghìn đồng" if isinstance(v,(int,float)) and 0 < v < 1000000 else purchase_cost_display(v) if isinstance(v,(int,float)) else None)
-def _pct(v): return f"{vi_number(float(v)*100,2)}%" if isinstance(v,(int,float)) else None
+def _pct(v): return percentage_display(v)
 def present(e):
  r=e.reasons; msgs=[]
  for x in r:
@@ -14,7 +14,7 @@ def present(e):
   elif c=="STRATEGY_NAME_TIEBREAK": msgs.append("Hệ thống áp dụng quy tắc phân định cố định khi chi phí bằng nhau.")
   elif c=="SELECTION_REASON_UNAVAILABLE": msgs.append("Chưa đủ dữ liệu để xác nhận chi tiết lý do.")
   elif c=="EVALUATION_TECHNICAL_FAILURE": msgs.append("Quá trình tính toán gặp lỗi kỹ thuật, nên chưa thể kết luận phương án có đáp ứng điều kiện kinh doanh hay không.")
-  elif c=="LEAD_TIME": msgs.append("Hàng không thể về kịp thời điểm cần sử dụng." if not v.get('earliest_arrival_date') else f"Hàng không thể về kịp thời điểm cần sử dụng; ngày nhận sớm nhất là {v['earliest_arrival_date']}.")
+  elif c=="LEAD_TIME": msgs.append("Hàng không thể về kịp thời điểm cần sử dụng." if not v.get('earliest_arrival_date') else f"Hàng không thể về kịp thời điểm cần sử dụng; ngày nhận sớm nhất là {date_display(v['earliest_arrival_date'])}.")
   elif c=="MOQ": msgs.append("Lượng đặt hàng không đáp ứng mức đặt tối thiểu của nhà cung cấp.")
   elif c=="PACK_SIZE": msgs.append("Lượng đặt hàng không đáp ứng quy cách đóng gói bắt buộc.")
   elif c=="SUPPLIER_UNAVAILABLE": msgs.append("Nhà cung cấp không thể đáp ứng đơn hàng trong thời gian của kế hoạch.")

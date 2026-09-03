@@ -36,6 +36,14 @@ def purchase_cost_display(value: float | int | None) -> str | None:
     return f"{vi_number(amount, 0)} đồng"
 
 
+def percentage_display(value: float | int | None) -> str | None:
+    return f"{vi_number(Decimal(str(value)) * Decimal('100'), 2)}%" if isinstance(value, (int, float)) else None
+
+
+def date_display(value: str | None) -> str | None:
+    return f"{value[8:10]}/{value[5:7]}" if isinstance(value, str) and len(value) == 10 and value[4] == "-" else value
+
+
 def add_numeric_display_contract(record: dict) -> dict:
     """Attach exact, backend-owned numeric text that narrative may repeat."""
     allowed: list[str] = list(record.get("allowed_numeric_mentions") or [])
