@@ -88,7 +88,8 @@ class IngredientSynthesisProvider:
             if detail.ingredient_id:
                 risk_by_ingredient[detail.ingredient_id].append(detail)
 
-        self.last_diagnostics = self._new_diagnostics(brief, ingredient_ids)
+        mode = getattr(self.settings, "ingredient_synthesis_mode", "deterministic")
+        self.last_diagnostics = self._new_diagnostics(brief, ingredient_ids, mode)
 
         prepared: dict[str, tuple[IngredientSynthesis, list[dict[str, Any]], str]] = {}
         eligible: list[dict[str, Any]] = []
@@ -124,6 +125,13 @@ class IngredientSynthesisProvider:
         diagnostics["normal_count"] = sum(1 for value in prepared.values() if value[2] == "normal")
         diagnostics["watch_count"] = sum(1 for value in prepared.values() if value[2] == "watch")
         diagnostics["critical_count"] = sum(1 for value in prepared.values() if value[2] == "critical")
+        if mode == "deterministic":
+            diagnostics.update(status="success", failure_stage=None, source="deterministic")
+            logger.info(
+                "event=ingredient_synthesis.completed decision_run_id=%s mode=deterministic source=deterministic ingredient_count=%s critical_count=%s llm_call_count=0",
+                brief.decision_run_id, len(ingredient_ids), diagnostics["critical_count"],
+            )
+            return [prepared[item][0] for item in ingredient_ids]
         if not eligible:
             diagnostics.update(status="not_attempted", failure_stage="NOT_ATTEMPTED")
             return [prepared[item][0] for item in ingredient_ids]
@@ -136,9 +144,9 @@ class IngredientSynthesisProvider:
             return [prepared[item][0] for item in ingredient_ids]
         return self._per_item_or_fallback(brief, prepared, eligible, evidence_items, ingredient_ids)
 
-    def _new_diagnostics(self, brief: DecisionBriefFacts, ingredient_ids: list[str]) -> dict[str, Any]:
+    def _new_diagnostics(self, brief: DecisionBriefFacts, ingredient_ids: list[str], mode: str) -> dict[str, Any]:
         configured_model = "qwen/qwen3.5-9b"
-        if self.llm_provider and hasattr(self.llm_provider, "task_profile"):
+        if mode == "llm_polish" and self.llm_provider and hasattr(self.llm_provider, "task_profile"):
             try:
                 configured_model = self.llm_provider.task_profile(LLMTask.INGREDIENT_SYNTHESIS).model
             except Exception:
@@ -148,6 +156,7 @@ class IngredientSynthesisProvider:
             "decision_run_id": brief.decision_run_id,
             "correlation_id": get_request_id(),
             "task": LLMTask.INGREDIENT_SYNTHESIS.value,
+            "mode": mode,
             "llm_attempted": False,
             "total_ingredient_count": len(ingredient_ids),
             "eligible_count": 0,

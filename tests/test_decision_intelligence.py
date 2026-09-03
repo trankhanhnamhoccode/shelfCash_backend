@@ -243,6 +243,41 @@ def test_legacy_brief_read_reconstructs_ingredient_synthesis_without_provider_ca
     assert provider.calls == 0
 
 
+def test_default_ingredient_synthesis_is_persisted_and_brief_reads_it_without_provider_call(client):
+    class ThrowingProvider:
+        available = True
+
+        def __init__(self):
+            self.calls = 0
+
+        async def generate_json(self, *_args, **_kwargs):
+            self.calls += 1
+            raise AssertionError("deterministic ingredient synthesis must not call a provider")
+
+    package = {
+        "decision_run_id": "persisted-deterministic-synthesis", "store_id": "STORE_001",
+        "status": "completed_with_no_feasible_recommendation", "recommended_strategy": None,
+        "recommended_plan": {"items": []},
+        "ingredient_demand": [{"ingredient_id": "persisted-ingredient", "target_date": "2026-08-21", "unit": "kg", "p25": 1, "p50": 2, "p75": 3, "contributions": []}],
+        "business_metrics": {}, "inventory_risk": {}, "critic": {"findings": [], "warnings": []},
+        "reason_codes": [], "warnings": [],
+    }
+    with client.app.state.session_factory() as session:
+        session.add(_run("persisted-deterministic-synthesis", package)); session.commit()
+
+    service = client.app.state.decision_planning_service
+    provider = ThrowingProvider()
+    service.llm_provider = provider
+    service._generate_and_persist_overall_summary("persisted-deterministic-synthesis")
+
+    stored = client.get("/api/v1/decision-runs/persisted-deterministic-synthesis").json()
+    persisted = stored["assistant"]["ingredient_synthesis"]
+    assert persisted[0]["source"] == "rule_based"
+    brief = client.get("/api/v1/decision-runs/persisted-deterministic-synthesis/brief").json()
+    assert brief["ingredient_synthesis"] == persisted
+    assert provider.calls == 0
+
+
 def test_what_if_invalid_mutations_return_422(client):
     for payload in ({"demand_multiplier": -1}, {"supplier_delay_days": -3}, {"budget_limit": -100}, {"strategy": "unknown"}):
         response = client.post("/api/v1/decision-runs/does-not-matter/what-if", json=payload)

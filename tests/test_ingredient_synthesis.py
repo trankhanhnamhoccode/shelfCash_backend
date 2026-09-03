@@ -1,13 +1,19 @@
 from datetime import date, datetime, timezone
+from types import SimpleNamespace
 
 import pytest
 
 from app.core.exceptions import LLMProviderError
+from app.config import Settings
 from app.decision_intelligence.contracts import CriticBrief, DecisionBriefFacts, ForecastBrief, IngredientDemandBrief, RecommendationBrief, RiskBrief, RiskDetail
 from app.decision_intelligence.ingredient_synthesis import IngredientSynthesisProvider
 from app.decision_intelligence.risk_metadata import project_risk_details
 from app.decision_intelligence.semantic_evidence import DecisionSemanticEvidenceBuilder
 from app.decision_intelligence.style_examples import retrieve_style_examples
+
+
+def polish_settings():
+    return SimpleNamespace(ingredient_synthesis_mode="llm_polish")
 
 
 def brief(ids, critical=(), warning=()):
@@ -38,7 +44,7 @@ def test_routing_uses_riskdetail_not_raw_operational_evidence():
     ng, wg, cg = Gateway(), Gateway(), Gateway()
     nr = IngredientSynthesisProvider(ng, None).synthesize(n, facts(n))
     wr = IngredientSynthesisProvider(wg, None).synthesize(w, facts(w, ("w",)))
-    cr = IngredientSynthesisProvider(cg, None).synthesize(c, facts(c, ("c",)))
+    cr = IngredientSynthesisProvider(cg, polish_settings()).synthesize(c, facts(c, ("c",)))
     assert nr[0].importance == "normal" and nr[0].source == "rule_based" and not ng.calls
     assert wr[0].importance == "normal" and wr[0].source == "rule_based" and not wg.calls
     assert cr[0].importance == "critical" and cr[0].source == "llm" and len(cg.calls) == 1
@@ -52,8 +58,82 @@ def test_warning_riskdetail_is_watch_without_provider_call():
     assert gateway.calls == []
 
 
+def test_default_mode_is_deterministic_for_normal_watch_and_multiple_critical_items():
+    class ThrowingGateway:
+        available = True
+
+        def __init__(self):
+            self.calls = 0
+
+        async def generate_json(self, *_args, **_kwargs):
+            self.calls += 1
+            raise AssertionError("deterministic ingredient synthesis must not call a provider")
+
+    value = brief(["normal", "watch", "critical-a", "critical-b"], critical=("critical-a", "critical-b"), warning=("watch",))
+    built_facts = facts(value, ("critical-a", "critical-b"))
+    gateway = ThrowingGateway()
+    provider = IngredientSynthesisProvider(gateway, None)
+    first = provider.synthesize(value, built_facts)
+    second = provider.synthesize(value, built_facts)
+
+    unavailable = ThrowingGateway()
+    unavailable.available = False
+    unavailable_result = IngredientSynthesisProvider(unavailable, None).synthesize(value, built_facts)
+
+    assert [item.importance for item in first] == ["critical", "critical", "normal", "watch"]
+    assert [item.source for item in first] == ["rule_based"] * 4
+    assert first == second == unavailable_result and gateway.calls == unavailable.calls == 0
+    assert provider.last_diagnostics["mode"] == "deterministic"
+    assert provider.last_diagnostics["provider_call_count"] == 0
+    records, _ = provider._records(value, built_facts)
+    by_id = {item.ingredient_id: item for item in first}
+    critical_evidence = []
+    for ingredient_id in ("critical-a", "critical-b"):
+        plan = provider._communication_plan(
+            [record for record in records if record.get("ingredient_id") == ingredient_id],
+            [detail for detail in value.risk_details if detail.ingredient_id == ingredient_id],
+        )
+        assert by_id[ingredient_id].evidence_ids == plan["authorized_evidence_ids"]
+        critical_evidence.append(set(by_id[ingredient_id].evidence_ids))
+    assert critical_evidence[0].isdisjoint(critical_evidence[1])
+
+
+def test_default_critical_provenance_and_limited_evidence_are_safe_without_provider_calls():
+    class Gateway:
+        available = True
+
+        def __init__(self):
+            self.calls = 0
+
+        async def generate_json(self, *_args, **_kwargs):
+            self.calls += 1
+            raise AssertionError("default mode must not invoke Qwen")
+
+    cases = [
+        (*_conservative_critical(), "kịch bản nhu cầu bảo thủ"),
+        (*_stress_critical(), "kịch bản kiểm tra sức chịu đựng"),
+    ]
+    limited = brief(["unknown"], critical=("unknown",)).model_copy(update={
+        "risk_details": [_critical("FUTURE_UNKNOWN_RISK", "unknown")],
+    })
+    cases.append((limited, facts(limited, ("unknown",)), "dữ liệu hiện có"))
+
+    for value, built_facts, expected in cases:
+        gateway = Gateway()
+        item = IngredientSynthesisProvider(gateway, None).synthesize(value, built_facts)[0]
+        assert item.source == "rule_based" and gateway.calls == 0
+        assert expected in item.summary.lower()
+        assert "FUTURE_UNKNOWN_RISK" not in f"{item.headline} {item.summary}"
+
+
+def test_ingredient_synthesis_mode_defaults_and_rejects_unknown_values():
+    assert Settings(_env_file=None).ingredient_synthesis_mode == "deterministic"
+    with pytest.raises(ValueError):
+        Settings(ingredient_synthesis_mode="llm-polsh")
+
+
 def test_per_item_calls_are_scoped_ordered_and_counted():
-    value = brief(["a", "b", "c"], critical=("a", "b", "c")); gateway = Gateway(); provider = IngredientSynthesisProvider(gateway, None)
+    value = brief(["a", "b", "c"], critical=("a", "b", "c")); gateway = Gateway(); provider = IngredientSynthesisProvider(gateway, polish_settings())
     result = provider.synthesize(value, facts(value, ("a", "b", "c")))
     assert [x.ingredient_id for x in result] == ["a", "b", "c"]
     assert [x.source for x in result] == ["llm", "llm", "llm"]
@@ -63,7 +143,7 @@ def test_per_item_calls_are_scoped_ordered_and_counted():
 
 
 def test_token_limit_isolated_to_one_item():
-    value = brief(["a", "b", "c"], critical=("a", "b", "c")); provider = IngredientSynthesisProvider(Gateway({"b": LLMProviderError("limit", details={"failure_stage": "TOKEN_LIMIT"})}), None)
+    value = brief(["a", "b", "c"], critical=("a", "b", "c")); provider = IngredientSynthesisProvider(Gateway({"b": LLMProviderError("limit", details={"failure_stage": "TOKEN_LIMIT"})}), polish_settings())
     result = provider.synthesize(value, facts(value, ("a", "b", "c")))
     assert [x.source for x in result] == ["llm", "deterministic_fallback", "llm"]
     assert provider.last_diagnostics["status"] == "partial_success" and provider.last_diagnostics["llm_success_count"] == 2
@@ -71,14 +151,14 @@ def test_token_limit_isolated_to_one_item():
 
 
 def test_network_failure_does_not_stop_siblings():
-    value = brief(["a", "b", "c"], critical=("a", "b", "c")); provider = IngredientSynthesisProvider(Gateway({"b": LLMProviderError("network", details={"failure_stage": "NETWORK"})}), None)
+    value = brief(["a", "b", "c"], critical=("a", "b", "c")); provider = IngredientSynthesisProvider(Gateway({"b": LLMProviderError("network", details={"failure_stage": "NETWORK"})}), polish_settings())
     assert [x.source for x in provider.synthesize(value, facts(value, ("a", "b", "c")))] == ["llm", "deterministic_fallback", "llm"]
 
 
 @pytest.mark.parametrize("stage", ["JSON_PARSE", "TIMEOUT"])
 def test_provider_failure_stages_are_isolated(stage):
     value = brief(["a", "b", "c"], critical=("a", "b", "c"))
-    provider = IngredientSynthesisProvider(Gateway({"b": LLMProviderError(stage, details={"failure_stage": stage})}), None)
+    provider = IngredientSynthesisProvider(Gateway({"b": LLMProviderError(stage, details={"failure_stage": stage})}), polish_settings())
     result = provider.synthesize(value, facts(value, ("a", "b", "c")))
     assert [item.source for item in result] == ["llm", "deterministic_fallback", "llm"]
     assert {item["ingredient_id"]: item for item in provider.last_diagnostics["items"]}["b"]["failure_stage"] == stage
@@ -86,7 +166,7 @@ def test_provider_failure_stages_are_isolated(stage):
 
 def test_schema_failure_is_isolated():
     value = brief(["a", "b", "c"], critical=("a", "b", "c"))
-    provider = IngredientSynthesisProvider(Gateway(responses={"b": {"headline": "missing required fields"}}), None)
+    provider = IngredientSynthesisProvider(Gateway(responses={"b": {"headline": "missing required fields"}}), polish_settings())
     result = provider.synthesize(value, facts(value, ("a", "b", "c")))
     assert [item.source for item in result] == ["llm", "deterministic_fallback", "llm"]
     assert {item["ingredient_id"]: item for item in provider.last_diagnostics["items"]}["b"]["failure_stage"] == "SCHEMA_VALIDATION"
@@ -98,7 +178,7 @@ def test_schema_failure_is_isolated():
     ("ingredient_evidence_entity_mismatch", "ENTITY_GROUNDING"),
 ])
 def test_grounding_failures_are_isolated(monkeypatch, message, stage):
-    value = brief(["a", "b", "c"], critical=("a", "b", "c")); provider = IngredientSynthesisProvider(Gateway(), None)
+    value = brief(["a", "b", "c"], critical=("a", "b", "c")); provider = IngredientSynthesisProvider(Gateway(), polish_settings())
     original = provider.guard._guard
     def guard(*args, target_ingredient_id=None, **kwargs):
         if target_ingredient_id == "b": raise ValueError(message)
@@ -111,7 +191,7 @@ def test_grounding_failures_are_isolated(monkeypatch, message, stage):
 
 def test_run_diagnostics_aggregate_normal_watch_and_critical_items():
     value = brief(["n1", "n2", "w1", "w2", "w3", "c1", "c2"], critical=("c1", "c2"), warning=("w1",))
-    provider = IngredientSynthesisProvider(Gateway(), None)
+    provider = IngredientSynthesisProvider(Gateway(), polish_settings())
     provider.synthesize(value, facts(value, ("w2", "w3", "c1", "c2")))
     diagnostics = provider.last_diagnostics
     assert (diagnostics["total_ingredient_count"], diagnostics["normal_count"], diagnostics["watch_count"], diagnostics["critical_count"]) == (7, 4, 1, 2)
@@ -122,7 +202,7 @@ def test_run_diagnostics_aggregate_normal_watch_and_critical_items():
 def test_representative_ten_ingredient_routing_uses_riskdetail_authority_only():
     ids = ["n1", "n2", "w1", "w2", "w3", "w4", "w5", "c1", "c2", "c3"]
     value = brief(ids, critical=("c1", "c2", "c3"), warning=("w1", "w2"))
-    provider = IngredientSynthesisProvider(Gateway(), None)
+    provider = IngredientSynthesisProvider(Gateway(), polish_settings())
     result = provider.synthesize(value, facts(value, ("w3", "w4", "w5", "c1", "c2", "c3")))
     by_id = {item.ingredient_id: item for item in result}
     assert [by_id[item].importance for item in ids] == ["normal", "normal", "watch", "watch", "normal", "normal", "normal", "critical", "critical", "critical"]
@@ -158,7 +238,7 @@ def test_case_classifier_and_style_retrieval_are_deterministic_and_placeholder_o
 
 
 def test_known_but_communication_plan_unauthorized_evidence_falls_back():
-    value = brief(["a"], critical=("a",)); gateway = Gateway(); provider = IngredientSynthesisProvider(gateway, None)
+    value = brief(["a"], critical=("a",)); gateway = Gateway(); provider = IngredientSynthesisProvider(gateway, polish_settings())
     built_facts = facts(value, ("a",)); records, _ = provider._records(value, built_facts)
     risk = next(item["evidence_id"] for item in records if item["type"] == "INGREDIENT_OPERATIONAL_RISK")
     demand = next(item["evidence_id"] for item in records if item["type"] == "DEMAND_HORIZON_SUMMARY")
@@ -170,7 +250,7 @@ def test_known_but_communication_plan_unauthorized_evidence_falls_back():
 
 
 def test_quality_diagnostics_and_fallback_share_the_selected_primary_fact():
-    value = brief(["a"], critical=("a",)); provider = IngredientSynthesisProvider(Gateway(), None)
+    value = brief(["a"], critical=("a",)); provider = IngredientSynthesisProvider(Gateway(), polish_settings())
     result = provider.synthesize(value, facts(value, ("a",)))
     item = provider.last_diagnostics["items"][0]
     assert result[0].source == "llm"
@@ -184,7 +264,7 @@ def test_quality_diagnostics_and_fallback_share_the_selected_primary_fact():
     "Tỷ lệ lấp kho cần được theo dõi trong kỳ kế hoạch.",
 ])
 def test_quality_guard_rejects_overlong_output_and_wrong_fill_rate_term(summary):
-    value = brief(["a"], critical=("a",)); gateway = Gateway(); provider = IngredientSynthesisProvider(gateway, None)
+    value = brief(["a"], critical=("a",)); gateway = Gateway(); provider = IngredientSynthesisProvider(gateway, polish_settings())
     built_facts = facts(value, ("a",)); records, _ = provider._records(value, built_facts)
     risk = next(item["evidence_id"] for item in records if item["type"] == "INGREDIENT_OPERATIONAL_RISK")
     gateway.responses["a"] = {"headline": "Cần theo dõi", "summary": summary, "claims": [{"type": "INGREDIENT_OPERATIONAL_RISK", "text": summary, "evidence_ids": [risk]}], "used_evidence_ids": [risk]}
@@ -318,7 +398,7 @@ def _stress_critical():
 def test_critical_conservative_payload_and_provider_output_preserve_primary_provenance():
     value, built_facts = _conservative_critical()
     gateway = ProvenanceGateway(_provider_response("Trong kịch bản nhu cầu bảo thủ, Trân châu có nguy cơ thiếu từ 14/08."))
-    result = IngredientSynthesisProvider(gateway, None).synthesize(value, built_facts)
+    result = IngredientSynthesisProvider(gateway, polish_settings()).synthesize(value, built_facts)
     plan = gateway.calls[0]["communication_plan"]
     assert result[0].source == "llm" and result[0].importance == "critical"
     assert plan["primary"]["presentation_provenance"] == "CONSERVATIVE_DESIGN"
@@ -328,9 +408,9 @@ def test_critical_conservative_payload_and_provider_output_preserve_primary_prov
 
 def test_critical_conservative_and_stress_selected_plan_wording_falls_back():
     value, built_facts = _conservative_critical()
-    conservative = IngredientSynthesisProvider(ProvenanceGateway(_provider_response("Kế hoạch hiện tại có nguy cơ thiếu Trân châu.")), None).synthesize(value, built_facts)[0]
+    conservative = IngredientSynthesisProvider(ProvenanceGateway(_provider_response("Kế hoạch hiện tại có nguy cơ thiếu Trân châu.")), polish_settings()).synthesize(value, built_facts)[0]
     stress_value, stress_facts = _stress_critical()
-    stress = IngredientSynthesisProvider(ProvenanceGateway(_provider_response("Kế hoạch hiện tại thiếu nguyên liệu.")), None).synthesize(stress_value, stress_facts)[0]
+    stress = IngredientSynthesisProvider(ProvenanceGateway(_provider_response("Kế hoạch hiện tại thiếu nguyên liệu.")), polish_settings()).synthesize(stress_value, stress_facts)[0]
     assert conservative.source == stress.source == "deterministic_fallback"
     assert "kịch bản nhu cầu bảo thủ" in conservative.summary.lower()
     assert "kịch bản kiểm tra sức chịu đựng" in stress.summary.lower()
@@ -339,11 +419,11 @@ def test_critical_conservative_and_stress_selected_plan_wording_falls_back():
 def test_critical_stress_and_selected_plan_provider_outputs_are_distinguished():
     stress_value, stress_facts = _stress_critical()
     stress_gateway = ProvenanceGateway(_provider_response("Trong kịch bản kiểm tra sức chịu đựng, mô phỏng ghi nhận nguy cơ thiếu."))
-    stress = IngredientSynthesisProvider(stress_gateway, None).synthesize(stress_value, stress_facts)[0]
+    stress = IngredientSynthesisProvider(stress_gateway, polish_settings()).synthesize(stress_value, stress_facts)[0]
     selected = brief(["selected"], critical=("selected",))
     selected_facts = facts(selected, ("selected",))
     selected_gateway = ProvenanceGateway(_provider_response("Kế hoạch hiện tại có nguy cơ thiếu hàng trong kỳ kế hoạch."))
-    selected_result = IngredientSynthesisProvider(selected_gateway, None).synthesize(selected, selected_facts)[0]
+    selected_result = IngredientSynthesisProvider(selected_gateway, polish_settings()).synthesize(selected, selected_facts)[0]
     assert stress.source == selected_result.source == "llm"
     assert stress_gateway.calls[0]["communication_plan"]["primary"]["presentation_provenance"] == "STRESS"
     assert selected_gateway.calls[0]["communication_plan"]["primary"]["presentation_provenance"] == "SELECTED_PLAN"
@@ -355,7 +435,7 @@ def test_critical_mixed_and_multiple_details_bind_exact_code_not_presence_or_ord
     combined = [*built_facts, *[fact for fact in stress_facts if fact.entities.get("ingredient_id") == "pearls" and fact.fact_type.startswith("STRESS_")]]
     mixed_details = [_critical("INGREDIENT_OPERATIONAL_RISK", "pearls"), _critical("STRESS_SHORTAGE_OBSERVED", "pearls")]
     mixed = value.model_copy(update={"risk_details": mixed_details})
-    provider = IngredientSynthesisProvider(ProvenanceGateway(_provider_response("Trong kịch bản nhu cầu bảo thủ, Trân châu có nguy cơ thiếu từ 14/08.")), None)
+    provider = IngredientSynthesisProvider(ProvenanceGateway(_provider_response("Trong kịch bản nhu cầu bảo thủ, Trân châu có nguy cơ thiếu từ 14/08.")), polish_settings())
     result = provider.synthesize(mixed, combined)[0]
     assert result.source == "llm"
     assert provider.last_diagnostics["items"][0]["presentation_provenance"] == "CONSERVATIVE_DESIGN"
@@ -382,5 +462,5 @@ def test_critical_provider_failure_fallback_preserves_plan_provenance(kind, expe
             value = value.model_copy(update={"risk_details": [_critical("RISK_CONSTRAINT_VIOLATION", kind)]})
         built_facts = facts(value, (kind,))
     gateway = ProvenanceGateway(_provider_response("unused"), {value.ingredient_demand[0].ingredient_id: LLMProviderError("network", details={"failure_stage": "NETWORK"})})
-    item = IngredientSynthesisProvider(gateway, None).synthesize(value, built_facts)[0]
+    item = IngredientSynthesisProvider(gateway, polish_settings()).synthesize(value, built_facts)[0]
     assert item.source == "deterministic_fallback" and expected in item.summary.lower()

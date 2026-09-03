@@ -49,6 +49,9 @@ class Settings(BaseSettings):
     # Manager-facing strategy wording is deterministic unless an explicit,
     # validated opt-in enables the existing guarded Qwen polish path.
     strategy_expression_mode: Literal["deterministic", "llm_polish"] = "deterministic"
+    # Ingredient synthesis is deterministic by default.  The existing guarded
+    # per-critical Qwen path is available only as explicit polish.
+    ingredient_synthesis_mode: Literal["deterministic", "llm_polish"] = "deterministic"
     # Retained for callers/configuration that used the old setting. Narrative
     # requests now use OPENROUTER_NARRATIVE_MAX_TOKENS.
     decision_narrative_max_new_tokens: int = 1200
