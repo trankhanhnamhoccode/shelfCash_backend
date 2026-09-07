@@ -18,10 +18,9 @@ curl -X POST http://localhost:8000/api/v1/decision-runs/DECISION_RUN_ID/explanat
 curl -X POST http://localhost:8000/api/v1/decision-runs/DECISION_RUN_ID/what-if -H 'Content-Type: application/json' -d '{"demand_multiplier":1.3,"supplier_delay_days":2}'
 ```
 
-The current what-if response is explicitly read-only and uses a persisted exact
-stress result when one matches; it does not mutate inventory, orders, or the
-source decision run. A re-optimization snapshot path is still required for
-arbitrary budget/strategy what-ifs.
+The what-if response is explicitly read-only. It builds an in-memory
+hypothetical Decision Package from the persisted baseline inputs and requested
+mutations; it never mutates inventory, orders, or the source Decision Run.
 
 ## Deterministic ingredient-metric basis
 

@@ -375,9 +375,11 @@ def test_menu_migration_backfill_downgrade_reupgrade(tmp_path):
         row = connection.exec_driver_sql("SELECT product,item_type FROM products WHERE product_id='P'").one()
         assert row == ("Legacy", "single")
         assert "product_bundle_lines" in inspect(connection).get_table_names()
-    command.downgrade(config, "20260728_0007")
+    with pytest.raises(RuntimeError, match="fabricating unknown received_date values"):
+        command.downgrade(config, "20260728_0007")
     with engine.connect() as connection:
         assert connection.exec_driver_sql("SELECT product FROM products WHERE product_id='P'").scalar() == "Legacy"
+        assert connection.exec_driver_sql("SELECT version_num FROM alembic_version").scalar_one() == "20260821_0023"
     command.upgrade(config, "head")
     with engine.connect() as connection:
         assert connection.exec_driver_sql("SELECT item_type FROM products WHERE product_id='P'").scalar() == "single"

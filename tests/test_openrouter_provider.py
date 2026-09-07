@@ -158,6 +158,9 @@ async def test_invalid_json_is_not_repaired_and_is_classified(monkeypatch):
 async def test_transient_5xx_retries_once_and_logs_response_metadata(monkeypatch, caplog):
     provider = OpenRouterLLMGateway(Settings(openrouter_api_key="mock-key"))
     calls = 0
+    # Direct Alembic tests call fileConfig(), which can disable existing named
+    # loggers globally.  Make this isolated transport test independent of order.
+    logging.getLogger("shelfcash.llm").disabled = False
     caplog.set_level("INFO", logger="shelfcash.llm")
 
     async def no_sleep(_):

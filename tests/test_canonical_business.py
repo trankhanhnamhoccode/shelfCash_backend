@@ -91,10 +91,10 @@ def test_migration_empty_0002_populated_and_downgrade(tmp_path):
             "SELECT ingredient FROM ingredients WHERE ingredient_id = ?",
             ("00000000-0000-0000-0000-000000000004",),
         ).scalar_one() == "Legacy flour"
-    command.downgrade(old_config, "20260728_0003")
-    tables = set(inspect(engine).get_table_names())
-    assert BUSINESS_TABLES <= tables
-    assert {"imports", "import_jobs", "import_sheet_profiles"} <= tables
+    with pytest.raises(RuntimeError, match="fabricating unknown received_date values"):
+        command.downgrade(old_config, "20260728_0003")
+    with engine.connect() as connection:
+        assert connection.exec_driver_sql("SELECT version_num FROM alembic_version").scalar_one() == "20260821_0023"
     engine.dispose()
 
 

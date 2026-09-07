@@ -6,7 +6,7 @@ import pandas as pd
 
 SHEETS = {
     "POS_T7_2026": pd.DataFrame({"Ngày": ["2026-07-26"], "Tên món": ["Cà phê sữa"], "SL bán": [12], "Giá bán": [35000]}),
-    "KiemKe_27-07": pd.DataFrame({"Ngày kiểm kê": ["2026-07-27"], "Nguyên liệu": ["Cà phê"], "Tồn kho": [5.5], "Đơn vị": ["kg"]}),
+    "KiemKe_27-07": pd.DataFrame({"Ngày kiểm kê": ["2026-07-27"], "Nguyên liệu": ["Cà phê"], "Mã lô": ["CA-PHE-001"], "Tồn kho": [5.5], "Đơn vị": ["kg"]}),
     "PNK tháng 7": pd.DataFrame({"Ngày nhập": ["2026-07-20"], "Nguyên liệu": ["Sữa"], "SL nhập": [24], "Đơn vị": ["hộp"]}),
     "Vendor rules": pd.DataFrame({
         "Nhà cung cấp": ["Vendor A"],

@@ -1,6 +1,7 @@
 from decimal import Decimal
 from datetime import datetime, timezone
 
+import pytest
 from alembic import command
 from alembic.config import Config
 from sqlalchemy import create_engine, inspect
@@ -44,12 +45,13 @@ def test_migration_0005_backfills_and_downgrades_without_data_loss(tmp_path):
         assert connection.exec_driver_sql("SELECT version FROM ingredients WHERE ingredient_id='legacy-i'").scalar_one() == 1
         assert connection.exec_driver_sql("SELECT version FROM products WHERE product_id='legacy-p'").scalar_one() == 1
     engine.dispose()
-    command.downgrade(config, "20260728_0004")
+    with pytest.raises(RuntimeError, match="fabricating unknown received_date values"):
+        command.downgrade(config, "20260728_0004")
     engine = create_engine(url)
     with engine.connect() as connection:
         assert connection.exec_driver_sql("SELECT ingredient FROM ingredients WHERE ingredient_id='legacy-i'").scalar_one() == "Legacy ingredient"
         assert connection.exec_driver_sql("SELECT product FROM products WHERE product_id='legacy-p'").scalar_one() == "Legacy product"
-    assert {"ingredients", "products", "import_jobs"} <= set(inspect(engine).get_table_names())
+        assert connection.exec_driver_sql("SELECT version_num FROM alembic_version").scalar_one() == "20260821_0023"
     engine.dispose()
 
 
