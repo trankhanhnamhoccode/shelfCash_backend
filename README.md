@@ -9,9 +9,8 @@ ingredient planning, purchase-order operations, and decision assistance.
 - Pydantic models and route tests are the implementation authority.
 - [docs/README.md](docs/README.md) is the maintained documentation index.
 
-Historical checkpoint reports, API manifests, prompt transcriptions, and
-frontend drafts remain preserved through the pre-refactor baseline. Their
-controlled archival or deletion belongs to the later `DOC-CLEANUP-0` task.
+Historical checkpoint reports, legacy contracts, and frontend drafts are kept
+under [docs/archive/](docs/archive/); they are not current authority.
 
 ## Decision flow
 

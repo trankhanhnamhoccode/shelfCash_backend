@@ -4,9 +4,9 @@
 
 - **Date:** 2026-09-07 (Asia/Saigon)
 - **Branch:** `main`
-- **HEAD:** `a828b96d8ab5b0769916b8efe25674eee2eb7232` (`a828b96`)
-- **Origin:** `main` is 0 ahead / 0 behind `origin/main` at observation time.
-- **Working tree:** DIRTY but fully explained: 7 modified tracked files and 6 untracked documentation files; zero tracked deletions. The modified README/Decision Run doc are intentional pre-existing updates, five modified test/fixture files are R0 repairs, the canonical five files are baseline documents, and `docs/README.md` is a preserved pre-existing documentation-index update.
+- **HEAD:** `1d7d0c0` (`docs: establish backend pre-refactor baseline`), tagged `pre-refactor-backend-2026-09`.
+- **Origin:** `main` is 0 ahead / 0 behind `origin/main` at the baseline freeze.
+- **Working tree:** clean before DOC-CLEANUP-0.
 - **Runtime:** Python 3.13.13; project requirement Python >=3.11; FastAPI 0.140.7; SQLAlchemy 2.0.51; Pydantic 2.13.4.
 - **Default persistence:** SQLAlchemy with SQLite at `sqlite:///runtime/shelfcash.db`; Alembic head observed through migration `20260827_0025` in tests.
 
@@ -55,7 +55,7 @@ Import → Canonical DB → Forecast → BOM → Ingredient Demand → Inventory
 - OpenAPI generation remains **58 paths / 70 operations**.
 - Python compile and Git whitespace gates pass.
 - Initial migration, import-fixture, and logger-capture failures were classified and repaired without changing runtime business behavior.
-- No technical R0 blocker remains; human baseline review/commit/tag is still pending.
+- The reviewed baseline is committed and tagged `pre-refactor-backend-2026-09`.
 
 ## Frozen invariants
 
@@ -69,11 +69,11 @@ Import → Canonical DB → Forecast → BOM → Ingredient Demand → Inventory
 
 ## Current phase
 
-**PRE-REFACTOR BASELINE READY FOR HUMAN FREEZE**
+**DOC-CLEANUP-0 COMPLETE — PRE-REFACTOR BASELINE FROZEN**
 
 ## Next phase
 
-**Human baseline review and two baseline commits/tag → DOC-CLEANUP-0 → R1 — CONTRACT HARDENING.** R1 is not active before the baseline freeze and controlled documentation cleanup.
+**R1 — CONTRACT HARDENING.** R1 is not started. The recommended first slice remains **R1.1 — Common error/OpenAPI contract alignment**.
 
 ## Explicitly NOT doing yet
 
@@ -85,3 +85,9 @@ Import → Canonical DB → Forecast → BOM → Ingredient Demand → Inventory
 - No removal of all Qwen code.
 - No folder-wide restructure.
 - No historical Decision Run rewrite.
+
+## DOC-CLEANUP-0
+
+- Canonical documentation set established and retained at the top level of `docs/`.
+- Historical documentation archived under `docs/archive/`; redundant superseded documents deleted after reference review.
+- R1 remains inactive; the recommended first slice is R1.1.

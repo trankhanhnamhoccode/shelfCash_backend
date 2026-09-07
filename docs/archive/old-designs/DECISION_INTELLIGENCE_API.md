@@ -1,6 +1,6 @@
 # Decision Intelligence API
 
-Frontend-ready TypeScript contract: [FE_DECISION_RUNTIME_CONTRACT.md](FE_DECISION_RUNTIME_CONTRACT.md).
+Frontend-ready TypeScript contract: [FE_DECISION_RUNTIME_CONTRACT.md](../handoffs/FE_DECISION_RUNTIME_CONTRACT.md).
 
 ## Grounded narrative generation
 

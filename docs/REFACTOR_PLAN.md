@@ -68,7 +68,7 @@ Goals: review the AS-IS architecture/API snapshots; establish decisions, state, 
 - [x] No unexplained WIP — every remaining modified/untracked file is classified
 - [x] No R1 or structural refactor started
 - [x] R1 first slice identified
-- [ ] Human baseline review completed
+- [x] Human baseline review completed; baseline tagged `pre-refactor-backend-2026-09`
 
 ### Test baseline
 
@@ -221,40 +221,48 @@ No reviewed high-risk item above is `ALREADY_FIXED`; typed neighboring endpoints
 
 ## Documentation Inventory
 
-Classification describes each restored/current Markdown file's actual role. All 28 backend-relevant Markdown files are present. No archival or deletion action in the final column is executed by R0.1.
+Classification records the final DOC-CLEANUP-0 disposition. The canonical set remains at the `docs/` top level; historical documents are retained under `docs/archive/`.
 
 | File | Classification | Current role | Referenced by | Recommended future action |
 |------|----------------|--------------|---------------|---------------------------|
 | `README.md` | STILL_REFERENCED | Repository entry point and developer workflow | Repository entry point | KEEP |
-| `docs/README.md` | STILL_REFERENCED | Maintained-doc index | `README.md` | KEEP; update after baseline review |
-| `docs/CURRENT_ARCHITECTURE.md` | CANONICAL | Pre-refactor AS-IS architecture snapshot | `CURRENT_API_CONTRACT.md`, `DECISIONS.md`, `CURRENT_STATE.md`, this plan | KEEP |
-| `docs/CURRENT_API_CONTRACT.md` | CANONICAL | Pre-refactor AS-IS API/contract snapshot | `CURRENT_ARCHITECTURE.md`, `DECISIONS.md`, `CURRENT_STATE.md`, this plan | KEEP |
-| `docs/DECISIONS.md` | CANONICAL | Accepted architecture intent | `CURRENT_STATE.md`, this plan | KEEP |
-| `docs/CURRENT_STATE.md` | CANONICAL | Current phase and operational checkpoint | This plan | KEEP |
-| `docs/REFACTOR_PLAN.md` | CANONICAL | Migration order and safety gates | `CURRENT_STATE.md` | KEEP |
-| `docs/decision-runs-api.md` | STILL_REFERENCED | Specialized Decision Run/What-if behavior | `docs/README.md` | KEEP; reconcile later with canonical API snapshot |
-| `docs/decision_assistant_api_contract.md` | STILL_REFERENCED | Specialized frozen Decision Assistant contract | `docs/README.md`, `CURRENT_API_CONTRACT.md`, `tests/test_frontend_decision_assistant_docs.py` | KEEP |
+| `docs/README.md` | STILL_REFERENCED | Documentation navigation hub | `README.md` | KEEP |
+| `docs/CURRENT_ARCHITECTURE.md` | CANONICAL | Pre-refactor AS-IS architecture snapshot | Canonical control set | KEEP |
+| `docs/CURRENT_API_CONTRACT.md` | CANONICAL | Pre-refactor AS-IS API/contract snapshot | Canonical control set | KEEP |
+| `docs/DECISIONS.md` | CANONICAL | Accepted architecture intent | Canonical control set | KEEP |
+| `docs/CURRENT_STATE.md` | CANONICAL | Current phase and operational checkpoint | Canonical control set | KEEP |
+| `docs/REFACTOR_PLAN.md` | CANONICAL | Migration order and safety gates | Canonical control set | KEEP |
+| `docs/decision-runs-api.md` | STILL_REFERENCED | Specialized Decision Run/What-if behavior | `docs/README.md` | KEEP |
+| `docs/decision_assistant_api_contract.md` | STILL_REFERENCED | Specialized frozen Decision Assistant contract | `docs/README.md`, `CURRENT_API_CONTRACT.md`, frontend-doc test | KEEP |
 | `docs/FORECAST_MODEL_PREPROCESSING_SCHEMA.md` | STILL_REFERENCED | Forecast feature/preprocessing contract | `docs/README.md` | KEEP |
 | `docs/INVENTORY_CONSTRAINT_CONTRACT.md` | STILL_REFERENCED | Inventory/business constraint semantics | `docs/README.md` | KEEP |
 | `docs/MENU_IMPORT_AND_API.md` | STILL_REFERENCED | Menu import/API specialization | `docs/README.md` | KEEP |
-| `docs/frontend_decision_assistant_integration.md` | STILL_REFERENCED | Frontend integration guide and current test dependency | `tests/test_frontend_decision_assistant_docs.py` | KEEP through baseline; reconsider only in DOC-CLEANUP-0 |
-| `docs/decision-core-integration.md` | HISTORICAL / ARCHIVE_CANDIDATE | Superseded core-integration checkpoint; runtime claims are stale | `docs/README.md` | ARCHIVE_AFTER_BASELINE; update index link |
-| `docs/API_OPERATION_BEHAVIOR_AUDIT.md` | HISTORICAL / ARCHIVE_CANDIDATE | Old 53-operation implementation audit | NO_CURRENT_REFERENCES_FOUND | ARCHIVE_AFTER_BASELINE |
-| `docs/CANONICAL_BUSINESS_SCHEMA.md` | HISTORICAL / ARCHIVE_CANDIDATE | Early canonical-schema checkpoint | NO_CURRENT_REFERENCES_FOUND | ARCHIVE_AFTER_BASELINE |
-| `docs/CATALOG_AND_RECIPE_API.md` | HISTORICAL / ARCHIVE_CANDIDATE | Early catalog/recipe checkpoint | NO_CURRENT_REFERENCES_FOUND | ARCHIVE_AFTER_BASELINE |
-| `docs/CHECKPOINT_0_CODEBASE_AUDIT.md` | HISTORICAL / ARCHIVE_CANDIDATE | Initial codebase audit | NO_CURRENT_REFERENCES_FOUND | ARCHIVE_AFTER_BASELINE |
-| `docs/DECISION_INTELLIGENCE_API.md` | HISTORICAL / ARCHIVE_CANDIDATE | Superseded Decision Intelligence API design | NO_CURRENT_REFERENCES_FOUND | ARCHIVE_AFTER_BASELINE |
-| `docs/FE_DECISION_BRIEF_HANDOFF.md` | HISTORICAL / ARCHIVE_CANDIDATE | Earlier frontend brief handoff | NO_CURRENT_REFERENCES_FOUND | ARCHIVE_AFTER_BASELINE |
-| `docs/FE_DECISION_RUNTIME_CONTRACT.md` | HISTORICAL / ARCHIVE_CANDIDATE | File identifies itself as an archived pre-Phase-7 draft | NO_CURRENT_REFERENCES_FOUND | ARCHIVE_AFTER_BASELINE |
-| `docs/IMPORT_PERSISTENCE.md` | HISTORICAL / ARCHIVE_CANDIDATE | Early import-persistence checkpoint | NO_CURRENT_REFERENCES_FOUND | ARCHIVE_AFTER_BASELINE |
-| `docs/IMPORT_TO_BUSINESS_PERSISTENCE.md` | HISTORICAL / ARCHIVE_CANDIDATE | Early import-to-business checkpoint | NO_CURRENT_REFERENCES_FOUND | ARCHIVE_AFTER_BASELINE |
-| `docs/ShelfCash_API_Contract_v1(3).md` | HISTORICAL / ARCHIVE_CANDIDATE | Consolidated older v1.1 API contract | NO_CURRENT_REFERENCES_FOUND | ARCHIVE_AFTER_BASELINE |
-| `docs/ShelfCash_Menu_API_Contract_v1.md` | HISTORICAL / ARCHIVE_CANDIDATE | Older menu contract/addendum | NO_CURRENT_REFERENCES_FOUND | ARCHIVE_AFTER_BASELINE |
-| `docs/API_IMPLEMENTATION_STATUS.md` | REDUNDANT / DELETE_CANDIDATE | Superseded generated implementation status | NO_CURRENT_REFERENCES_FOUND | DELETE_AFTER_REVIEW |
-| `docs/CODEX_MASTER_INSTRUCTIONS.md` | REDUNDANT / DELETE_CANDIDATE | Obsolete checkpoint execution instructions | NO_CURRENT_REFERENCES_FOUND | DELETE_AFTER_REVIEW |
-| `docs/ShelfCash_API_Contract_v1.md` | REDUNDANT / DELETE_CANDIDATE | Older draft superseded by consolidated v1.1 and current snapshot | NO_CURRENT_REFERENCES_FOUND | DELETE_AFTER_REVIEW |
+| `docs/frontend_decision_assistant_integration.md` | STILL_REFERENCED | Frontend integration guide and test dependency | frontend-doc test | KEEP |
+| `docs/archive/old-designs/decision-core-integration.md` | ARCHIVED | Superseded core-integration checkpoint with stale runtime claims | Historical archive | ARCHIVED |
+| `docs/archive/checkpoints/API_OPERATION_BEHAVIOR_AUDIT.md` | ARCHIVED | Old 53-operation implementation audit | Historical archive | ARCHIVED |
+| `docs/archive/checkpoints/CANONICAL_BUSINESS_SCHEMA.md` | ARCHIVED | Early canonical-schema checkpoint | Historical archive | ARCHIVED |
+| `docs/archive/checkpoints/CATALOG_AND_RECIPE_API.md` | ARCHIVED | Early catalog/recipe checkpoint | Historical archive | ARCHIVED |
+| `docs/archive/checkpoints/CHECKPOINT_0_CODEBASE_AUDIT.md` | ARCHIVED | Initial codebase audit | Historical archive | ARCHIVED |
+| `docs/archive/old-designs/DECISION_INTELLIGENCE_API.md` | ARCHIVED | Superseded Decision Intelligence API design | Historical archive | ARCHIVED |
+| `docs/archive/handoffs/FE_DECISION_BRIEF_HANDOFF.md` | ARCHIVED | Earlier frontend brief handoff | Historical archive | ARCHIVED |
+| `docs/archive/handoffs/FE_DECISION_RUNTIME_CONTRACT.md` | ARCHIVED | Pre-Phase-7 frontend runtime draft | Historical archive | ARCHIVED |
+| `docs/archive/checkpoints/IMPORT_PERSISTENCE.md` | ARCHIVED | Early import-persistence checkpoint | Historical archive | ARCHIVED |
+| `docs/archive/checkpoints/IMPORT_TO_BUSINESS_PERSISTENCE.md` | ARCHIVED | Early import-to-business checkpoint | Historical archive | ARCHIVED |
+| `docs/archive/legacy-contracts/ShelfCash_API_Contract_v1(3).md` | ARCHIVED | Consolidated older v1.1 API contract | Historical archive | ARCHIVED |
+| `docs/archive/legacy-contracts/ShelfCash_Menu_API_Contract_v1.md` | ARCHIVED | Older menu contract/addendum | Historical archive | ARCHIVED |
+| `docs/API_IMPLEMENTATION_STATUS.md` | DELETED | Superseded 53-operation status report | `CURRENT_API_CONTRACT.md` and route manifest | DELETED |
+| `docs/CODEX_MASTER_INSTRUCTIONS.md` | DELETED | Obsolete checkpoint instructions | `DECISIONS.md`, `REFACTOR_PLAN.md`, and canonical snapshots | DELETED |
+| `docs/ShelfCash_API_Contract_v1.md` | DELETED | Older draft API contract | `CURRENT_API_CONTRACT.md` | DELETED |
 
-No backend-relevant Markdown file remains unclassified. No file was classified as `NEEDS_REVIEW`; the restored frontend guide remains `STILL_REFERENCED` because it is a current test dependency.
+No backend-relevant Markdown file remains unclassified. No file was classified as `NEEDS_REVIEW`; the frontend guide remains `STILL_REFERENCED` because it is a current test dependency.
+
+### DOC-CLEANUP-0 completion
+
+- [x] Historical archive created with traceable `git mv` renames.
+- [x] Redundant delete candidates individually reference-reviewed and removed with `git rm`.
+- [x] Documentation navigation and moved internal links updated.
+- [x] Canonical and still-referenced documents retained.
+- [x] R1 not started.
 
 ## Baseline readiness gate
 
@@ -283,15 +291,13 @@ No backend-relevant Markdown file remains unclassified. No file was classified a
 - [x] No production refactor performed
 - [x] No Markdown files deleted/moved/renamed by this task
 - [x] No commit
-- [x] No tag
+- [x] Baseline tagged `pre-refactor-backend-2026-09`
 - [x] No push
 
-**Readiness: READY_FOR_REFACTOR after human freeze.** All technical R0 gates are green: the 19 deletions are restored, every initial failure is triaged and resolved, the full suite passes, OpenAPI/manifest remain 58 paths / 70 operations, and every remaining file is explained. The next action is human review plus baseline repair/docs commits and tag; R1 is not active yet.
+**Readiness: PRE-REFACTOR BASELINE FROZEN.** All technical R0 gates are green: the 19 deletions are restored, every initial failure is triaged and resolved, the full suite passes, OpenAPI/manifest remain 58 paths / 70 operations, and every remaining file is explained. DOC-CLEANUP-0 has completed; R1 is not active yet.
 
-## Human baseline and documentation cleanup sequence
+## Baseline and documentation cleanup sequence
 
-1. Review the classified pre-existing documentation updates and R0 test repairs.
-2. Review the inventory classifications and the stale `decision-core-integration.md` link in `docs/README.md`.
-3. Create the separate baseline-repair and canonical-document commits, then tag the reviewed baseline.
-4. Run a separate documentation-only task, **DOC-CLEANUP-0**, to create `docs/archive` if approved, move archive candidates, update links, delete only approved redundant files, and preserve provenance.
-5. Start R1.1 only after the baseline freeze and controlled documentation cleanup.
+1. The reviewed baseline was committed and tagged `pre-refactor-backend-2026-09`.
+2. **DOC-CLEANUP-0** completed the controlled archival/deletion inventory actions.
+3. R1 remains inactive. Its recommended first slice is R1.1, subject to its own contract-hardening gate.

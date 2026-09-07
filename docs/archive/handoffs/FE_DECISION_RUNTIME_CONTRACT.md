@@ -2,7 +2,7 @@
 
 > This document is retained only for historical frontend-mock provenance.
 > It is **not** an authoritative contract and must not be used for integration.
-> Use [Decision Assistant API Contract — Phase 7 Freeze](decision_assistant_api_contract.md).
+> Use [Decision Assistant API Contract — Phase 7 Freeze](../../decision_assistant_api_contract.md).
 
 Base path: `/api/v1`.
 
