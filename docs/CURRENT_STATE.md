@@ -592,7 +592,16 @@ Import → Canonical DB → Forecast → BOM → Ingredient Demand → Inventory
 
 ## Next phase
 
-**R1 COMPLETE. R2 COMPLETE. R3 COMPLETE. R4 COMPLETE. R5 COMPLETE. R5 Entry Review and R5.1–R5.7 COMPLETE. R6 COMPLETE. R6 Entry Review and R6.1–R6.7 plus R6 Exit Review COMPLETE. R7 COMPLETE. R7 Entry Review, R7.1, and R7 Exit Review COMPLETE. NEXT PHASE NOT YET DEFINED. R4 decomposition direction ACCEPTED. R4 ADR blocker RESOLVED.**
+## Post-R7 Decision Package no-feasible conformance fix — COMPLETE (2026-09-12)
+
+- **CURRENT FACT:** A valid core Decision Run with no feasible candidate has `recommended_strategy=None` and status `completed_with_no_feasible_recommendation`. The package producer previously selected `{}` in that branch and persisted `critic={}`, although the current typed `DecisionPackage` contract requires `critic.status`.
+- **ACCEPTED DECISION:** The package boundary now retains the selected candidate critic unchanged when a recommendation exists; otherwise it emits a structurally valid failed aggregate critic. Findings are deduplicated by code with existing evidence retained per strategy, and warnings are a deterministic union. No candidate is selected or presented as recommended.
+- **TECHNICAL DEBT:** Nested Decision Package diagnostics remain intentionally broad JSON objects; this narrow correction does not redesign those schemas.
+- **HISTORICAL INFORMATION:** No historical Decision Run was rewritten or migrated. This is current producer conformance under ADR-007; ADR-013 continues to govern disposable SQLite state.
+- **PROPOSAL:** None. No ADR, business-feasibility, strategy-selection, warning/hard-violation, persistence, or LLM authority change is needed.
+- **Verification:** real-core zero-budget API regression plus Decision Intelligence tests: **17 passed, 1 warning**; full suite: **647 passed, 22 warnings in 245.28s**; generated OpenAPI remains **58 paths / 70 operations** with both Decision Run success responses referencing `DecisionPackage`; `compileall` and `git diff --check` passed.
+
+**R1 COMPLETE. R2 COMPLETE. R3 COMPLETE. R4 COMPLETE. R5 COMPLETE. R5 Entry Review and R5.1–R5.7 COMPLETE. R6 COMPLETE. R6 Entry Review and R6.1–R6.7 plus R6 Exit Review COMPLETE. R7 COMPLETE. R7 Entry Review, R7.1, and R7 Exit Review COMPLETE. Post-R7 Decision Package no-feasible conformance fix COMPLETE. NEXT PHASE NOT YET DEFINED. R4 decomposition direction ACCEPTED. R4 ADR blocker RESOLVED.**
 
 ## Explicitly NOT doing yet
 

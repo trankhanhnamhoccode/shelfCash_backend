@@ -34,6 +34,7 @@ def test_core_decision_package_is_persisted_and_reloaded(client, monkeypatch):
     response = client.post("/api/v1/stores/STORE_001/decision-runs", json=body, headers=headers)
     assert response.status_code == 200, response.text
     package = response.json()
+    assert package["critic"] == package["strategies"][package["recommended_strategy"]]["critic"]
     with sf() as s:
         record = s.scalar(select(IdempotencyRecordModel).where(IdempotencyRecordModel.idempotency_key == headers["Idempotency-Key"]))
         assert record is not None
@@ -151,6 +152,46 @@ def test_core_decision_package_is_persisted_and_reloaded(client, monkeypatch):
         assert record.resource_id == assistant_failure.json()["decision_run_id"]
         assert "assistant" not in json.loads(s.get(DecisionRunModel, record.resource_id).package_json)
     assert no_feasible.json()["comparison"]["recommendation_changed"] is True
+
+    # A zero budget makes every real core candidate fail feasibility.  Exercise
+    # the POST production path rather than constructing a package fixture so
+    # the persisted package and FastAPI response both cross the typed boundary.
+    no_feasible_run = client.post(
+        "/api/v1/stores/STORE_001/decision-runs",
+        json={**body, "budget_override": 0},
+        headers={"Idempotency-Key": "decision-run-no-feasible"},
+    )
+    assert no_feasible_run.status_code == 200, no_feasible_run.text
+    no_feasible_package = no_feasible_run.json()
+    assert no_feasible_package["status"] == "completed_with_no_feasible_recommendation"
+    assert no_feasible_package["recommended_strategy"] is None
+    assert no_feasible_package["recommended_plan"] == {"items": []}
+    assert not any(candidate["is_feasible"] for candidate in no_feasible_package["strategies"].values())
+    critic = no_feasible_package["critic"]
+    assert critic["status"] == "fail"
+    assert critic["findings"]
+    assert critic["checks"] == {}
+    assert critic["details"] == {}
+    expected_findings = {}
+    expected_warnings = set()
+    for strategy, candidate in sorted(no_feasible_package["strategies"].items()):
+        candidate_critic = candidate["critic"]
+        expected_warnings.update(candidate_critic["warnings"])
+        for finding in candidate_critic["findings"]:
+            expected_findings.setdefault(
+                finding["code"],
+                {"code": finding["code"], "severity": finding["severity"], "evidence": {"by_strategy": {}}},
+            )["evidence"]["by_strategy"][strategy] = finding["evidence"]
+    assert critic["findings"] == [expected_findings[code] for code in sorted(expected_findings)]
+    assert critic["warnings"] == sorted(expected_warnings)
+    assert DecisionPackage.model_validate(no_feasible_package).model_dump(mode="json") == no_feasible_package
+    with sf() as s:
+        persisted = json.loads(s.get(DecisionRunModel, no_feasible_package["decision_run_id"]).package_json)
+    assert DecisionPackage.model_validate(persisted).assistant is None
+    assert no_feasible_package == {**persisted, "assistant": None}
+    restored_no_feasible = client.get(f"/api/v1/decision-runs/{no_feasible_package['decision_run_id']}")
+    assert restored_no_feasible.status_code == 200, restored_no_feasible.text
+    assert restored_no_feasible.json() == no_feasible_package
 
 
 def test_stochastic_residual_selection_deduplicates_repeated_forecast_runs(client):

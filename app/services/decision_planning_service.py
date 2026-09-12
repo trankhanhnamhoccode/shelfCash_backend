@@ -179,6 +179,28 @@ class DecisionPlanningService:
    package["recommended_strategy"]=None;package["recommended_plan"]={"items":[]};package["business_metrics"]={};package["critic"]=candidate.get("critic",{});package["status"]="completed_with_no_feasible_recommendation"
 
  @staticmethod
+ def _package_critic(strategies,recommended):
+  """Return the selected critic or a deterministic no-feasible aggregate."""
+  if recommended:
+   return strategies[recommended]["critic"]
+
+  findings={};warnings=set()
+  for strategy in sorted(strategies):
+   critic=strategies[strategy]["critic"]
+   warnings.update(critic["warnings"])
+   for finding in critic["findings"]:
+    code=finding["code"]
+    aggregate=findings.setdefault(code,{"code":code,"severity":finding["severity"],"evidence":{"by_strategy":{}}})
+    aggregate["evidence"]["by_strategy"][strategy]=finding["evidence"]
+  return {
+   "status":"fail",
+   "findings":[findings[code] for code in sorted(findings)],
+   "warnings":sorted(warnings),
+   "checks":{},
+   "details":{},
+  }
+
+ @staticmethod
  def _decision_package(rid,store,forecast,mode,result,request,baseline,demands,scenario_metadata=None,forecast_trace=None,shortage_economics=None):
   from app.services.business_metrics_service import build_business_metrics
   def metric(sim):
@@ -195,4 +217,4 @@ class DecisionPlanningService:
   for item in selected.get("items",[]):
    if item.get("pack_count",0) and item.get("order_quantity",0) > 0: reasons.append({"code":"PACK_SIZE_ROUNDING","entity_id":item.get("ingredient_id"),"evidence":{"pack_size":item.get("pack_size"),"final_order_quantity":item.get("order_quantity")}})
   top_metrics=selected.get("business_metrics") if selected else build_business_metrics(purchase_cost=None,simulation=None,recommended=False)
-  return {"decision_run_id":rid,"store_id":store,"as_of_date":forecast.cutoff_date.isoformat(),"horizon_days":forecast.horizon_days,"status":status,"engine_mode":mode,"recommended_strategy":recommended,"business_metrics":top_metrics,"recommended_plan":{"items":selected.get("items",[])},"ingredient_demand":[{"ingredient_id":x.ingredient_id,"target_date":x.target_date.isoformat(),"unit":x.unit,"p25":float(x.p25),"p50":float(x.p50),"p75":float(x.p75),"contributions":json.loads(x.contributions_json)} for x in demands],"inventory_risk":baseline.model_dump(mode="json"),"strategies":strategies,"strategy_selection":strategy_selection,"stress_tests":selected.get("stress_tests") or [],"critic":selected.get("critic",{}),"reason_codes":reasons,"warnings":sorted(warnings),"technical_metrics":{"scenario_count":len(request.demand_scenarios),"scenario_method":scenario_metadata.get("method","quantile_design_fallback"),"random_seed":request.seed,"optimizer_type":result.provenance["candidate_engine"],"cvar_alpha":None,"core_version":"local","stochastic_saa_enabled":request.stochastic,"risk_evaluation_status":request.risk_evaluation_metadata.get("status"),"risk_evaluation_sample_count":(len(request.demand_scenarios) if request.stochastic else len(request.risk_demand_scenarios)),"baseline_engine":"lot_level_fefo_v1","scenario_diagnostics":scenario_metadata.get("diagnostics",{}),"forecast_trace":forecast_trace or {},"shortage_economics":shortage_economics or {}}}
+  return {"decision_run_id":rid,"store_id":store,"as_of_date":forecast.cutoff_date.isoformat(),"horizon_days":forecast.horizon_days,"status":status,"engine_mode":mode,"recommended_strategy":recommended,"business_metrics":top_metrics,"recommended_plan":{"items":selected.get("items",[])},"ingredient_demand":[{"ingredient_id":x.ingredient_id,"target_date":x.target_date.isoformat(),"unit":x.unit,"p25":float(x.p25),"p50":float(x.p50),"p75":float(x.p75),"contributions":json.loads(x.contributions_json)} for x in demands],"inventory_risk":baseline.model_dump(mode="json"),"strategies":strategies,"strategy_selection":strategy_selection,"stress_tests":selected.get("stress_tests") or [],"critic":DecisionPlanningService._package_critic(strategies,recommended),"reason_codes":reasons,"warnings":sorted(warnings),"technical_metrics":{"scenario_count":len(request.demand_scenarios),"scenario_method":scenario_metadata.get("method","quantile_design_fallback"),"random_seed":request.seed,"optimizer_type":result.provenance["candidate_engine"],"cvar_alpha":None,"core_version":"local","stochastic_saa_enabled":request.stochastic,"risk_evaluation_status":request.risk_evaluation_metadata.get("status"),"risk_evaluation_sample_count":(len(request.demand_scenarios) if request.stochastic else len(request.risk_demand_scenarios)),"baseline_engine":"lot_level_fefo_v1","scenario_diagnostics":scenario_metadata.get("diagnostics",{}),"forecast_trace":forecast_trace or {},"shortage_economics":shortage_economics or {}}}
