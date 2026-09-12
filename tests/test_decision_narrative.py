@@ -77,6 +77,7 @@ def test_narrative_uses_semantic_task_and_rejects_raw_schema_failure():
 
     assert malformed.calls
     assert malformed.calls[0]["kwargs"]["task"] is LLMTask.DECISION_NARRATIVE
+    assert malformed.calls[0]["kwargs"]["request_context"]["decision_run_id"] == "narrative-run"
     assert result.provider == "deterministic_fallback"
 
 

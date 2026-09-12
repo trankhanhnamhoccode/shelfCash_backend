@@ -1,6 +1,6 @@
 from app.core.canonical_schemas import CANONICAL_SCHEMAS
 from app.core.normalizer import normalize_rows
-from app.core.rule_mapper import finalize_mapping, map_sheet_rules, menu_mapping_details
+from app.core.rule_mapper import finalize_mapping, map_sheet_rules, mapping_requires_llm, menu_mapping_details
 from app.core.exceptions import MappingIncompleteError
 from app.core.validator import validate_records
 from app.schemas.llm import MappingSuggestion
@@ -13,7 +13,7 @@ class IngestionPipeline:
 
     async def suggest(self, profile):
         rule = map_sheet_rules(profile, self.confidence_threshold)
-        if rule.confidence >= self.confidence_threshold:
+        if not mapping_requires_llm(rule, self.confidence_threshold):
             return rule
         if self.llm_provider.available:
             result = await self.llm_provider.map_sheet(profile, CANONICAL_SCHEMAS, rule)

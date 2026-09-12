@@ -2,13 +2,13 @@ from fastapi import APIRouter, Depends, Header, Query
 
 from app.core.canonical_schemas import CANONICAL_SCHEMAS
 from app.dependencies import get_menu_service, require_api_key
-from app.schemas.menu import ComponentsReplace
+from app.schemas.menu import ComponentsReplace, MenuProductResponse, MenuResponse
 
 
 router = APIRouter(tags=["menu"], dependencies=[Depends(require_api_key)])
 
 
-@router.get("/stores/{store_id}/menu")
+@router.get("/stores/{store_id}/menu", response_model=MenuResponse)
 def get_menu(
     store_id: str,
     status: str = "active",
@@ -21,7 +21,7 @@ def get_menu(
     return service.menu(store_id, status, item_type, search, page, page_size)
 
 
-@router.put("/stores/{store_id}/products/{product_id}/components")
+@router.put("/stores/{store_id}/products/{product_id}/components", response_model=MenuProductResponse)
 def replace_components(
     store_id: str,
     product_id: str,

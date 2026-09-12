@@ -1,7 +1,6 @@
 """Read-only, grounded natural-language narration for persisted decision facts."""
 from __future__ import annotations
 
-import asyncio
 import logging
 import re
 import time
@@ -21,6 +20,7 @@ from app.decision_intelligence.narrative_retrieval import retrieve_narrative_evi
 from app.decision_intelligence.semantic_evidence import DecisionSemanticEvidenceBuilder, SemanticFact
 from app.decision_intelligence.style_examples import retrieve_style_examples
 from app.llm.tasks import LLMFailureStage, LLMTask
+from app.llm.runtime import generate_json_sync
 
 logger = logging.getLogger("shelfcash.decision_narrative")
 
@@ -431,23 +431,11 @@ class DecisionNarrativeProvider:
                     "ingredient_name": _ingredient_display_name(brief, retrieval.target_ingredient_id),
                     "scope": "one_ingredient_only",
                 }
-            try:
-                loop = asyncio.get_running_loop()
-            except RuntimeError:
-                loop = None
-
-            if loop and loop.is_running():
-                import concurrent.futures
-                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                    raw = pool.submit(lambda: asyncio.run(self.llm_provider.generate_json(
-                        SYSTEM_PROMPT, payload, task=LLMTask.DECISION_NARRATIVE,
-                        request_context=request_context,
-                    ))).result()
-            else:
-                raw = asyncio.run(self.llm_provider.generate_json(
-                    SYSTEM_PROMPT, payload, task=LLMTask.DECISION_NARRATIVE,
-                    request_context=request_context,
-                ))
+            raw = generate_json_sync(
+                self.llm_provider, SYSTEM_PROMPT, payload,
+                task=LLMTask.DECISION_NARRATIVE,
+                request_context=request_context,
+            )
 
             logger.info("decision_narrative_qwen_completed request_id=%s decision_run_id=%s task=%s", request_id, brief.decision_run_id, LLMTask.DECISION_NARRATIVE.value)
             try:

@@ -13,6 +13,10 @@ class StrictBOMContract(BaseModel):
 
 
 class RecipeRecord(StrictBOMContract): # Một dòng nguyên liệu trong một version của công thức của một sản phẩm.
+    # The pure DataFrame boundary permits historical rows without a persisted
+    # line identity.  When present this is the canonical recipe-line key and
+    # must survive to the source contribution unchanged.
+    recipe_line_id: str | None = None
     recipe_id: str = Field(min_length=1) # 
     product_id: str = Field(min_length=1)
     ingredient_id: str = Field(min_length=1)
@@ -93,6 +97,7 @@ class IngredientDemandSource(StrictBOMContract): # Một product đã đóng gó
     # Nhóm 2 : demand nguyên liệu này bắt nguồn từ recipe nào của product đó :
     recipe_id: str
     recipe_version: str
+    recipe_line_id: str | None = None
     # Nhóm 3 : demand nguyên liệu này bắt nguồn từ forecast nào của product đó :
     forecast_p25: float = Field(ge=0)
     forecast_p50: float = Field(ge=0)

@@ -25,9 +25,22 @@ def test_decision_assistant_routes_and_openapi_response_models_are_frozen():
 
     raw_create = paths[f"{BASE}/stores/{{store_id}}/decision-runs"]["post"]["responses"]["200"]["content"]["application/json"]["schema"]
     raw_read = paths[f"{BASE}/decision-runs/{{decision_run_id}}"]["get"]["responses"]["200"]["content"]["application/json"]["schema"]
-    # Route-specific generated titles differ; object typing is the meaningful contract.
-    assert raw_create["type"] == raw_read["type"] == "object"
-    assert raw_create["additionalProperties"] is raw_read["additionalProperties"] is True
+    assert raw_create == raw_read == {"$ref": "#/components/schemas/DecisionPackage"}
+    package = document["components"]["schemas"]["DecisionPackage"]
+    assert set(package["required"]) == {
+        "decision_run_id", "store_id", "as_of_date", "horizon_days", "status",
+        "engine_mode", "business_metrics", "recommended_plan", "ingredient_demand",
+        "inventory_risk", "strategies", "strategy_selection", "stress_tests",
+        "critic", "reason_codes", "warnings", "technical_metrics",
+    }
+    assert package["properties"]["recommended_strategy"]["anyOf"][1] == {"type": "null"}
+    assert package["properties"]["assistant"]["anyOf"][1] == {"type": "null"}
+    assert package["properties"]["recommended_plan"] == {
+        "$ref": "#/components/schemas/DecisionPackagePlan"
+    }
+    assert package["properties"]["technical_metrics"] == {
+        "$ref": "#/components/schemas/DecisionPackageTechnicalMetrics"
+    }
 
     responses = {
         "brief": "DecisionBriefFacts",

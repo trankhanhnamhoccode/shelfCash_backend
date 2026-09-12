@@ -6,6 +6,18 @@ from pydantic import BaseModel, ConfigDict, Field
 from app.dependencies import get_completion_service, get_decision_planning_service, get_forecast_service, require_api_key
 from app.schemas.forecast import LegacyForecastMetadataResponse, LegacyForecastResultResponse
 from app.schemas.planning import LegacyPlanMetadataResponse, LegacyPlanResultResponse
+from app.schemas.completion import (
+    CalendarWriteResultResponse,
+    InventoryAdjustmentResultResponse,
+    InventoryCountResultResponse,
+    PurchaseBatchResultResponse,
+    PurchaseOrderCreateResponse,
+    PurchaseOrderPageResponse,
+    PurchaseOrderResponse,
+    SalesBatchResultResponse,
+    StoreSettingsResponse,
+    SupplierTermWriteResponse,
+)
 
 class Strict(BaseModel): model_config=ConfigDict(extra="forbid")
 class CountLine(Strict): lot_id:str;counted_quantity:Decimal=Field(ge=0,allow_inf_nan=False);unit:str;note:str|None=None
@@ -65,13 +77,13 @@ def idem(v:str|None=Header(None,alias="Idempotency-Key")):return v
 def bootstrap(store_id:str,s=Depends(get_completion_service)):return s.bootstrap(store_id)
 @router.get("/stores/{store_id}/dashboard")
 def dashboard(store_id:str,s=Depends(get_completion_service)):return s.dashboard(store_id)
-@router.post("/stores/{store_id}/inventory-counts",status_code=201)
+@router.post("/stores/{store_id}/inventory-counts",status_code=201,response_model=InventoryCountResultResponse)
 def counts(store_id:str,b:CountIn,k=Depends(idem),s=Depends(get_completion_service)):return s.write("inventory_count",store_id,b,k)
-@router.post("/stores/{store_id}/inventory-adjustments",status_code=201)
+@router.post("/stores/{store_id}/inventory-adjustments",status_code=201,response_model=InventoryAdjustmentResultResponse)
 def adjustments(store_id:str,b:AdjustmentIn,k=Depends(idem),s=Depends(get_completion_service)):return s.write("inventory_adjustment",store_id,b,k)
-@router.post("/stores/{store_id}/sales-history/batch",status_code=201)
+@router.post("/stores/{store_id}/sales-history/batch",status_code=201,response_model=SalesBatchResultResponse)
 def sales_batch(store_id:str,b:SalesBatchIn,k=Depends(idem),s=Depends(get_completion_service)):return s.write("sales_batch",store_id,b,k)
-@router.post("/stores/{store_id}/purchase-history/batch",status_code=201)
+@router.post("/stores/{store_id}/purchase-history/batch",status_code=201,response_model=PurchaseBatchResultResponse)
 def purchase_batch(store_id:str,b:PurchaseBatchIn,k=Depends(idem),s=Depends(get_completion_service)):return s.write("purchase_batch",store_id,b,k)
 @router.get("/stores/{store_id}/supplier-constraints",response_model=SupplierTermList)
 def supplier_get(store_id:str,s=Depends(get_completion_service)):return s.supplier_list(store_id)
@@ -87,13 +99,13 @@ def inventory_constraints_patch(store_id:str,constraint_id:str,b:InventoryConstr
 @router.post("/stores/{store_id}/inventory-constraints/{constraint_id}/deactivate",response_model=InventoryConstraintWriteOut)
 def inventory_constraints_deactivate(store_id:str,constraint_id:str,b:InventoryConstraintDeactivateIn,k=Depends(idem),s=Depends(get_completion_service)):
  return s.inventory_constraint_write("deactivate",store_id,b,k,constraint_id)
-@router.post("/stores/{store_id}/supplier-constraints",status_code=201)
+@router.post("/stores/{store_id}/supplier-constraints",status_code=201,response_model=SupplierTermWriteResponse)
 def supplier_post(store_id:str,b:SupplierTermIn,k=Depends(idem),s=Depends(get_completion_service)):return s.write("supplier_create",store_id,b,k)
-@router.put("/stores/{store_id}/supplier-constraints/{constraint_id}")
+@router.put("/stores/{store_id}/supplier-constraints/{constraint_id}",response_model=SupplierTermWriteResponse)
 def supplier_put(store_id:str,constraint_id:str,b:SupplierTermIn,k=Depends(idem),s=Depends(get_completion_service)):return s.write("supplier_update",store_id,b,k,constraint_id)
-@router.put("/stores/{store_id}/settings")
+@router.put("/stores/{store_id}/settings",response_model=StoreSettingsResponse)
 def settings(store_id:str,b:SettingsIn,s=Depends(get_completion_service)):return s.write("settings",store_id,b,None)
-@router.put("/stores/{store_id}/calendar-features")
+@router.put("/stores/{store_id}/calendar-features",response_model=CalendarWriteResultResponse)
 def calendar(store_id:str,b:CalendarIn,s=Depends(get_completion_service)):return s.write("calendar",store_id,b,None)
 @router.post("/stores/{store_id}/forecast-runs", response_model=LegacyForecastMetadataResponse)
 def forecast_post(store_id:str,b:ForecastIn,request:Request,k=Depends(idem),s=Depends(get_forecast_service)):
@@ -109,15 +121,15 @@ def plan_post(store_id:str,b:PlanIn,request:Request,k=Depends(idem),s=Depends(ge
 def plan_get(store_id:str,plan_run_id:str,s=Depends(get_decision_planning_service)):return s.get_legacy_plan_metadata(store_id,plan_run_id)
 @router.get("/stores/{store_id}/plan-runs/{plan_run_id}/result",response_model=LegacyPlanResultResponse)
 def plan_result(store_id:str,plan_run_id:str,s=Depends(get_decision_planning_service)):return s.get_legacy_plan_result(store_id,plan_run_id)
-@router.post("/stores/{store_id}/purchase-orders",status_code=201)
+@router.post("/stores/{store_id}/purchase-orders",status_code=201,response_model=PurchaseOrderCreateResponse)
 def po_post(store_id:str,b:POCreateIn,k=Depends(idem),s=Depends(get_completion_service)):return s.po("create",store_id,None,b,k)
-@router.get("/stores/{store_id}/purchase-orders")
+@router.get("/stores/{store_id}/purchase-orders",response_model=PurchaseOrderPageResponse)
 def po_list(store_id:str,s=Depends(get_completion_service)):return s.po("list",store_id)
-@router.get("/stores/{store_id}/purchase-orders/{po_id}")
+@router.get("/stores/{store_id}/purchase-orders/{po_id}",response_model=PurchaseOrderResponse)
 def po_get(store_id:str,po_id:str,s=Depends(get_completion_service)):return s.po("get",store_id,po_id)
-@router.patch("/stores/{store_id}/purchase-orders/{po_id}")
+@router.patch("/stores/{store_id}/purchase-orders/{po_id}",response_model=PurchaseOrderResponse)
 def po_patch(store_id:str,po_id:str,b:POPatchIn,s=Depends(get_completion_service)):return s.po("patch",store_id,po_id,b)
-@router.post("/stores/{store_id}/purchase-orders/{po_id}/confirm")
+@router.post("/stores/{store_id}/purchase-orders/{po_id}/confirm",response_model=PurchaseOrderResponse)
 def po_confirm(store_id:str,po_id:str,b:POConfirmIn,s=Depends(get_completion_service)):return s.po("confirm",store_id,po_id,b)
-@router.post("/stores/{store_id}/purchase-orders/{po_id}/receive",status_code=201)
+@router.post("/stores/{store_id}/purchase-orders/{po_id}/receive",status_code=201,response_model=PurchaseOrderResponse)
 def po_receive(store_id:str,po_id:str,b:POReceiveIn,k=Depends(idem),s=Depends(get_completion_service)):return s.po("receive",store_id,po_id,b,k)

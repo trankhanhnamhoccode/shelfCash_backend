@@ -14,6 +14,7 @@ from app.decision_intelligence.what_if_evidence import (
     WhatIfNarrativeProvider,
     build_what_if_facts,
 )
+from app.llm.tasks import LLMTask
 
 
 def _brief(*, cost, quantity, available=True, strategy="balanced", risks=()):
@@ -89,9 +90,11 @@ class _Gateway:
     def __init__(self, response):
         self.response = response
         self.payload = None
+        self.kwargs = None
 
-    async def generate_json(self, _system, payload, **_kwargs):
+    async def generate_json(self, _system, payload, **kwargs):
         self.payload = payload
+        self.kwargs = kwargs
         return self.response(payload)
 
 
@@ -120,6 +123,8 @@ def test_qwen_receives_precomputed_facts_and_accepts_grounded_intervention_claim
     assert gateway.payload["communication_plan"]["mutation"]
     assert gateway.payload["communication_plan"]["primary_outcome"]
     assert all("calculate" not in str(item).lower() for item in gateway.payload["evidence"])
+    assert gateway.kwargs["task"] is LLMTask.DECISION_NARRATIVE
+    assert gateway.kwargs["request_context"]["what_if"] is True
 
 
 def test_wrong_delta_or_unsupported_mechanism_falls_back():

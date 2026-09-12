@@ -77,6 +77,55 @@ def _seed_predictable_state(session_factory, settings, tmp_path):
     return artifact
 
 
+def _persisted_snapshot(session_factory, forecast_run_id):
+    with session_factory() as session:
+        run = session.get(ForecastRunModel, forecast_run_id)
+        predictions = list(session.scalars(
+            select(ForecastPredictionModel)
+            .where(ForecastPredictionModel.forecast_run_id == forecast_run_id)
+            .order_by(ForecastPredictionModel.target_date, ForecastPredictionModel.product_id)
+        ))
+    return {
+        "run": {
+            "store_id": run.store_id,
+            "cutoff_date": run.cutoff_date,
+            "horizon_days": run.horizon_days,
+            "model_version": run.model_version,
+            "status": run.status,
+            "engine_status": run.engine_status,
+            "warnings_json": run.warnings_json,
+            "failure_code": run.failure_code,
+        },
+        "predictions": [
+            {
+                "product_id": row.product_id,
+                "product_name": row.product_name,
+                "target_date": row.target_date,
+                "horizon": row.horizon,
+                "p25": float(row.p25),
+                "p50": float(row.p50),
+                "p75": float(row.p75),
+                "interval_lower": float(row.interval_lower),
+                "interval_upper": float(row.interval_upper),
+                "baseline_p50": float(row.baseline_p50),
+                "calibration_source": row.calibration_source,
+                "warnings_json": row.warnings_json,
+            }
+            for row in predictions
+        ],
+    }
+
+
+def _public_snapshot(payload):
+    return {
+        key: payload[key]
+        for key in (
+            "store_id", "forecast_date", "forecast_horizon", "model_version",
+            "status", "warnings", "predictions",
+        )
+    }
+
+
 def test_shadow_disabled_only_calls_production(session_factory, tmp_path):
     shadow = _ShadowProvider(); service, production, settings = _service(session_factory, tmp_path, shadow, enabled=False)
     _seed_predictable_state(session_factory, settings, tmp_path)
@@ -100,6 +149,67 @@ def test_shadow_failure_isolated_and_does_not_persist_rows(session_factory, tmp_
         assert session.scalar(select(func.count()).select_from(ForecastRunModel)) == 1
         assert session.scalar(select(func.count()).select_from(ForecastPredictionModel)) == 1
         assert session.scalar(select(func.count()).select_from(ForecastResidualModel)) == 0
+
+
+def test_shadow_enabled_keeps_public_and_persisted_production_result_identical(client, tmp_path):
+    """The optional observer may run, but cannot alter the canonical HTTP result."""
+    service = client.app.state.forecast_service
+    settings = client.app.state.settings
+    version = "boundary-v1"
+    artifact = settings.forecast_artifact_root / "STORE_001" / version
+    artifact.mkdir(parents=True)
+    with client.app.state.session_factory() as session:
+        product = ProductModel(
+            product_id="boundary-product", store_id="STORE_001", product="Boundary tea",
+            normalized_name="boundary-tea", active=True, source="test",
+        )
+        session.add(product)
+        session.add(SalesDailyModel(
+            sales_record_id=str(uuid4()), store_id="STORE_001", date=date(2026, 8, 1),
+            product_id=product.product_id, quantity=Decimal("1"), promotion=False,
+            is_stockout=False, source="test",
+        ))
+        session.add(ForecastModelVersionModel(
+            model_version_id=str(uuid4()), store_id="STORE_001", model_version=version,
+            status="ready", is_active=False, created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        ))
+        session.commit()
+
+    body = {
+        "store_id": "STORE_001", "cutoff_date": "2026-08-01",
+        "forecast_horizon": 1, "model_version": version,
+    }
+    settings.forecast_shadow_enabled = False
+    production_off, shadow_off = _ProductionProvider(), _ShadowProvider()
+    client.app.state.forecast_service = ForecastService(
+        client.app.state.session_factory, settings,
+        production_provider=production_off, shadow_provider=shadow_off,
+    )
+    off = client.post("/api/v1/forecasts", json=body)
+    assert off.status_code == 201, off.text
+    off_payload = off.json()
+    off_persisted = _persisted_snapshot(
+        client.app.state.session_factory, off_payload["forecast_run_id"],
+    )
+
+    settings.forecast_shadow_enabled = True
+    (settings.forecast_shadow_artifact_root / "STORE_001" / f"{version}--shelfcash_forecast").mkdir(parents=True, exist_ok=True)
+    production_on, shadow_on = _ProductionProvider(), _ShadowProvider()
+    client.app.state.forecast_service = ForecastService(
+        client.app.state.session_factory, settings,
+        production_provider=production_on, shadow_provider=shadow_on,
+    )
+    on = client.post("/api/v1/forecasts", json=body)
+    assert on.status_code == 201, on.text
+    on_payload = on.json()
+
+    assert _public_snapshot(on_payload) == _public_snapshot(off_payload)
+    assert _persisted_snapshot(
+        client.app.state.session_factory, on_payload["forecast_run_id"],
+    ) == off_persisted
+    assert production_off.calls == production_on.calls == 1
+    assert shadow_off.calls == 0 and shadow_on.calls == 1
 
 
 def test_comparator_reports_drift_without_marking_it_incompatible():

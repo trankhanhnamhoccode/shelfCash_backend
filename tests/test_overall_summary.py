@@ -596,7 +596,8 @@ def test_brief_adds_canonical_horizon_summary_and_old_run_fallback_without_gatew
         "aggregation_method": "sum_daily_quantiles",
     }]
     assert body["assistant_summary"]["source"] == "deterministic_fallback"
-    assert "assistant" not in client.get("/api/v1/decision-runs/phase2-old-run").json()
+    with client.app.state.session_factory() as session:
+        assert "assistant" not in json.loads(session.get(DecisionRunModel, "phase2-old-run").package_json)
 
 
 def test_summary_generation_is_not_repeated_by_brief_reads(client, monkeypatch):

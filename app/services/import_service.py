@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from sqlalchemy import update
 from sqlalchemy.exc import IntegrityError
 
 from app.core.canonical_schemas import CANONICAL_SCHEMAS
@@ -392,6 +393,64 @@ class ImportService:
                 session.rollback()
                 raise
 
+    def _acquire_processing_claim(self, import_id: str) -> tuple[bool, dict[str, Any] | None]:
+        """Atomically claim eligible work before opening the expensive-work session."""
+        with self.session_factory() as session:
+            repository = NormalizedImportRepository(session)
+            job = self._require_job(repository, import_id)
+            if job.status == "completed" and job.result_json and job.business_persisted_at:
+                session.commit()
+                return False, repository.to_record(job)
+            if job.status == "processing":
+                raise ImportProcessingError(details={"import_id": import_id})
+            if job.status not in {"confirmed", "completed"}:
+                return False, None
+
+            claim = session.execute(
+                update(ImportJobModel)
+                .where(
+                    ImportJobModel.import_id == import_id,
+                    ImportJobModel.status.in_(("confirmed", "completed")),
+                )
+                .values(
+                    status="processing",
+                    processing_started_at=datetime.now(timezone.utc),
+                )
+            )
+            if claim.rowcount == 1:
+                session.commit()
+                return True, None
+            session.rollback()
+        return self._acquire_processing_claim(import_id)
+
+    def _record_processing_started(
+        self, import_id: str, *, claim_acquired: bool
+    ) -> None:
+        """Persist the start audit in a short transaction before pipeline work."""
+        with self.session_factory() as session:
+            repository = NormalizedImportRepository(session)
+            job = self._require_job(repository, import_id)
+            if job.status == "completed" and job.result_json and job.business_persisted_at:
+                return
+            if job.status == "processing" and not claim_acquired:
+                raise ImportProcessingError(details={"import_id": import_id})
+            if job.status not in {"confirmed", "completed", "processing"}:
+                raise InvalidStateTransitionError(
+                    "Import pháº£i Ä‘Æ°á»£c xÃ¡c nháº­n mapping trÆ°á»›c khi xá»­ lÃ½.",
+                    {
+                        "current_status": job.status,
+                        "required_status": "confirmed",
+                    },
+                )
+            record = repository.to_record(job)
+            self._audit(
+                session,
+                action="import_processing_started",
+                record=record,
+                file_count=len(repository.files(import_id)),
+            )
+            session.commit()
+
     def process(self, import_id, *, policy: str = "atomic"):
         import_id = str(import_id)
         if policy not in {"atomic", "partial_success", "preview_only"}:
@@ -402,34 +461,34 @@ class ImportService:
         )
         result_path = self.settings.result_dir / f"{import_id}.json"
         temp_path = self.settings.result_dir / f".{import_id}.{uuid4().hex}.tmp"
+        claim_acquired, replay = self._acquire_processing_claim(import_id)
+        if replay is not None:
+            return replay
+        try:
+            self._record_processing_started(
+                import_id, claim_acquired=claim_acquired
+            )
+        except Exception as exc:
+            if claim_acquired:
+                self._mark_failed(import_id, exc)
+            raise
         with self.session_factory() as session:
             repository = NormalizedImportRepository(session)
             job = self._require_job(repository, import_id)
             if job.status == "completed" and job.result_json and job.business_persisted_at:
                 session.commit()
                 return repository.to_record(job)
-            if job.status == "processing":
+            if job.status == "processing" and not claim_acquired:
                 raise ImportProcessingError(details={"import_id": import_id})
-            if job.status not in {"confirmed", "completed"}:
+            if job.status not in {"confirmed", "completed", "processing"}:
                 raise InvalidStateTransitionError(
                     "Import phải được xác nhận mapping trước khi xử lý.",
                     {
                         "current_status": job.status,
                         "required_status": "confirmed",
                     },
-                )
+            )
             try:
-                job.status = "processing"
-                job.processing_started_at = datetime.now(timezone.utc)
-                session.flush()
-                record = repository.to_record(job)
-                self._audit(
-                    session,
-                    action="import_processing_started",
-                    record=record,
-                    file_count=len(repository.files(import_id)),
-                )
-
                 canonical_data = {
                     kind: [] for kind in CANONICAL_SCHEMAS if kind != "unknown"
                 }

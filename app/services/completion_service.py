@@ -2,7 +2,7 @@ import json
 from datetime import date, timedelta
 from decimal import Decimal
 from uuid import uuid4
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from app.core.exceptions import (
  BudgetExceededError, BusinessIdentityConflictError, DuplicateRequestError, InvalidStateTransitionError,
@@ -301,6 +301,24 @@ class CompletionService:
   settings=s.scalar(select(StoreSettingsModel).where(StoreSettingsModel.store_id==store))
   bp=BudgetPeriodModel(budget_period_id=str(uuid4()),store_id=store,period=period,monthly_budget=settings.monthly_budget if settings else 0,reserved_budget=0,spent_budget=0)
   s.add(bp);s.flush();return bp
+ def _claim_receive_version(self,s,store,po,expected_version):
+  claimed=s.execute(update(PurchaseOrderModel).where(PurchaseOrderModel.po_id==po.po_id,PurchaseOrderModel.store_id==store,PurchaseOrderModel.version==expected_version,PurchaseOrderModel.status.in_({"ordered","partially_received"})).values(version=PurchaseOrderModel.version+1).execution_options(synchronize_session=False))
+  if claimed.rowcount==1:
+   s.refresh(po);return
+  s.rollback()
+  current=s.scalar(select(PurchaseOrderModel).where(PurchaseOrderModel.store_id==store,PurchaseOrderModel.po_id==po.po_id))
+  if not current:raise ResourceNotFoundError(details={"resource":"purchase_order"})
+  if current.version!=expected_version:raise VersionConflictError(details={"expected_version":expected_version,"current_version":current.version})
+  raise InvalidStateTransitionError()
+ def _claim_confirm_version(self,s,store,po,expected_version):
+  claimed=s.execute(update(PurchaseOrderModel).where(PurchaseOrderModel.po_id==po.po_id,PurchaseOrderModel.store_id==store,PurchaseOrderModel.version==expected_version,PurchaseOrderModel.status=="draft").values(version=PurchaseOrderModel.version+1).execution_options(synchronize_session=False))
+  if claimed.rowcount==1:
+   s.refresh(po);return
+  s.rollback()
+  current=s.scalar(select(PurchaseOrderModel).where(PurchaseOrderModel.store_id==store,PurchaseOrderModel.po_id==po.po_id))
+  if not current:raise ResourceNotFoundError(details={"resource":"purchase_order"})
+  if current.version!=expected_version:raise VersionConflictError(details={"expected_version":expected_version,"current_version":current.version})
+  raise InvalidStateTransitionError()
  def po(self,action,store,po_id=None,body=None,key=None):
   path=f"/api/v1/stores/{store}/purchase-orders"+(f"/{po_id}" if po_id else "")+("/receive" if action=="receive" else "")
   with self.factory() as s:
@@ -356,14 +374,16 @@ class CompletionService:
     elif action=="confirm":
      if po.status!="draft":raise InvalidStateTransitionError()
      if body.confirmed_at.tzinfo is None:raise ValidationError("confirmed_at phải có timezone.")
+     self._claim_confirm_version(s,store,po,body.version)
      bp=self._budget(s,store,body.confirmed_at.date().strftime("%Y-%m"));po.total=sum(x.cost for x in lines.values());remaining=bp.monthly_budget-bp.reserved_budget-bp.spent_budget
      if po.total>remaining:raise BudgetExceededError(details={"remaining_budget":remaining,"po_total":po.total})
-     bp.reserved_budget+=po.total;po.status="ordered";po.confirmed_at=body.confirmed_at;po.budget_after=remaining-po.total;po.version+=1
+     bp.reserved_budget+=po.total;po.status="ordered";po.confirmed_at=body.confirmed_at;po.budget_after=remaining-po.total
     elif action=="receive":
      if po.status not in {"ordered","partially_received"}:raise InvalidStateTransitionError()
      if body.received_at.tzinfo is None:raise ValidationError("received_at phải có timezone.")
      if po.confirmed_at and body.received_at.replace(tzinfo=None)<po.confirmed_at.replace(tzinfo=None):raise ValidationError("received_at trước confirmed_at.")
      if len({x.po_line_id for x in body.lines})!=len(body.lines):raise ValidationError("po_line_id bị lặp.")
+     self._claim_receive_version(s,store,po,body.version)
      bp=self._budget(s,store,po.confirmed_at.date().strftime("%Y-%m"));received_cost=0;receipt_date=body.received_at.date()
      for received_line in body.lines:
       line=lines.get(received_line.po_line_id)
@@ -391,7 +411,7 @@ class CompletionService:
      if received_cost>bp.reserved_budget:raise ValidationError("Budget reservation không đủ.")
      bp.reserved_budget-=received_cost;bp.spent_budget+=received_cost
      complete=all(Decimal(x.received_quantity)==Decimal(x.ordered_quantity) for x in lines.values())
-     po.status="received" if complete else "partially_received";po.received_at=body.received_at if complete else None;po.version+=1
+     po.status="received" if complete else "partially_received";po.received_at=body.received_at if complete else None
     else:raise ValidationError("Unknown PO action.")
    if action == "receive":IngredientExpiryClassificationService(s).recompute(store)
    if action != "create":

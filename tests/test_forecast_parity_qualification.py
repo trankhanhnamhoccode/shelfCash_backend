@@ -15,10 +15,12 @@ from app.forecasting import (
 )
 from shelfcash_core import ForecastConfig
 from shelfcash_core.calibration.crossing import correct_quantile_crossing as existing_crossing
+from shelfcash_core.exceptions import DataValidationError as ExistingDataValidationError
 from shelfcash_core.pipeline.training_pipeline import _eligible_rows as existing_eligible
 from shelfcash_core.pipeline.training_pipeline import _prepare_modelling_table as existing_prepare
 from shelfcash_forecast.calibration.crossing import correct_quantile_crossing as shadow_crossing
 from shelfcash_forecast.config import ForecastConfig as ShadowForecastConfig
+from shelfcash_forecast.exceptions import DataValidationError as ShadowDataValidationError
 from shelfcash_forecast.pipeline.training_pipeline import _eligible_rows as shadow_eligible
 from shelfcash_forecast.pipeline.training_pipeline import _prepare_modelling_table as shadow_prepare
 
@@ -125,7 +127,22 @@ def test_edge_case_and_crossing_parity(tmp_path):
     shadow_provider.train(canonical_data, shadow_artifact, config=config, model_version="shadow-edge")
     existing_prediction = existing_provider.predict(canonical_data, existing_artifact, cutoff, 1)
     shadow_prediction = shadow_provider.predict(canonical_data, shadow_artifact, cutoff, 1)
+    report = prediction_parity_report(existing_prediction, shadow_prediction)
+    assert report["structural"]["compatible"] is True
+    assert all(values["max_absolute_drift"] == pytest.approx(0.0) for values in report["metrics"].values())
     existing_short = next(item for item in existing_prediction.predictions if item.product_id == "product-short")
     shadow_short = next(item for item in shadow_prediction.predictions if item.product_id == "product-short")
     assert existing_short.warnings == shadow_short.warnings
     assert {"UNSEEN_PRODUCT", "INSUFFICIENT_HISTORY"}.issubset(existing_short.warnings)
+
+    # Zero qualifying history is an explicit validation failure, not a
+    # zero-value prediction. Both independently implemented providers receive
+    # the same canonical input and must preserve that failure boundary.
+    zero_history = {
+        "sales_history": pd.DataFrame(columns=canonical_data["sales_history"].columns),
+        "calendar_features": canonical_data["calendar_features"],
+    }
+    with pytest.raises(ExistingDataValidationError, match="sales_history h"):
+        existing_provider.predict(zero_history, existing_artifact, cutoff, 1)
+    with pytest.raises(ShadowDataValidationError, match="sales_history h"):
+        shadow_provider.predict(zero_history, shadow_artifact, cutoff, 1)

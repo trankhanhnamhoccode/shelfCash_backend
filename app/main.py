@@ -15,6 +15,7 @@ from app.core.ingestion_pipeline import IngestionPipeline
 from app.core.request_id import RequestIdMiddleware
 from app.db.session import create_engine_from_settings, create_session_factory
 from app.llm.factory import create_llm_provider
+from app.openapi import build_openapi
 from app.services.import_service import ImportService
 from app.services.catalog_service import CatalogApiService, RecipeApiService
 from app.services.operational_service import OperationalService
@@ -99,6 +100,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             engine.dispose()
 
     app = FastAPI(title=active_settings.app_name, lifespan=lifespan)
+    app.openapi = lambda: build_openapi(app)
     app.add_middleware(RequestIdMiddleware)
     app.add_middleware(
         CORSMiddleware, allow_origins=active_settings.cors_origins, allow_credentials=True,

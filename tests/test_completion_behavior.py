@@ -1,5 +1,7 @@
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
+from concurrent.futures import ThreadPoolExecutor
+import threading
 from uuid import uuid4
 
 from sqlalchemy import func, select
@@ -14,6 +16,10 @@ from app.models.operations import (
     BudgetPeriodModel, ForecastRunModel, PlanRunModel, RecommendationModel,
     PurchaseOrderModel, PurchaseOrderLineModel,
 )
+from app.models.audit_log import AuditLogModel
+from app.api.completion import POConfirmIn, POReceiveIn
+from app.core.exceptions import VersionConflictError
+from app.services.audit_service import AuditService
 
 
 def _ingredient(session_factory, store="STORE_001", ident="ing-1", unit="kg"):
@@ -239,6 +245,299 @@ def test_purchase_order_budget_and_inventory_state_machine(client, session_facto
     inventory = client.get("/api/v1/stores/STORE_001/inventory").json()["items"]
     assert inventory[0]["received_date"] == receive_body["received_at"][:10]
     assert inventory[0]["received_date_status"] == "declared"
+
+
+def test_purchase_order_receive_concurrency_allows_one_version_winner(client, session_factory, monkeypatch):
+    """Two independent receive sessions must not double-apply additive effects."""
+    _ingredient(session_factory)
+    _supplier(session_factory)
+    client.put("/api/v1/stores/STORE_001/settings", json={
+        "monthly_budget": 10_000, "forecast_horizon": 7,
+        "default_strategy": "balanced", "version": 1,
+    })
+    now = datetime.now(timezone.utc)
+    with session_factory() as session:
+        forecast_id, plan_id, recommendation_id = (str(uuid4()) for _ in range(3))
+        session.add_all([
+            SupplierIngredientTermModel(
+                constraint_id=str(uuid4()), store_id="STORE_001", supplier_id="sup-1",
+                ingredient_id="ing-1", unit_cost=100, moq=Decimal("1"), pack_size=Decimal("1"),
+                lead_time_days=1, unit="kg", version=1, active=True, source="test",
+            ),
+            ForecastRunModel(
+                forecast_run_id=forecast_id, store_id="STORE_001", cutoff_date=date.today(),
+                horizon_days=7, quantiles_json="[0.25,0.5,0.75]", scope_json="{}",
+                use_latest_calendar=True, status="completed", engine_status="test_adapter", request_hash="f",
+            ),
+            PlanRunModel(
+                plan_run_id=plan_id, store_id="STORE_001", forecast_run_id=forecast_id,
+                strategy="balanced", budget_limit=10_000, as_of_date=date.today(),
+                include_open_purchase_orders=True, status="completed", engine_status="test_adapter",
+                request_hash="p", warnings_json="[]",
+            ),
+            RecommendationModel(
+                recommendation_id=recommendation_id, plan_run_id=plan_id, store_id="STORE_001",
+                ingredient_id="ing-1", unit="kg", order_quantity=Decimal("10"), unit_cost=100,
+                cost=1000, supplier_id="sup-1", moq=Decimal("1"), pack_size=Decimal("1"),
+                lead_time_days=1,
+            ),
+        ])
+        session.commit()
+    draft = client.post("/api/v1/stores/STORE_001/purchase-orders", json={
+        "plan_run_id": plan_id, "lines": [{"recommendation_id": recommendation_id}],
+    }).json()["orders"][0]
+    confirmed = client.post(
+        f"/api/v1/stores/STORE_001/purchase-orders/{draft['po_id']}/confirm",
+        json={"version": 1, "confirmed_at": now.isoformat()},
+    ).json()
+    po_line_id = confirmed["lines"][0]["po_line_id"]
+    service = client.app.state.completion_service
+    original_claim = service._claim_receive_version
+    both_read_before_claim = threading.Barrier(2)
+
+    def synchronize_before_claim(session, store, po, expected_version):
+        both_read_before_claim.wait(timeout=10)
+        return original_claim(session, store, po, expected_version)
+
+    monkeypatch.setattr(service, "_claim_receive_version", synchronize_before_claim)
+
+    def receive(delivery_reference: str, lot_code: str):
+        try:
+            return "success", service.po("receive", "STORE_001", draft["po_id"], POReceiveIn(
+                version=2, received_at=(now + timedelta(hours=1)), delivery_reference=delivery_reference,
+                lines=[{"po_line_id": po_line_id, "lots": [{
+                    "quantity": "10", "expiry_date": date.today() + timedelta(days=2),
+                    "supplier_lot_code": lot_code,
+                }]}],
+            ))
+        except VersionConflictError as exc:
+            return "conflict", exc
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first, second = list(executor.map(
+            lambda args: receive(*args), (("R6.2-A", "R6.2-LOT-A"), ("R6.2-B", "R6.2-LOT-B")),
+        ))
+
+    outcomes = [first, second]
+    assert [outcome for outcome, _ in outcomes].count("success") == 1
+    assert [outcome for outcome, _ in outcomes].count("conflict") == 1
+    conflict = next(value for outcome, value in outcomes if outcome == "conflict")
+    assert conflict.code == "VERSION_CONFLICT" and conflict.http_status == 409
+    with session_factory() as session:
+        line = session.get(PurchaseOrderLineModel, po_line_id)
+        budget = session.scalar(select(BudgetPeriodModel).where(BudgetPeriodModel.store_id == "STORE_001"))
+        assert line.received_quantity == Decimal("10")
+        assert budget.reserved_budget == 0 and budget.spent_budget == 1000
+        assert session.scalar(select(func.count()).select_from(InventoryLotModel)) == 1
+        assert session.scalar(select(func.count()).select_from(PurchaseReceiptModel)) == 1
+        assert session.scalar(select(func.sum(InventoryMovementModel.quantity_delta))) == Decimal("10")
+        assert session.scalar(select(func.count()).select_from(AuditLogModel).where(
+            AuditLogModel.action == "purchase_order_receive",
+        )) == 1
+    stale = client.post(f"/api/v1/stores/STORE_001/purchase-orders/{draft['po_id']}/receive", json={
+        "version": 2, "received_at": (now + timedelta(hours=2)).isoformat(), "delivery_reference": "R6.3-stale",
+        "lines": [{"po_line_id": po_line_id, "lots": [{"quantity": "10", "supplier_lot_code": "R6.3-stale"}]}],
+    })
+    assert stale.status_code == 409 and stale.json()["code"] == "VERSION_CONFLICT"
+
+    monkeypatch.setattr(service, "_claim_receive_version", original_claim)
+    second_draft = client.post("/api/v1/stores/STORE_001/purchase-orders", json={
+        "plan_run_id": plan_id, "lines": [{"recommendation_id": recommendation_id}],
+    }).json()["orders"][0]
+    second_confirmed = client.post(
+        f"/api/v1/stores/STORE_001/purchase-orders/{second_draft['po_id']}/confirm",
+        json={"version": 1, "confirmed_at": now.isoformat()},
+    ).json()
+    second_line_id = second_confirmed["lines"][0]["po_line_id"]
+    original_audit_record = AuditService.record
+
+    def fail_receive_audit(audit_service, **kwargs):
+        if kwargs["action"] == "purchase_order_receive":
+            raise RuntimeError("receive audit failure")
+        return original_audit_record(audit_service, **kwargs)
+
+    monkeypatch.setattr(AuditService, "record", fail_receive_audit)
+    with pytest.raises(RuntimeError, match="receive audit failure"):
+        service.po("receive", "STORE_001", second_draft["po_id"], POReceiveIn(
+            version=2, received_at=(now + timedelta(hours=3)), delivery_reference="R6.3-rollback",
+            lines=[{"po_line_id": second_line_id, "lots": [{
+                "quantity": "10", "supplier_lot_code": "R6.3-rollback",
+            }]}],
+        ))
+    with session_factory() as session:
+        second_po = session.get(PurchaseOrderModel, second_draft["po_id"])
+        second_line = session.get(PurchaseOrderLineModel, second_line_id)
+        budget = session.scalar(select(BudgetPeriodModel).where(BudgetPeriodModel.store_id == "STORE_001"))
+        assert second_po.status == "ordered" and second_po.version == 2
+        assert second_line.received_quantity == 0
+        assert budget.reserved_budget == 1000 and budget.spent_budget == 1000
+        assert session.scalar(select(func.count()).select_from(PurchaseReceiptModel).where(
+            PurchaseReceiptModel.po_id == second_draft["po_id"],
+        )) == 0
+        assert session.scalar(select(func.count()).select_from(InventoryMovementModel).where(
+            InventoryMovementModel.source_id == second_draft["po_id"],
+        )) == 0
+        assert session.scalar(select(func.count()).select_from(AuditLogModel).where(
+            AuditLogModel.action == "purchase_order_receive",
+        )) == 1
+
+
+def test_purchase_order_confirm_concurrency_allows_one_version_winner(client, session_factory, monkeypatch):
+    """Two stale confirm sessions must not accept the same expected version."""
+    _ingredient(session_factory)
+    _supplier(session_factory)
+    client.put("/api/v1/stores/STORE_001/settings", json={
+        "monthly_budget": 10_000, "forecast_horizon": 7,
+        "default_strategy": "balanced", "version": 1,
+    })
+    now = datetime.now(timezone.utc)
+    with session_factory() as session:
+        forecast_id, plan_id, recommendation_id = (str(uuid4()) for _ in range(3))
+        session.add_all([
+            SupplierIngredientTermModel(
+                constraint_id=str(uuid4()), store_id="STORE_001", supplier_id="sup-1",
+                ingredient_id="ing-1", unit_cost=100, moq=Decimal("1"), pack_size=Decimal("1"),
+                lead_time_days=1, unit="kg", version=1, active=True, source="test",
+            ),
+            ForecastRunModel(
+                forecast_run_id=forecast_id, store_id="STORE_001", cutoff_date=date.today(),
+                horizon_days=7, quantiles_json="[0.25,0.5,0.75]", scope_json="{}",
+                use_latest_calendar=True, status="completed", engine_status="test_adapter", request_hash="f",
+            ),
+            PlanRunModel(
+                plan_run_id=plan_id, store_id="STORE_001", forecast_run_id=forecast_id,
+                strategy="balanced", budget_limit=10_000, as_of_date=date.today(),
+                include_open_purchase_orders=True, status="completed", engine_status="test_adapter",
+                request_hash="p", warnings_json="[]",
+            ),
+            RecommendationModel(
+                recommendation_id=recommendation_id, plan_run_id=plan_id, store_id="STORE_001",
+                ingredient_id="ing-1", unit="kg", order_quantity=Decimal("10"), unit_cost=100,
+                cost=1000, supplier_id="sup-1", moq=Decimal("1"), pack_size=Decimal("1"),
+                lead_time_days=1,
+            ),
+        ])
+        session.commit()
+    draft = client.post("/api/v1/stores/STORE_001/purchase-orders", json={
+        "plan_run_id": plan_id, "lines": [{"recommendation_id": recommendation_id}],
+    }).json()["orders"][0]
+    service = client.app.state.completion_service
+    original_claim = service._claim_confirm_version
+    both_read_draft = threading.Barrier(2)
+
+    def synchronize_before_claim(session, store_id, po, expected_version):
+        both_read_draft.wait(timeout=10)
+        return original_claim(session, store_id, po, expected_version)
+
+    monkeypatch.setattr(service, "_claim_confirm_version", synchronize_before_claim)
+
+    def confirm():
+        try:
+            return "success", service.po(
+                "confirm", "STORE_001", draft["po_id"],
+                POConfirmIn(version=1, confirmed_at=now),
+            )
+        except Exception as exc:  # Characterize the current public/service behavior.
+            return "error", exc
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        outcomes = list(executor.map(lambda _unused: confirm(), range(2)))
+
+    stale = client.post(
+        f"/api/v1/stores/STORE_001/purchase-orders/{draft['po_id']}/confirm",
+        json={"version": 1, "confirmed_at": now.isoformat()},
+    )
+    non_draft = client.post(
+        f"/api/v1/stores/STORE_001/purchase-orders/{draft['po_id']}/confirm",
+        json={"version": 2, "confirmed_at": now.isoformat()},
+    )
+    assert stale.status_code == 409 and stale.json()["code"] == "VERSION_CONFLICT"
+    assert non_draft.status_code == 409 and non_draft.json()["code"] == "INVALID_STATE_TRANSITION"
+
+    with session_factory() as session:
+        po = session.get(PurchaseOrderModel, draft["po_id"])
+        budget = session.scalar(select(BudgetPeriodModel).where(BudgetPeriodModel.store_id == "STORE_001"))
+        confirm_audits = session.scalar(select(func.count()).select_from(AuditLogModel).where(
+            AuditLogModel.action == "purchase_order_confirm",
+            AuditLogModel.resource_id == draft["po_id"],
+        ))
+        assert po.status == "ordered" and po.version == 2
+        assert budget.reserved_budget == 1000
+        assert confirm_audits == 1
+    assert [outcome for outcome, _ in outcomes].count("success") == 1
+    assert [outcome for outcome, _ in outcomes].count("error") == 1
+    conflict = next(value for outcome, value in outcomes if outcome == "error")
+    assert conflict.code == "VERSION_CONFLICT" and conflict.http_status == 409
+
+
+def test_purchase_order_confirm_post_claim_failures_rollback_transition(client, session_factory, monkeypatch):
+    _ingredient(session_factory)
+    _supplier(session_factory)
+    now = datetime.now(timezone.utc)
+    period = now.date().strftime("%Y-%m")
+    with session_factory() as session:
+        forecast_id, plan_id, po_id, line_id = (str(uuid4()) for _ in range(4))
+        session.add_all([
+            ForecastRunModel(
+                forecast_run_id=forecast_id, store_id="STORE_001", cutoff_date=date.today(),
+                horizon_days=7, quantiles_json="[0.25,0.5,0.75]", scope_json="{}",
+                use_latest_calendar=True, status="completed", engine_status="test_adapter", request_hash="f",
+            ),
+            PlanRunModel(
+                plan_run_id=plan_id, store_id="STORE_001", forecast_run_id=forecast_id,
+                strategy="balanced", budget_limit=10_000, as_of_date=date.today(),
+                include_open_purchase_orders=True, status="completed", engine_status="test_adapter",
+                request_hash="p", warnings_json="[]",
+            ),
+            BudgetPeriodModel(
+                budget_period_id=str(uuid4()), store_id="STORE_001", period=period,
+                monthly_budget=10_000, reserved_budget=0, spent_budget=0,
+            ),
+            PurchaseOrderModel(
+                po_id=po_id, store_id="STORE_001", plan_run_id=plan_id, supplier_id="sup-1",
+                order_date=date.today(), delivery_date=date.today() + timedelta(days=1),
+                strategy="balanced", status="draft", total=1000, budget_after=9000, version=1,
+            ),
+            PurchaseOrderLineModel(
+                po_line_id=line_id, po_id=po_id, recommendation_id=None, ingredient_id="ing-1",
+                ordered_quantity=Decimal("10"), received_quantity=Decimal("0"), unit="kg",
+                unit_cost=100, cost=1000, moq=Decimal("1"), pack_size=Decimal("1"), version=1,
+            ),
+        ])
+        session.commit()
+
+    service = client.app.state.completion_service
+    original_budget = service._budget
+
+    def fail_budget(*_args, **_kwargs):
+        raise RuntimeError("confirm budget failure")
+
+    monkeypatch.setattr(service, "_budget", fail_budget)
+    with pytest.raises(RuntimeError, match="confirm budget failure"):
+        service.po("confirm", "STORE_001", po_id, POConfirmIn(version=1, confirmed_at=now))
+
+    monkeypatch.setattr(service, "_budget", original_budget)
+    original_audit_record = AuditService.record
+
+    def fail_confirm_audit(audit_service, **kwargs):
+        if kwargs["action"] == "purchase_order_confirm":
+            raise RuntimeError("confirm audit failure")
+        return original_audit_record(audit_service, **kwargs)
+
+    monkeypatch.setattr(AuditService, "record", fail_confirm_audit)
+    with pytest.raises(RuntimeError, match="confirm audit failure"):
+        service.po("confirm", "STORE_001", po_id, POConfirmIn(version=1, confirmed_at=now))
+
+    with session_factory() as session:
+        po = session.get(PurchaseOrderModel, po_id)
+        budget = session.scalar(select(BudgetPeriodModel).where(
+            BudgetPeriodModel.store_id == "STORE_001", BudgetPeriodModel.period == period,
+        ))
+        audits = session.scalar(select(func.count()).select_from(AuditLogModel).where(
+            AuditLogModel.action == "purchase_order_confirm", AuditLogModel.resource_id == po_id,
+        ))
+        assert po.status == "draft" and po.version == 1 and po.confirmed_at is None
+        assert budget.reserved_budget == 0 and audits == 0
 
 
 def test_inventory_count_adjustment_atomic_version_and_replay(client, session_factory):

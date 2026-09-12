@@ -651,8 +651,9 @@ def test_api_map_sheet_when_llm_unconfigured_uses_safe_rule(tmp_path):
         assert res.status_code == 200
         data = res.json()
         assert data["sheet_type"] == "sales_history"
-        assert data["source"] == "rule_fallback"
-        assert data["requires_review"] is True
+        assert data["source"] == "rule"
+        assert data["requires_review"] is False
+        assert data["raw_response"] is None
 
 
 def test_api_map_sheet_when_llm_unconfigured_and_unknown_rule_returns_503(tmp_path):

@@ -1,15 +1,28 @@
 import json
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timezone
+from threading import Barrier
+from types import SimpleNamespace
 
 import pytest
 
 from app.config import Settings
+from app.core.exceptions import PlanningError
 from app.models.business import IngredientModel, SupplierModel
 from app.models.decision import DecisionRunModel
+from app.models.idempotency import IdempotencyRecordModel
+from app.models.store import StoreModel
+from app.repositories.planning import PlanningRepository
+from app.schemas.decision import DecisionRunRequest
 
 
 def _run(run_id, package):
     return DecisionRunModel(decision_run_id=run_id, store_id="STORE_001", forecast_run_id="missing-forecast", as_of_date=date(2026, 8, 19), horizon_days=7, engine_mode="deterministic", status=package["status"], scenario_method="test", scenario_count=1, random_seed=42, recommended_strategy=package.get("recommended_strategy"), request_json="{}", package_json=json.dumps(package), warnings_json="[]", created_at=datetime.now(timezone.utc), completed_at=datetime.now(timezone.utc))
+
+
+def _stored_package(session_factory, run_id):
+    with session_factory() as session:
+        return json.loads(session.get(DecisionRunModel, run_id).package_json)
 
 
 def test_brief_no_feasible_never_creates_order_rows(client, monkeypatch):
@@ -95,9 +108,8 @@ def test_ingredient_synthesis_diagnostics_stay_in_decision_package_not_brief(cli
     }
     with sf() as session:
         session.add(_run("internal-synthesis-diagnostics", package)); session.commit()
-    stored = client.get("/api/v1/decision-runs/internal-synthesis-diagnostics")
     brief = client.get("/api/v1/decision-runs/internal-synthesis-diagnostics/brief")
-    assert stored.status_code == 200 and stored.json()["assistant"]["ingredient_synthesis_diagnostics"] == diagnostics
+    assert _stored_package(sf, "internal-synthesis-diagnostics")["assistant"]["ingredient_synthesis_diagnostics"] == diagnostics
     assert brief.status_code == 200
     assert "ingredient_synthesis_diagnostics" not in brief.json()
     assert diagnostics["raw_response"] not in brief.text
@@ -119,11 +131,11 @@ def test_strategy_expression_brief_default_is_deterministic_and_never_persists_e
     package = _strategy_expression_package()
     with client.app.state.session_factory() as session:
         session.add(_run("strategy-expression-read", package)); session.commit()
-    before = client.get("/api/v1/decision-runs/strategy-expression-read").json()
+    before = _stored_package(client.app.state.session_factory, "strategy-expression-read")
     import logging
     caplog.set_level(logging.INFO, logger="shelfcash.planning")
     response = client.get("/api/v1/decision-runs/strategy-expression-read/brief")
-    after = client.get("/api/v1/decision-runs/strategy-expression-read").json()
+    after = _stored_package(client.app.state.session_factory, "strategy-expression-read")
     assert response.status_code == 200
     assert after == before
     assert "strategy_expression" not in after.get("assistant", {})
@@ -270,12 +282,231 @@ def test_default_ingredient_synthesis_is_persisted_and_brief_reads_it_without_pr
     service.llm_provider = provider
     service._generate_and_persist_overall_summary("persisted-deterministic-synthesis")
 
-    stored = client.get("/api/v1/decision-runs/persisted-deterministic-synthesis").json()
+    stored = _stored_package(client.app.state.session_factory, "persisted-deterministic-synthesis")
     persisted = stored["assistant"]["ingredient_synthesis"]
     assert persisted[0]["source"] == "rule_based"
     brief = client.get("/api/v1/decision-runs/persisted-deterministic-synthesis/brief").json()
     assert brief["ingredient_synthesis"] == persisted
     assert provider.calls == 0
+
+
+def test_assistant_commit_failure_preserves_committed_deterministic_package(client, monkeypatch):
+    package = {
+        "decision_run_id": "assistant-commit-failure", "store_id": "STORE_001",
+        "status": "completed_with_no_feasible_recommendation", "recommended_strategy": None,
+        "recommended_plan": {"items": []},
+        "ingredient_demand": [{"ingredient_id": "assistant-failure-ingredient", "target_date": "2026-08-21", "unit": "kg", "p25": 1, "p50": 2, "p75": 3, "contributions": []}],
+        "business_metrics": {}, "inventory_risk": {}, "critic": {"findings": [], "warnings": []},
+        "reason_codes": [], "warnings": [],
+    }
+    session_factory = client.app.state.session_factory
+    with session_factory() as session:
+        session.add(_run("assistant-commit-failure", package))
+        session.commit()
+
+    class FailingAssistantCommitFactory:
+        def __call__(self):
+            session = session_factory()
+
+            def fail_commit():
+                raise RuntimeError("assistant persistence unavailable")
+
+            monkeypatch.setattr(session, "commit", fail_commit)
+            return session
+
+    service = client.app.state.decision_planning_service
+    monkeypatch.setattr(service, "factory", FailingAssistantCommitFactory())
+
+    with pytest.raises(RuntimeError, match="assistant persistence unavailable"):
+        service._generate_and_persist_overall_summary("assistant-commit-failure")
+
+    # The second transaction rolls back; the already committed deterministic
+    # package remains the source of truth and Brief reconstructs safe wording.
+    assert _stored_package(session_factory, "assistant-commit-failure") == package
+    assert service.get_decision("assistant-commit-failure") == package
+    brief = client.get("/api/v1/decision-runs/assistant-commit-failure/brief")
+    assert brief.status_code == 200, brief.text
+    assert brief.json()["assistant_summary"]["source"] == "deterministic_fallback"
+
+
+def test_decision_deterministic_failure_does_not_leave_a_key_record(client, monkeypatch):
+    service = client.app.state.decision_planning_service
+    forecast = SimpleNamespace(
+        forecast_run_id="decision-failure-forecast", store_id="STORE_001",
+        cutoff_date=date(2026, 8, 19), horizon_days=1,
+    )
+    monkeypatch.setattr(
+        service, "_forecast",
+        lambda *_args: (forecast, [SimpleNamespace(target_date=date(2026, 8, 20))]),
+    )
+    monkeypatch.setattr(service, "generate_demand", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        PlanningRepository, "demand_run_for_forecast",
+        lambda *_args: SimpleNamespace(ingredient_demand_run_id="decision-failure-demand"),
+    )
+    monkeypatch.setattr(PlanningRepository, "demand_predictions", lambda *_args: [SimpleNamespace()])
+
+    class FailingAdapter:
+        shortage_economics = {}
+
+        def __init__(self, *_args):
+            pass
+
+        def optimize(self, *_args, **_kwargs):
+            raise RuntimeError("deterministic core failure")
+
+    monkeypatch.setattr("app.services.decision_planning_service.CoreProcurementAdapter", FailingAdapter)
+    body = DecisionRunRequest(
+        forecast_run_id=forecast.forecast_run_id, as_of_date=forecast.cutoff_date,
+        horizon_days=forecast.horizon_days, engine_mode="deterministic",
+    )
+
+    with pytest.raises(PlanningError, match="Core decision execution failed"):
+        service.generate_decision("STORE_001", body, "decision-deterministic-failure")
+
+    with client.app.state.session_factory() as session:
+        assert session.query(IdempotencyRecordModel).filter_by(
+            idempotency_key="decision-deterministic-failure",
+        ).one_or_none() is None
+
+
+def test_decision_persistence_failure_rolls_back_key_and_resource(client, monkeypatch):
+    service = client.app.state.decision_planning_service
+    forecast = SimpleNamespace(
+        forecast_run_id="decision-persistence-failure-forecast", store_id="STORE_001",
+        cutoff_date=date(2026, 8, 19), horizon_days=1,
+    )
+    monkeypatch.setattr(
+        service, "_forecast",
+        lambda *_args: (forecast, [SimpleNamespace(target_date=date(2026, 8, 20))]),
+    )
+    monkeypatch.setattr(service, "generate_demand", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        PlanningRepository, "demand_run_for_forecast",
+        lambda *_args: SimpleNamespace(ingredient_demand_run_id="decision-persistence-failure-demand"),
+    )
+    monkeypatch.setattr(PlanningRepository, "demand_predictions", lambda *_args: [SimpleNamespace()])
+
+    class SuccessfulAdapter:
+        shortage_economics = {}
+
+        def __init__(self, *_args):
+            pass
+
+        def optimize(self, *_args, **_kwargs):
+            return None, SimpleNamespace(seed=42), None, {}
+
+    monkeypatch.setattr("app.services.decision_planning_service.CoreProcurementAdapter", SuccessfulAdapter)
+    monkeypatch.setattr(
+        service, "_decision_package",
+        lambda run_id, *_args, **_kwargs: {
+            "decision_run_id": run_id, "status": "completed",
+            "technical_metrics": {
+                "scenario_method": "test", "scenario_count": 1,
+                "optimizer_type": "test",
+            },
+            "recommended_strategy": "balanced", "warnings": [],
+        },
+    )
+    monkeypatch.setattr(service, "_generate_and_persist_overall_summary", lambda _run_id: None)
+    original_factory = service.factory
+    session_count = 0
+
+    def factory():
+        nonlocal session_count
+        session_count += 1
+        session = original_factory()
+        if session_count == 2:
+            monkeypatch.setattr(
+                session, "commit",
+                lambda: (_ for _ in ()).throw(RuntimeError("decision persistence unavailable")),
+            )
+        return session
+
+    monkeypatch.setattr(service, "factory", factory)
+    body = DecisionRunRequest(
+        forecast_run_id=forecast.forecast_run_id, as_of_date=forecast.cutoff_date,
+        horizon_days=forecast.horizon_days, engine_mode="deterministic",
+    )
+
+    with pytest.raises(RuntimeError, match="decision persistence unavailable"):
+        service.generate_decision("STORE_001", body, "decision-persistence-failure")
+
+    with original_factory() as session:
+        assert session.query(IdempotencyRecordModel).filter_by(
+            idempotency_key="decision-persistence-failure",
+        ).one_or_none() is None
+        assert session.query(DecisionRunModel).filter_by(
+            store_id="STORE_001",
+        ).count() == 0
+
+
+def test_concurrent_keyed_decisions_persist_one_run_and_one_resource_link(client, monkeypatch):
+    service = client.app.state.decision_planning_service
+    forecast = SimpleNamespace(
+        forecast_run_id="decision-concurrent-forecast", store_id="STORE_001",
+        cutoff_date=date(2026, 8, 19), horizon_days=1,
+    )
+    barrier = Barrier(2)
+    monkeypatch.setattr(
+        service, "_forecast",
+        lambda *_args: (forecast, [SimpleNamespace(target_date=date(2026, 8, 20))]),
+    )
+    monkeypatch.setattr(service, "generate_demand", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        PlanningRepository, "demand_run_for_forecast",
+        lambda *_args: SimpleNamespace(ingredient_demand_run_id="decision-concurrent-demand"),
+    )
+    monkeypatch.setattr(PlanningRepository, "demand_predictions", lambda *_args: [SimpleNamespace()])
+
+    class ConcurrentAdapter:
+        shortage_economics = {}
+
+        def __init__(self, session):
+            self.session = session
+
+        def optimize(self, *_args, **_kwargs):
+            assert self.session.get(StoreModel, "STORE_001") is not None
+            barrier.wait(timeout=10)
+            return None, SimpleNamespace(seed=42), None, {}
+
+    monkeypatch.setattr("app.services.decision_planning_service.CoreProcurementAdapter", ConcurrentAdapter)
+    monkeypatch.setattr(
+        service, "_decision_package",
+        lambda run_id, *_args, **_kwargs: {
+            "decision_run_id": run_id, "status": "completed",
+            "technical_metrics": {
+                "scenario_method": "test", "scenario_count": 1,
+                "optimizer_type": "test",
+            },
+            "recommended_strategy": "balanced", "warnings": [],
+        },
+    )
+    monkeypatch.setattr(service, "_generate_and_persist_overall_summary", lambda _run_id: None)
+    body = DecisionRunRequest(
+        forecast_run_id=forecast.forecast_run_id, as_of_date=forecast.cutoff_date,
+        horizon_days=forecast.horizon_days, engine_mode="deterministic",
+    )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(
+            lambda _unused: service.generate_decision("STORE_001", body, "decision-concurrent-key"),
+            range(2),
+        ))
+
+    assert results[0]["decision_run_id"] == results[1]["decision_run_id"]
+    with client.app.state.session_factory() as session:
+        record = session.query(IdempotencyRecordModel).filter_by(
+            idempotency_key="decision-concurrent-key",
+        ).one()
+        assert record.resource_type == "decision_run"
+        assert record.resource_id == results[0]["decision_run_id"]
+        assert session.query(DecisionRunModel).filter_by(
+            decision_run_id=record.resource_id,
+        ).count() == 1
+        assert session.query(DecisionRunModel).filter_by(
+            store_id="STORE_001",
+        ).count() == 1
 
 
 def test_what_if_invalid_mutations_return_422(client):

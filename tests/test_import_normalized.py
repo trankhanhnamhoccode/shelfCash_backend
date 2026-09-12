@@ -1,18 +1,23 @@
 import hashlib
 import json
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import func, select
+from sqlalchemy import event, func, select
+from sqlalchemy.exc import OperationalError
 
 from app.config import Settings
+from app.core.exceptions import ImportProcessingError
 from app.core.rule_mapper import finalize_mapping, map_sheet_rules
 from app.db.session import create_engine_from_url, create_session_factory
 from app.llm.openrouter_qwen import OpenRouterQwenProvider
 from app.main import create_app
 from app.models.audit_log import AuditLogModel
+from app.models.business import SalesDailyModel
 from app.models.import_legacy import ImportModel
 from app.models.import_normalized import (
     ImportFileModel,
@@ -21,7 +26,10 @@ from app.models.import_normalized import (
     ImportMappingModel,
     ImportSheetProfileModel,
 )
+from app.repositories.normalized_imports import NormalizedImportRepository
 from app.schemas.llm import MappingSuggestion, SheetProfile
+from app.services.audit_service import AuditService
+from app.services.business_persistence import ImportBusinessPersistenceService
 from scripts.seed_database import seed_database
 from tests.conftest import migrate_database
 
@@ -373,6 +381,143 @@ def test_process_state_idempotency_issues_and_db_result(client):
         ) >= 0
 
 
+def test_sqlite_uncommitted_processing_claim_is_not_visible_across_sessions(client):
+    body = upload_csv(client).json()
+    assert confirm_from_response(client, body).status_code == 200
+
+    first = client.app.state.session_factory()
+    second = client.app.state.session_factory()
+    try:
+        first_job = first.get(ImportJobModel, body["import_id"])
+        second_job = second.get(ImportJobModel, body["import_id"])
+        assert first_job.status == second_job.status == "confirmed"
+
+        first_job.status = "processing"
+        first.flush()
+
+        second.expire(second_job)
+        assert second.get(ImportJobModel, body["import_id"]).status == "confirmed"
+        second_job.status = "processing"
+        with pytest.raises(OperationalError, match="database is locked"):
+            second.flush()
+    finally:
+        second.rollback()
+        first.rollback()
+        second.close()
+        first.close()
+
+
+def test_sqlite_stale_session_can_reapply_processing_after_another_claim_commits(client):
+    body = upload_csv(client).json()
+    assert confirm_from_response(client, body).status_code == 200
+
+    first = client.app.state.session_factory()
+    second = client.app.state.session_factory()
+    try:
+        first_job = first.get(ImportJobModel, body["import_id"])
+        second_job = second.get(ImportJobModel, body["import_id"])
+        assert first_job.status == second_job.status == "confirmed"
+
+        first_job.status = "processing"
+        first.commit()
+
+        second_job.status = "processing"
+        second.flush()
+        second.commit()
+
+        with client.app.state.session_factory() as verifier:
+            assert verifier.get(ImportJobModel, body["import_id"]).status == "processing"
+    finally:
+        second.rollback()
+        first.rollback()
+        second.close()
+        first.close()
+
+
+def test_process_claim_allows_only_one_concurrent_pipeline_and_persistence(client, monkeypatch):
+    body = upload_csv(client).json()
+    assert confirm_from_response(client, body).status_code == 200
+    service = client.app.state.import_service
+    pipeline_started = threading.Event()
+    release_pipeline = threading.Event()
+    counter_lock = threading.Lock()
+    pipeline_calls = 0
+    persistence_calls = 0
+    original_process_sheet = service.pipeline.process_sheet
+    from app.services.business_persistence import ImportBusinessPersistenceService
+
+    original_persist = ImportBusinessPersistenceService.persist
+
+    def blocked_process_sheet(sheet):
+        nonlocal pipeline_calls
+        with counter_lock:
+            pipeline_calls += 1
+        pipeline_started.set()
+        assert release_pipeline.wait(timeout=10)
+        return original_process_sheet(sheet)
+
+    def counted_persist(instance, **kwargs):
+        nonlocal persistence_calls
+        with counter_lock:
+            persistence_calls += 1
+        return original_persist(instance, **kwargs)
+
+    monkeypatch.setattr(service.pipeline, "process_sheet", blocked_process_sheet)
+    monkeypatch.setattr(ImportBusinessPersistenceService, "persist", counted_persist)
+    winner_result = {}
+
+    def run_winner():
+        try:
+            winner_result["record"] = service.process(body["import_id"])
+        except Exception as exc:  # pragma: no cover - asserted below
+            winner_result["error"] = exc
+
+    winner = threading.Thread(target=run_winner)
+    winner.start()
+    assert pipeline_started.wait(timeout=10)
+
+    with pytest.raises(ImportProcessingError) as loser:
+        service.process(body["import_id"])
+    assert loser.value.code == "IMPORT_PROCESSING"
+    assert loser.value.http_status == 409
+    with counter_lock:
+        assert pipeline_calls == 1
+        assert persistence_calls == 0
+
+    release_pipeline.set()
+    winner.join(timeout=10)
+    assert not winner.is_alive()
+    assert "error" not in winner_result
+    assert winner_result["record"]["status"] == "processed"
+    with counter_lock:
+        assert pipeline_calls == persistence_calls == 1
+
+    with client.app.state.session_factory() as session:
+        job = session.get(ImportJobModel, body["import_id"])
+        assert job.status == "completed"
+        assert session.get(ImportModel, body["import_id"]).status == "processed"
+        actions = list(session.scalars(select(AuditLogModel.action).where(
+            AuditLogModel.resource_id == body["import_id"]
+        )))
+        assert actions.count("import_processing_started") == 1
+        assert actions.count("import_completed") == 1
+
+
+def test_process_rejects_a_committed_processing_job_with_current_api_error(client):
+    body = upload_csv(client).json()
+    assert confirm_from_response(client, body).status_code == 200
+    with client.app.state.session_factory() as session:
+        job = session.get(ImportJobModel, body["import_id"])
+        job.status = "processing"
+        job.processing_started_at = datetime.now(timezone.utc)
+        session.commit()
+
+    response = client.post(f"/api/v1/imports/{body['import_id']}/process")
+    assert response.status_code == 409
+    assert response.json()["code"] == "IMPORT_PROCESSING"
+    assert response.json()["details"] == {"import_id": body["import_id"]}
+
+
 def test_processing_failure_sets_failed_without_result(client, monkeypatch):
     body = upload_csv(client).json()
     assert confirm_from_response(client, body).status_code == 200
@@ -405,6 +550,194 @@ def test_processing_failure_sets_failed_without_result(client, monkeypatch):
             )
         )
         assert "import_failed" in actions
+        assert actions.count("import_processing_started") == 1
+        assert "import_completed" not in actions
+    retry = client.post(f"/api/v1/imports/{body['import_id']}/process")
+    assert retry.status_code == 409
+    assert retry.json()["code"] == "INVALID_STATE_TRANSITION"
+
+
+def test_terminal_legacy_bridge_failure_rolls_back_business_state(client, monkeypatch):
+    body = upload_csv(client).json()
+    assert confirm_from_response(client, body).status_code == 200
+    original_sync = NormalizedImportRepository.sync_legacy
+
+    def fail_completed_bridge(repository, record):
+        if record["internal_status"] == "completed":
+            raise RuntimeError("injected legacy bridge failure")
+        return original_sync(repository, record)
+
+    monkeypatch.setattr(NormalizedImportRepository, "sync_legacy", fail_completed_bridge)
+    with pytest.raises(RuntimeError, match="injected legacy bridge failure"):
+        client.app.state.import_service.process(body["import_id"])
+
+    with client.app.state.session_factory() as session:
+        job = session.get(ImportJobModel, body["import_id"])
+        legacy = session.get(ImportModel, body["import_id"])
+        actions = list(session.scalars(select(AuditLogModel.action).where(
+            AuditLogModel.resource_id == body["import_id"]
+        )))
+        assert session.scalar(select(func.count()).select_from(SalesDailyModel)) == 0
+        assert job.status == "failed"
+        assert job.result_json is None
+        assert legacy.status == "failed"
+        assert "import_completed" not in actions
+        assert actions.count("import_failed") == 1
+
+
+def test_terminal_success_audit_failure_rolls_back_business_state(client, monkeypatch):
+    body = upload_csv(client).json()
+    assert confirm_from_response(client, body).status_code == 200
+    original_record = AuditService.record
+
+    def fail_completed_audit(audit, **kwargs):
+        if kwargs["action"] == "import_completed":
+            raise RuntimeError("injected terminal audit failure")
+        return original_record(audit, **kwargs)
+
+    monkeypatch.setattr(AuditService, "record", fail_completed_audit)
+    with pytest.raises(RuntimeError, match="injected terminal audit failure"):
+        client.app.state.import_service.process(body["import_id"])
+
+    with client.app.state.session_factory() as session:
+        job = session.get(ImportJobModel, body["import_id"])
+        legacy = session.get(ImportModel, body["import_id"])
+        actions = list(session.scalars(select(AuditLogModel.action).where(
+            AuditLogModel.resource_id == body["import_id"]
+        )))
+        assert session.scalar(select(func.count()).select_from(SalesDailyModel)) == 0
+        assert job.status == "failed"
+        assert job.result_json is None
+        assert legacy.status == "failed"
+        assert "import_completed" not in actions
+        assert actions.count("import_failed") == 1
+
+
+def test_terminal_persistence_failure_after_flush_rolls_back_business_state(client, monkeypatch):
+    body = upload_csv(client).json()
+    assert confirm_from_response(client, body).status_code == 200
+    original_persist = ImportBusinessPersistenceService.persist
+
+    def persist_then_fail(persistence, **kwargs):
+        original_persist(persistence, **kwargs)
+        raise RuntimeError("injected post-flush persistence failure")
+
+    monkeypatch.setattr(ImportBusinessPersistenceService, "persist", persist_then_fail)
+    with pytest.raises(RuntimeError, match="injected post-flush persistence failure"):
+        client.app.state.import_service.process(body["import_id"])
+
+    with client.app.state.session_factory() as session:
+        job = session.get(ImportJobModel, body["import_id"])
+        legacy = session.get(ImportModel, body["import_id"])
+        actions = list(session.scalars(select(AuditLogModel.action).where(
+            AuditLogModel.resource_id == body["import_id"]
+        )))
+        assert session.scalar(select(func.count()).select_from(SalesDailyModel)) == 0
+        assert job.status == "failed"
+        assert job.result_json is None
+        assert legacy.status == "failed"
+        assert "import_completed" not in actions
+        assert actions.count("import_failed") == 1
+
+
+def test_processing_started_audit_does_not_lock_pipeline_window(client, monkeypatch):
+    body = upload_csv(client).json()
+    assert confirm_from_response(client, body).status_code == 200
+    service = client.app.state.import_service
+    statements = []
+    original_process_sheet = service.pipeline.process_sheet
+
+    def capture_audit_insert(_connection, _cursor, statement, _parameters, _context, _executemany):
+        if "INSERT INTO audit_logs" in statement:
+            statements.append(statement)
+
+    def assert_started_audit_is_already_flushed(sheet):
+        assert statements
+        contender = client.app.state.session_factory()
+        try:
+            contender.connection().exec_driver_sql("PRAGMA busy_timeout = 1")
+            contender.add(AuditLogModel(
+                audit_log_id=str(uuid4()), store_id="STORE_001",
+                action="import_terminal_contention_probe", resource_type="test",
+                resource_id=body["import_id"], source="test",
+            ))
+            contender.flush()
+            contender.commit()
+        finally:
+            contender.rollback()
+            contender.close()
+        return original_process_sheet(sheet)
+
+    event.listen(client.app.state.engine, "before_cursor_execute", capture_audit_insert)
+    monkeypatch.setattr(service.pipeline, "process_sheet", assert_started_audit_is_already_flushed)
+    try:
+        response = client.post(f"/api/v1/imports/{body['import_id']}/process")
+    finally:
+        event.remove(client.app.state.engine, "before_cursor_execute", capture_audit_insert)
+    assert response.status_code == 200, response.text
+
+
+def test_processing_start_audit_failure_marks_job_failed_without_pipeline(client, monkeypatch):
+    body = upload_csv(client).json()
+    assert confirm_from_response(client, body).status_code == 200
+    service = client.app.state.import_service
+    pipeline_calls = 0
+    original_record = AuditService.record
+    original_process_sheet = service.pipeline.process_sheet
+
+    def fail_start_audit(audit, **kwargs):
+        if kwargs["action"] == "import_processing_started":
+            raise RuntimeError("injected start audit failure")
+        return original_record(audit, **kwargs)
+
+    def count_pipeline(sheet):
+        nonlocal pipeline_calls
+        pipeline_calls += 1
+        return original_process_sheet(sheet)
+
+    monkeypatch.setattr(AuditService, "record", fail_start_audit)
+    monkeypatch.setattr(service.pipeline, "process_sheet", count_pipeline)
+    with pytest.raises(RuntimeError, match="injected start audit failure"):
+        service.process(body["import_id"])
+
+    with client.app.state.session_factory() as session:
+        job = session.get(ImportJobModel, body["import_id"])
+        actions = list(session.scalars(select(AuditLogModel.action).where(
+            AuditLogModel.resource_id == body["import_id"]
+        )))
+        assert pipeline_calls == 0
+        assert job.status == "failed"
+        assert "import_processing_started" not in actions
+        assert actions.count("import_failed") == 1
+
+
+def test_result_file_failure_keeps_committed_database_result(client, monkeypatch):
+    body = upload_csv(client).json()
+    assert confirm_from_response(client, body).status_code == 200
+    result_dir = client.app.state.settings.result_dir
+    original_write_text = Path.write_text
+
+    def fail_terminal_artifact(path, *args, **kwargs):
+        if path.parent == result_dir and path.name.endswith(".tmp"):
+            raise OSError("injected result artifact failure")
+        return original_write_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", fail_terminal_artifact)
+    response = client.post(f"/api/v1/imports/{body['import_id']}/process")
+    assert response.status_code == 200, response.text
+    assert not (result_dir / f"{body['import_id']}.json").exists()
+    result = client.get(f"/api/v1/imports/{body['import_id']}/result")
+    assert result.status_code == 200
+    with client.app.state.session_factory() as session:
+        job = session.get(ImportJobModel, body["import_id"])
+        legacy = session.get(ImportModel, body["import_id"])
+        actions = list(session.scalars(select(AuditLogModel.action).where(
+            AuditLogModel.resource_id == body["import_id"]
+        )))
+        assert job.status == "completed"
+        assert job.result_json
+        assert legacy.status == "processed"
+        assert actions.count("import_completed") == 1
 
 
 def test_corrupt_workbook_rolls_back_and_removes_temp_files(client):

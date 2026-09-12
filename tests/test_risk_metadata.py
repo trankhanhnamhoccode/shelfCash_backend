@@ -161,7 +161,8 @@ def test_old_run_projects_risk_details_read_only_without_llm(client):
     details = response.json()["risk_details"]
     assert details[0]["code"] == "CAPACITY_NOT_EVALUATED"
     assert details[0]["classification"] == "limitation"
-    assert "assistant" not in client.get("/api/v1/decision-runs/phase4-old-run").json()
+    with client.app.state.session_factory() as session:
+        assert "assistant" not in json.loads(session.get(DecisionRunModel, "phase4-old-run").package_json)
 
 
 def test_no_feasible_run_keeps_explicit_critic_detail():

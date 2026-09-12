@@ -9,10 +9,12 @@ from app.models.business import (IngredientModel, InventoryLotModel, InventoryMo
 from app.models.operations import ForecastPredictionModel, ForecastResidualModel, ForecastRunModel
 from app.services.decision.adapters.procurement_adapter import CoreProcurementAdapter
 from app.models.decision import DecisionRunModel
+from app.models.idempotency import IdempotencyRecordModel
 from app.models.planning import IngredientDemandPredictionModel, ProcurementPlanModel
+from app.schemas.decision import DecisionPackage
 
 
-def test_core_decision_package_is_persisted_and_reloaded(client):
+def test_core_decision_package_is_persisted_and_reloaded(client, monkeypatch):
     sf = client.app.state.session_factory
     with sf() as s:
         product = ProductModel(product_id="decision-product", store_id="STORE_001", product="Tea", normalized_name="decision-tea", active=True, source="test")
@@ -27,9 +29,29 @@ def test_core_decision_package_is_persisted_and_reloaded(client):
         s.add(InventoryLotModel(lot_id="decision-lot", store_id="STORE_001", ingredient_id=ingredient.ingredient_id, received_date=date(2026, 8, 3), initial_quantity=Decimal("0"), unit="kg", source="test", version=1))
         s.add(InventoryMovementModel(movement_id=str(uuid4()), store_id="STORE_001", lot_id="decision-lot", movement_type="opening_balance", quantity_delta=Decimal("0"), unit="kg", occurred_at=datetime(2026, 8, 3, tzinfo=timezone.utc), source="test"))
         s.commit()
-    response = client.post("/api/v1/stores/STORE_001/decision-runs", json={"forecast_run_id":"decision-forecast", "as_of_date":"2026-08-03", "horizon_days":1, "engine_mode":"deterministic"})
+    body = {"forecast_run_id":"decision-forecast", "as_of_date":"2026-08-03", "horizon_days":1, "engine_mode":"deterministic"}
+    headers = {"Idempotency-Key": "decision-run-keyed-success"}
+    response = client.post("/api/v1/stores/STORE_001/decision-runs", json=body, headers=headers)
     assert response.status_code == 200, response.text
     package = response.json()
+    with sf() as s:
+        record = s.scalar(select(IdempotencyRecordModel).where(IdempotencyRecordModel.idempotency_key == headers["Idempotency-Key"]))
+        assert record is not None
+        assert record.resource_type == "decision_run"
+        assert record.resource_id == package["decision_run_id"]
+        assert s.scalar(select(func.count()).select_from(DecisionRunModel)) == 1
+    replay = client.post("/api/v1/stores/STORE_001/decision-runs", json=body, headers=headers)
+    assert replay.status_code == 200, replay.text
+    assert replay.json() == package
+    conflict = client.post(
+        "/api/v1/stores/STORE_001/decision-runs",
+        json={**body, "scenario_count": 2}, headers=headers,
+    )
+    assert conflict.status_code == 409, conflict.text
+    assert conflict.json()["details"]["reason"] == "IDEMPOTENCY_KEY_REUSED"
+    with sf() as s:
+        assert s.scalar(select(func.count()).select_from(DecisionRunModel)) == 1
+    assert DecisionPackage.model_validate(package).model_dump(mode="json") == package
     assert package["engine_mode"] == "deterministic"
     assert package["technical_metrics"]["baseline_engine"] == "lot_level_fefo_v1"
     assert package["technical_metrics"]["forecast_trace"] == {
@@ -60,6 +82,18 @@ def test_core_decision_package_is_persisted_and_reloaded(client):
     restored = client.get(f"/api/v1/decision-runs/{package['decision_run_id']}")
     assert restored.status_code == 200
     assert restored.json() == package
+    assert DecisionPackage.model_validate(restored.json()).model_dump(mode="json") == package
+    without_assistant = dict(package)
+    without_assistant.pop("assistant", None)
+    assert DecisionPackage.model_validate(without_assistant).assistant is None
+    no_feasible_package = {
+        **without_assistant,
+        "status": "completed_with_no_feasible_recommendation",
+        "recommended_strategy": None,
+        "recommended_plan": {"items": []},
+        "business_metrics": {},
+    }
+    assert DecisionPackage.model_validate(no_feasible_package).recommended_strategy is None
     brief = client.get(f"/api/v1/decision-runs/{package['decision_run_id']}/brief")
     assert brief.status_code == 200, brief.text
     assert brief.json()["recommendation"]["available"] is True
@@ -104,6 +138,18 @@ def test_core_decision_package_is_persisted_and_reloaded(client):
     no_feasible = client.post(f"/api/v1/decision-runs/{package['decision_run_id']}/what-if", json={"budget_limit": 0})
     assert no_feasible.status_code == 200
     assert no_feasible.json()["hypothetical"]["recommendation"]["available"] is False
+    service = client.app.state.decision_planning_service
+    monkeypatch.setattr(service, "_generate_and_persist_overall_summary", lambda _rid: (_ for _ in ()).throw(RuntimeError("assistant unavailable")))
+    assistant_failure = client.post(
+        "/api/v1/stores/STORE_001/decision-runs", json=body,
+        headers={"Idempotency-Key": "decision-run-assistant-failure"},
+    )
+    assert assistant_failure.status_code == 200, assistant_failure.text
+    with sf() as s:
+        record = s.scalar(select(IdempotencyRecordModel).where(IdempotencyRecordModel.idempotency_key == "decision-run-assistant-failure"))
+        assert record is not None
+        assert record.resource_id == assistant_failure.json()["decision_run_id"]
+        assert "assistant" not in json.loads(s.get(DecisionRunModel, record.resource_id).package_json)
     assert no_feasible.json()["comparison"]["recommendation_changed"] is True
 
 

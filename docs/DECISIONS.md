@@ -107,18 +107,15 @@ The recommendation in `CURRENT_ARCHITECTURE.md` to consider a future determinist
 
 ## ADR-009 — Historical Decision Runs are not silently rewritten
 
-- **Status:** ACCEPTED
-- **Decision:** Historical persisted Decision Runs and assistant artifacts must not be silently rewritten by unrelated refactors. Schema evolution, backfill, and migration must be explicit.
-- **Context:** Decision Packages and assistant artifacts are persisted JSON and old-run read paths intentionally support historical shapes.
-- **Why:** Historical decisions are audit records and must retain provenance.
-- **Rejected/deferred alternatives:** Opportunistic rewrite-on-read or unrelated bulk backfill is rejected.
-- **Revisit condition:** An approved, versioned data migration with compatibility and rollback handling.
-- **Affected areas:** Decision Run persistence, assistant artifacts, JSON schemas, migrations, read compatibility.
+- **Status:** SUPERSEDED by ADR-013 — Disposable runtime persistence
+- **Superseded decision:** Historical persisted Decision Runs and assistant artifacts had to be retained, read, and evolved through explicit compatibility/migration handling.
+- **Reason for supersession:** Current SQLite persistence in the Kaggle deployment is resettable runtime state. Preservation of old database rows or old persisted JSON shapes is not a product requirement. ADR-007 continues to protect public API and client compatibility.
 
 ## ADR-010 — Computation package authority
 
 - **Status:** ACCEPTED for current runtime authority; NEEDS DECISION for future consolidation
 - **Decision:** In the current runtime, `shelfcash_core` is the production computation authority for forecast, BOM, scenario composition, exact inventory/FEFO simulation, and procurement optimization. `shelfcash_forecast` is the forecast shadow/parity provider when enabled; it is not the production forecast provider.
+- **Procurement qualification:** Procurement authority across public/use-case surfaces is further qualified by ADR-014. That ADR records the accepted operational-versus-decision authority separation; it does not change this package-authority decision.
 - **Context:** `ForecastService` only permits `forecast_core_provider="existing"`, whose provider delegates to `shelfcash_core`. `shelfcash_forecast` is loaded by `ShelfCashForecastProvider` for shadow comparison. Application decision-intelligence adapters also import non-computation contracts/evidence/retrieval helpers from `shelfcash_forecast`; those imports do not grant it production business authority. Production services directly import `shelfcash_core` for forecast, BOM, FEFO/procurement, and inbound expiry.
 - **Why:** This records actual authority without prematurely selecting the end-state package layout.
 - **Rejected/deferred alternatives:** “Delete `shelfcash_forecast`” and “make `shelfcash_forecast` canonical” are both deferred. Canonical core consolidation is a future evidence-based decision.
@@ -150,6 +147,40 @@ The recommendation in `CURRENT_ARCHITECTURE.md` to consider a future determinist
 - **Revisit condition:** An explicit change to business semantics and every affected contract/test.
 - **Affected areas:** Risk details, strategy reasons, ingredient synthesis, Overall Summary, What-if, frontend copy.
 
+## ADR-013 — Disposable runtime persistence
+
+- **Status:** ACCEPTED
+- **Decision:** SQLite persistence in the current Kaggle deployment is disposable runtime state. Backward compatibility for old database rows, including prior Decision Package JSON shapes and historical Decision Runs, is not an architecture requirement.
+- **Supersedes:** ADR-009's persisted-history preservation and old-shape read/migration requirements.
+- **Important boundary:** Database compatibility is not public API compatibility. This ADR does not supersede ADR-007, ADR-008, backend business authority, narrative routing, or existing HTTP/client contract expectations.
+- **Why:** The deployment database is resettable. The cost and complexity of preserving or migrating old ephemeral rows does not provide proportional product value.
+- **Consequences:** A database reset, destructive schema cleanup when needed, removal of code that exists solely to read old persisted shapes, and no backfill or migration framework for old Decision Runs are permitted. Indefinite `dict.get` fallbacks that exist solely for old rows are not required.
+- **Not permitted:** Hidden HTTP payload or business-semantic changes, removal of legacy HTTP/client compatibility solely because old database data is disposable, or breakage of the current frontend contract.
+- **Affected areas:** SQLite/Alembic policy, Decision Run persistence, persisted JSON readers, historical-fixture tests, and future persistence cleanup.
+
+## ADR-014 — Procurement authority separation
+
+- **Status:** ACCEPTED
+- **Decision:** ShelfCash intentionally maintains two deterministic procurement authorities for distinct public/use-case surfaces. **Operational Procurement Authority** is `POST`/`GET /api/v1/stores/{store_id}/forecast-runs/{forecast_run_id}/procurement-plans` through `DecisionPlanningService.generate_plans -> ProcurementPlanningService.build -> InventorySimulationService`; it owns current operational `ProcurementPlanRun` computation and persistence semantics. **Decision Procurement Authority** is Decision Run and What-if through `CoreProcurementAdapter -> shelfcash_core`; it owns decision candidate optimization, exact FEFO resimulation, critic validation, deterministic feasibility, risk/scenario evaluation, strategy selection and recommendation. Operational Procurement Authority != Decision Procurement Authority. Neither may silently replace the other.
+- **Context:** R3.4 established material semantic differences: open-PO/expiry interpretation, supplier preselection, Decimal MOQ/pack behavior, shelf-life/FEFO simulation, budget timing, capacity, feasibility, risk/reason codes, recommendation/tie-breaking, and daily projections. Replacing the operational planner with core is therefore not a mechanical caller migration. These authorities are not two implementations competing for one interchangeable procurement truth; they own separate contracts and use cases.
+- **Why:** This records accepted product architecture without an unsafe business-semantic, public-contract, or persistence migration. Both paths remain deterministic backend computation under ADR-002 and preserve shared applicable ADR-011 chronology and ADR-012 manager-safe semantics.
+- **Consequences:** Dual authority itself is accepted architecture, not authority ambiguity debt. Duplicated implementation, overlapping helpers/calculations, and maintenance cost remain technical debt where evidenced. Global legacy/core output parity is intentionally not required; targeted characterization of shared invariants such as EOD D -> D+1 chronology and intended unit interpretation remains useful.
+- **Rejected/deferred alternatives:** Core for every procurement surface is DEFERRED. A core-backed compatibility adapter is DEFERRED. Silent caller replacement is REJECTED.
+- **Revisit condition:** A separately approved convergence decision must define old/new business semantics, public and persistence impact, parity/characterization evidence, client impact, migration, rollback, and explicit architecture approval.
+- **Affected areas:** `/procurement-plans`, `ProcurementPlanningService`, `InventorySimulationService`, `CoreProcurementAdapter`, Decision Run, What-if, `ProcurementPlanRun`, legacy plan adapters, and procurement characterization/parity tests.
+
+## ADR-015 — Decision Planning use-case decomposition
+
+- **Status:** ACCEPTED
+- **Decision:** `DecisionPlanningService` may be incrementally decomposed into focused application use-case services with explicit responsibilities. During migration it may remain a temporary facade so current route/caller contracts stay stable and each extraction has a small rollback scope. Exact class names, service count, final composition-root shape, and final route wiring are not frozen by this decision.
+- **Required invariants:** Each extraction preserves ADR-007 public routes, request/response DTOs, status codes, error semantics, and OpenAPI; current deterministic business semantics and ADR-010 computation authority; ADR-014's Operational Procurement Authority != Decision Procurement Authority; current session ownership, commit ordering, rollback behavior, run-status lifecycle, idempotency ownership, and failure persistence; and active legacy compatibility. The deterministic `DecisionRun` package must persist and commit before assistant summary / ingredient-synthesis enrichment is persisted separately; assistant/narrative failure must not invalidate committed deterministic business truth. R2 narrative ownership and routing, including HYBRID Overall Summary, remain unchanged.
+- **Context:** R4 Entry Review established that `DecisionPlanningService` currently spans Ingredient Demand, Operational Procurement, active legacy plan compatibility, Decision Run generation/read, Brief/enrichment, Explanation, What-if, and shared orchestration/persistence concerns. Its responsibilities have materially different transaction and coupling profiles, making an incremental use-case/facade direction an architecture decision rather than simple file movement.
+- **Why:** Focused application-use-case boundaries can reduce responsibility coupling and change blast radius while preserving established computation, contract, transaction, procurement, compatibility, and narrative authorities.
+- **Rejected/deferred alternatives:** A big-bang `DecisionPlanningService` rewrite and a generic replacement `PlanningService`/God service are rejected. Immediate route rewiring for every use case and freezing an exact final class layout are deferred. Persistence/Unit-of-Work redesign remains R6 work; legacy lifecycle redesign remains R5 work.
+- **Migration guidance:** Every slice observes the current method; freezes contract, transaction, idempotency and failure semantics; extracts one proven application intent; delegates through the existing facade where useful; runs targeted and regression tests plus OpenAPI verification; documents the result; and then evaluates the next slice. A focused boundary must have one clear application intent, one explicit authority model, known contract/transaction/persistence dependencies, a small caller set, and a small rollback scope.
+- **Revisit condition:** Evidence shows incremental decomposition increases coupling, requires semantic or contract changes, or an explicitly approved alternative application-ownership model is selected.
+- **Affected areas:** `DecisionPlanningService`, planning routes, composition root, Ingredient Demand, Operational Procurement, Decision Run, Brief, Explanation, What-if, legacy compatibility, and transaction/idempotency tests.
+
 ## Deferred proposals requiring a future decision
 
-The following are not accepted target architecture: merging the computation packages; splitting `DecisionPlanningService`; deterministic-first Overall Summary; removing all Qwen; adopting Unit of Work everywhere; rewriting persistence; replacing SQLite; renaming or moving modules; and removing legacy routes. They remain proposals or technical debt until separately approved.
+The following are not accepted target architecture: merging the computation packages; deterministic-first Overall Summary; removing all Qwen; adopting Unit of Work everywhere; rewriting persistence; replacing SQLite; renaming or moving modules; and removing legacy routes. Exact final `DecisionPlanningService` layout remains intentionally unfrozen; ADR-015 governs its incremental decomposition. The remaining items are proposals or technical debt until separately approved.

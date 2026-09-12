@@ -5,7 +5,7 @@ from app.schemas.catalog import (
     AliasBulkUpsert, AliasResponse, IngredientCreate, IngredientPatch, IngredientResponse,
     ProductResponse,
 )
-from app.schemas.menu import MenuProductCreate, MenuProductPatch
+from app.schemas.menu import MenuProductCreate, MenuProductPatch, MenuProductResponse
 
 router = APIRouter(tags=["catalog"], dependencies=[Depends(require_api_key)])
 
@@ -40,16 +40,16 @@ def put_aliases(
     return service.put_aliases(store_id, body.aliases, idempotency_key)
 
 
-@router.get("/stores/{store_id}/products", summary="List products")
+@router.get("/stores/{store_id}/products", response_model=list[MenuProductResponse], summary="List products")
 def list_products(store_id: str, active: bool | None = None, q: str | None = None, sku: str | None = None, service=Depends(get_menu_service)):
     return service.list_products(store_id, active, q, sku)
 
 
-@router.post("/stores/{store_id}/products", status_code=201, summary="Create product")
+@router.post("/stores/{store_id}/products", response_model=MenuProductResponse, status_code=201, summary="Create product")
 def create_product(store_id: str, body: MenuProductCreate, idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"), service=Depends(get_menu_service)):
     return service.create_product(store_id, body, idempotency_key)
 
 
-@router.patch("/stores/{store_id}/products/{product_id}", summary="Update product")
+@router.patch("/stores/{store_id}/products/{product_id}", response_model=MenuProductResponse, summary="Update product")
 def patch_product(store_id: str, product_id: str, body: MenuProductPatch, service=Depends(get_menu_service)):
     return service.patch_product(store_id, product_id, body)

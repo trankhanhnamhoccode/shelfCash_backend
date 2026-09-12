@@ -255,3 +255,10 @@ def map_sheet_rules(
         requires_review=False,
     )
     return finalize_mapping(profile, suggestion, confidence_threshold)
+
+
+def mapping_requires_llm(
+    suggestion: MappingSuggestion, confidence_threshold: float,
+) -> bool:
+    """Shared rule-first escalation policy for import and direct mapping paths."""
+    return suggestion.confidence < confidence_threshold

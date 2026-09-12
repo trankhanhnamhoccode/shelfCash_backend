@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, Request
 
 from app.core.exceptions import LLMUnavailableError
 from app.core.canonical_schemas import CANONICAL_SCHEMAS
-from app.core.rule_mapper import map_sheet_rules
+from app.core.rule_mapper import map_sheet_rules, mapping_requires_llm
 from app.dependencies import get_llm_provider, require_api_key
 from app.llm.tasks import LLMFailureStage
 from app.schemas.llm import MapSheetRequest, MappingSuggestion
@@ -23,6 +23,8 @@ async def map_sheet(
 ):
     threshold = request.app.state.settings.rule_confidence_threshold
     rule = map_sheet_rules(payload.profile, threshold)
+    if not mapping_requires_llm(rule, threshold):
+        return rule
     if provider.available:
         try:
             return await provider.map_sheet(payload.profile, CANONICAL_SCHEMAS, rule)

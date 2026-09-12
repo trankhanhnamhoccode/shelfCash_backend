@@ -1,7 +1,6 @@
 """Canonical deterministic facts and narration for one What-if request."""
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import json
 import re
@@ -23,6 +22,7 @@ from app.decision_intelligence.contracts import (
     WhatIfStrategyChange,
 )
 from app.llm.tasks import LLMFailureStage, LLMTask
+from app.llm.runtime import generate_json_sync
 from app.decision_intelligence.communication_plan import what_if_communication_plan
 from app.decision_intelligence.display import add_numeric_display_contract
 from app.decision_intelligence.style_examples import retrieve_style_examples
@@ -272,7 +272,7 @@ class WhatIfNarrativeProvider:
                     "STYLE_EXAMPLES are wording only, never facts or citations; use only EVIDENCE for claims."
                 ),
             }
-            raw = _run_async(self.llm_provider.generate_json(
+            raw = generate_json_sync(self.llm_provider,
                 """Bạn diễn giải kết quả What-if của ShelfCash thành tiếng Việt ngắn gọn cho quản lý cửa hàng.
 Đây là tình huống giả định do người dùng yêu cầu, không phải strategy optimizer tự chọn. Chỉ dùng
 What-if facts được cung cấp; không tính lại, không suy luận cơ chế hay nguyên nhân ngoài facts.
@@ -282,7 +282,7 @@ hypothetical value và delta khi facts đã có đủ cả ba. Không lộ machi
 model hay implementation. Giữ claims/evidence IDs đúng schema và chỉ trả JSON.""", payload,
                 task=LLMTask.DECISION_NARRATIVE,
                 request_context=request_context,
-            ))
+            )
             try:
                 typed = DecisionNarrativeLLMResponse.model_validate(raw)
             except ValidationError as exc:
@@ -390,16 +390,6 @@ model hay implementation. Giữ claims/evidence IDs đúng schema và chỉ tr�
         )
 
 
-def _run_async(coro):
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.run(coro)
-    import concurrent.futures
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-        return pool.submit(lambda: asyncio.run(coro)).result()
-
-
 def _validate_numbers(text: str, items: list[WhatIfEvidenceFact]):
     remaining = text
     allowed = {
@@ -411,31 +401,6 @@ def _validate_numbers(text: str, items: list[WhatIfEvidenceFact]):
     if re.search(r"(?<![\w])[-+]?\d+(?:[.,]\d+)?", remaining):
         raise ValueError("unsupported_numeric_claim")
     return
-    raw_values = [round(float(value), 9) for item in items for value in item.values.values() if isinstance(value, (int, float))]
-    # Vietnamese prose commonly expresses a negative delta through a preceding
-    # word such as "giảm" rather than a minus sign.  The direction itself is
-    # still supplied by the deterministic fact; accept its display magnitude.
-    supported = set(raw_values) | {abs(value) for value in raw_values}
-    pattern = r"(?<![\w])[-+]?\d{1,3}(?:[.,]\d{3})+(?:[.,]\d+)?|(?<![\w])[-+]?\d+(?:[.,]\d+)?"
-    for value in re.findall(pattern, text):
-        if round(_parse_display_number(value), 9) not in supported:
-            raise ValueError("unsupported_numeric_claim")
-
-
-def _parse_display_number(value: str) -> float:
-    compact = value.replace(" ", "")
-    if compact.count(".") > 1 or compact.count(",") > 1:
-        return float(compact.replace(".", "").replace(",", ""))
-    if "." in compact and "," in compact:
-        decimal = "." if compact.rfind(".") > compact.rfind(",") else ","
-        thousands = "," if decimal == "." else "."
-        return float(compact.replace(thousands, "").replace(decimal, "."))
-    separator = "." if "." in compact else "," if "," in compact else None
-    if separator and len(compact.rsplit(separator, 1)[1]) == 3:
-        return float(compact.replace(separator, ""))
-    return float(compact.replace(",", "."))
-
-
 def _validate_intervention_language(text: str, items: list[WhatIfEvidenceFact]):
     lowered = f" {text.lower()} "
     causal = (" khi ", " vì ", " do ", " nên ", " because ", " due to ")
