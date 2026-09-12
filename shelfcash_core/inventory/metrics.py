@@ -17,6 +17,17 @@ from shelfcash_core.inventory.contracts import (
 InventoryKey = tuple[str, str, str]
 
 
+def _unit_interval(value: float) -> float:
+    """Return a rate/probability within its mathematical [0, 1] bounds.
+
+    Weighted NumPy reductions can exceed one by a few ulps even when every
+    input and the normalized weights are valid (for example, nine weights of
+    1/9).  Clamp only the bounded aggregate at the contract boundary; retain
+    the full precision of the underlying calculation.
+    """
+    return min(1.0, max(0.0, float(value)))
+
+
 def _sum_optional(values: list[float | None]) -> float | None:
     return float(sum(value for value in values if value is not None)) if all(
         value is not None for value in values
@@ -82,7 +93,11 @@ def summarize_simulation(
                 total_inbound=sum(item.inbound_quantity for item in key_ledgers),
                 ending_inventory=ending_inventory,
                 maximum_inventory=max(item.maximum_quantity for item in key_ledgers),
-                fill_rate=fulfilled / total_demand if total_demand else 1.0,
+                fill_rate=(
+                    _unit_interval(fulfilled / total_demand)
+                    if total_demand
+                    else 1.0
+                ),
                 days_of_supply=(
                     ending_inventory / mean_daily_demand
                     if mean_daily_demand > 0
@@ -120,7 +135,9 @@ def summarize_simulation(
         number_of_ingredient_keys_with_stockout=sum(
             item.stockout_event_count > 0 for item in by_key
         ),
-        mean_key_fill_rate=float(np.mean([item.fill_rate for item in by_key])),
+        mean_key_fill_rate=_unit_interval(
+            np.mean([item.fill_rate for item in by_key])
+        ),
         number_of_capacity_violations=(
             sum(float(item.capacity_violation_quantity or 0) > 0 for item in by_key)
             if capacity_complete
@@ -215,7 +232,9 @@ def _key_risk_metrics(
     capacity_probability = None
     if all(value is not None for value in capacities):
         capacity_array = np.asarray(capacities, dtype=float)
-        capacity_probability = float(np.sum(weights[capacity_array > 0]))
+        capacity_probability = _unit_interval(
+            np.sum(weights[capacity_array > 0])
+        )
 
     costs = [item.total_consequence_cost for item in summaries]
     cost_array = (
@@ -227,17 +246,17 @@ def _key_risk_metrics(
         store_id=store_id,
         ingredient_id=ingredient_id,
         unit=unit,
-        stockout_probability=float(np.sum(weights[shortages > 0])),
+        stockout_probability=_unit_interval(np.sum(weights[shortages > 0])),
         expected_shortage=float(np.dot(shortages, weights)),
         p50_shortage=weighted_quantile(shortages, weights, 0.5),
         p95_shortage=weighted_quantile(shortages, weights, 0.95),
         expected_expired_quantity=float(np.dot(expired, weights)),
         expected_explicit_waste=float(np.dot(waste, weights)),
-        waste_threshold_exceedance_probability=float(
+        waste_threshold_exceedance_probability=_unit_interval(
             np.sum(weights[waste > waste_threshold])
         ),
-        expected_fill_rate=float(np.dot(fill_rate, weights)),
-        fill_rate_below_target_probability=float(
+        expected_fill_rate=_unit_interval(np.dot(fill_rate, weights)),
+        fill_rate_below_target_probability=_unit_interval(
             np.sum(weights[fill_rate < fill_rate_target])
         ),
         expected_ending_inventory=float(np.dot(ending, weights)),
@@ -333,16 +352,18 @@ def aggregate_risk_metrics(
     return InventoryRiskMetrics(
         scenario_count=len(results),
         by_key=by_key,
-        any_stockout_probability=float(np.sum(weights[any_stockout])),
+        any_stockout_probability=_unit_interval(np.sum(weights[any_stockout])),
         expected_affected_key_count=float(np.dot(affected_counts, weights)),
-        expected_affected_key_proportion=float(
+        expected_affected_key_proportion=_unit_interval(
             np.dot(affected_counts / len(expected_keys), weights)
         ),
-        mean_key_fill_rate=float(
+        mean_key_fill_rate=_unit_interval(
             np.mean([item.expected_fill_rate for item in by_key])
         ),
         any_capacity_violation_probability=(
-            float(np.sum(weights[any_capacity])) if capacity_complete else None
+            _unit_interval(np.sum(weights[any_capacity]))
+            if capacity_complete
+            else None
         ),
         expected_consequence_cost=(
             float(np.dot(cost_array, weights)) if cost_array is not None else None

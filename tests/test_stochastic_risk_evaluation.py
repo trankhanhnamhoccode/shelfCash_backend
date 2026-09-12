@@ -81,6 +81,17 @@ def test_fixed_plan_risk_is_weighted_exact_fefo_and_unit_safe():
     ]
 
 
+def test_weighted_perfect_fill_rate_is_clamped_at_one():
+    """Nine 1/9 weights reproduce NumPy's 1.0000000000000002 reduction."""
+    result = optimize_procurement(_request(risk_scenarios=[
+        _scenario(f"s{index}", 5, 1 / 9) for index in range(9)
+    ]))
+
+    risk = result.evaluations["BALANCED"].risk_simulation.risk_metrics
+    assert risk.by_key[0].expected_fill_rate == 1.0
+    assert risk.mean_key_fill_rate == 1.0
+
+
 def test_probability_metrics_remain_unavailable_without_valid_distribution():
     request = _request(risk_scenarios=[])
     result = optimize_procurement(request)
