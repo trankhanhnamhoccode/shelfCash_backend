@@ -14,6 +14,14 @@
 
 ShelfCash Backend is a FastAPI modular monolith. HTTP routes call application services, repositories/direct SQLAlchemy access, and deterministic computation adapters. `shelfcash_core` is the production computation authority for Forecast, BOM, Ingredient Demand and Decision/What-if computation. `shelfcash_forecast` is the optional forecast/BOM shadow-parity implementation; Decision Intelligence imports some non-computation contracts/helpers from it, which does not confer production authority. Under ADR-014, the operational `/procurement-plans` planner is a distinct accepted authority rather than a shadow of the Decision core. Persistence uses SQLAlchemy and SQLite by default. OpenRouter/Qwen is a bounded narrative or ambiguity-resolution integration; it is not business authority.
 
+## Post-R7 stochastic risk-evidence sufficiency slice
+
+- **Status:** COMPLETE (2026-09-19). ADR-016 makes empirical stochastic stockout risk authoritative only after scenario evidence passes `MIN_EFFECTIVE_STOCHASTIC_SCENARIOS = 10`.
+- **Runtime behavior:** Decision Procurement canonicalizes generated ingredient-demand paths by exact business demand vector, aggregates duplicate-path weights, and calculates `N_eff = 1 / sum(w_i ** 2)` on normalized unique-path weights. When the evidence is insufficient, it uses the existing p25/p50/p75 deterministic design scenarios, sets `stochastic_saa_enabled=false`, and records `stochastic_fallback_reason=insufficient_effective_scenarios`.
+- **Authority boundary:** insufficiency is not high risk. `RISK_CONSTRAINT_VIOLATION` is not emitted from an insufficient stochastic set. Exact FEFO and the critic still evaluate the deterministic fallback, so exact safety-floor and all other existing feasibility failures remain authoritative. Stochastic thresholds, optimizer objective, candidate-selection rule, persistence shape, and historical Decision Runs are unchanged.
+- **Diagnostics / compatibility:** current packages add optional `scenario_count_requested`, `scenario_count_generated`, `unique_scenario_count`, `effective_scenario_count`, and `stochastic_fallback_reason` technical metrics. Old packages without these fields remain readable; no migration or backfill is required.
+- **Verification:** focused scenario/procurement/FEFO/strategy/Decision/What-if regression passed **156 tests, 15 warnings in 88.24s**; full suite passed **656 tests, 22 warnings in 553.07s**. `compileall -q app shelfcash_core tests` and `git diff --check` passed. Generated OpenAPI remains **58 paths / 70 operations** and contains the additive technical-metric fields. No endpoint or route is added.
+
 ## Core business flow
 
 Import → Canonical DB → Forecast → BOM → Ingredient Demand → Inventory/FEFO → Procurement candidates → Exact simulation/critic → Strategy selection → Decision Package → Decision Intelligence.

@@ -45,6 +45,16 @@ AS-IS facts, accepted targets, proposals, technical debt, and historical informa
 11. Archived docs are preserved before deletion.
 12. No big-bang core/package consolidation.
 
+## Post-R7 stochastic risk-evidence sufficiency slice â€” COMPLETE (2026-09-19)
+
+- [x] ADR-016 accepted before the semantic boundary is released: stochastic risk authority requires explicit effective-scenario sufficiency.
+- [x] Generated stochastic ingredient-demand paths are canonicalized by exact business demand vector; duplicate weights are aggregated and `N_eff` is calculated from normalized unique-path weights.
+- [x] `N_eff < 10` routes to the established deterministic p25/p50/p75 design scenarios with additive diagnostics; it does not relax a strategy threshold or manufacture a risk estimate.
+- [x] `RISK_CONSTRAINT_VIOLATION` is guarded by `stochastic_saa_enabled`; Exact FEFO safety-floor, service, budget, supplier, MOQ, pack, capacity, lead-time, expiry, accounting and model-match authority are unchanged.
+- [x] Acceptance coverage pins duplicate collapse, insufficient fallback, sufficient high/low risk, exact-floor independence, deterministic regression, residual-fallback compatibility, and old Decision Package diagnostic compatibility.
+- [x] Verification passed: focused scenario/procurement/FEFO/strategy/Decision/What-if regression **156 passed**; full suite **656 passed**; `compileall`, `git diff --check`, and runtime OpenAPI **58 paths / 70 operations** passed. The OpenAPI change is limited to additive optional `DecisionPackageTechnicalMetrics` properties.
+- [x] Rollback remains local to the sufficiency helper, Decision adapter routing/diagnostics, critic risk guard, focused tests, and ADR/checkpoint documentation. No migration, data backfill, public route change, or historical package rewrite.
+
 ## R0 — Pre-Refactor Baseline
 
 Goals: review the AS-IS architecture/API snapshots; establish decisions, state, test and OpenAPI baselines; classify documentation and debt; and prepare a human-reviewed baseline commit/tag.

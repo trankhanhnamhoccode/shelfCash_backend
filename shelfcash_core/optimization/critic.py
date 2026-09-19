@@ -315,7 +315,26 @@ def critique_procurement_plan(
 
         risk_valid = True
         if profile.maximum_stockout_probability is not None:
-            if metrics is None:
+            # Empirical stockout probability has business authority only when
+            # the adapter has admitted a sufficient stochastic SAA sample.
+            # A deterministic/design fallback may still produce Exact FEFO
+            # shortages and safety-floor violations, but must not be recast as
+            # an empirical stochastic-risk estimate.
+            risk_authoritative = bool(
+                request.stochastic
+                and request.risk_evaluation_metadata.get(
+                    "stochastic_saa_enabled", request.stochastic
+                )
+            )
+            if not risk_authoritative:
+                warnings.append("RISK_METRIC_NOT_AVAILABLE")
+                checks["risk"] = False
+                details["risk_evaluation"] = {
+                    "status": "not_evaluated",
+                    "reason": "stochastic_saa_not_enabled",
+                    "maximum_stockout_probability": profile.maximum_stockout_probability,
+                }
+            elif metrics is None:
                 warnings.append("UNWEIGHTED_STOCKOUT_PROBABILITY_NOT_EVALUATED")
                 warnings.append("RISK_METRIC_NOT_AVAILABLE")
                 checks["risk"] = False

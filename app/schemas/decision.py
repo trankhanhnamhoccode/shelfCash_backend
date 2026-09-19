@@ -80,12 +80,17 @@ class DecisionPackageReasonCode(_DecisionPackageModel):
 
 class DecisionPackageTechnicalMetrics(_DecisionPackageModel):
     scenario_count: int
+    scenario_count_requested: int | None = None
+    scenario_count_generated: int | None = None
+    unique_scenario_count: int | None = None
+    effective_scenario_count: float | None = None
     scenario_method: str
     random_seed: int
     optimizer_type: str
     cvar_alpha: float | None = None
     core_version: str
     stochastic_saa_enabled: bool
+    stochastic_fallback_reason: str | None = None
     risk_evaluation_status: str | None = None
     risk_evaluation_sample_count: int | None = None
     baseline_engine: str

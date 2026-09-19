@@ -27,6 +27,7 @@ from shelfcash_core.optimization.contracts import OptimizationRequest, SupplierO
 from shelfcash_core.optimization.expiry import resolve_inbound_expiry
 from shelfcash_core.optimization.optimizer import optimize_procurement
 from shelfcash_core.scenario.composer import generate_product_demand_scenarios
+from shelfcash_core.scenario.sufficiency import select_stochastic_scenarios
 
 
 class CoreProcurementAdapter:
@@ -149,8 +150,28 @@ class CoreProcurementAdapter:
         scenario_metadata = {
             "method": "quantile_design_fallback", "stochastic_enabled": False,
             "risk_status": "not_evaluated", "risk_reason": "MONTE_CARLO_DISABLED",
-            "warnings": [],
+            "warnings": [], "scenario_count_requested": (
+                scenario_count if engine_mode == "stochastic" else None
+            ),
+            "scenario_count_generated": 0,
+            "unique_scenario_count": 0,
+            "effective_scenario_count": None,
+            "stochastic_fallback_reason": None,
         }
+        # Quantiles are the pre-existing deterministic authority and are also
+        # the required fallback if empirical stochastic evidence is weak.
+        for scenario_id, quantile in (("p25_design", "p25"), ("p50_design", "p50"), ("p75_design", "p75")):
+            scenarios.append(InventoryDemandScenario(
+                scenario_id=scenario_id, probability_weight=None,
+                simulation_start_date=decision_date, simulation_end_date=horizon_end,
+                lines=[InventoryDemandLine(
+                    scenario_id=scenario_id, store_id=store_id,
+                    ingredient_id=row.ingredient_id, target_date=row.target_date,
+                    quantity=float(getattr(row, quantile)), unit=row.unit,
+                ) for row in demand_rows],
+                provenance={"scenario_kind": "quantile_design_fallback"},
+                warnings=["SCENARIO_HISTORY_INSUFFICIENT"],
+            ))
         if engine_mode == "stochastic" and predictions and forecast.model_version:
             # Do not mix calibration residuals across forecast model versions.
             residuals = self._canonical_residuals(
@@ -169,12 +190,21 @@ class CoreProcurementAdapter:
                         simulation_start_date=decision_date, simulation_end_date=horizon_end,
                         lines=[InventoryDemandLine(scenario_id=x.scenario_id, store_id=store_id, ingredient_id=line.ingredient_id, target_date=line.target_date, quantity=line.quantity, unit=line.unit) for line in x.lines],
                         provenance={"scenario_kind": bundle.scenario_method, **bundle.diagnostics}, warnings=x.warnings) for x in ingredient_bundle.scenarios]
+                    selection = select_stochastic_scenarios(risk_scenarios, scenarios)
                     scenario_metadata = {
-                        "method": bundle.scenario_method, "stochastic_enabled": False,
-                        "risk_status": "evaluated", "risk_reason": None,
-                        "sample_count": len(risk_scenarios), "warnings": bundle.warnings,
+                        "method": bundle.scenario_method,
+                        "stochastic_enabled": selection.stochastic_saa_enabled,
+                        "risk_status": "evaluated" if selection.stochastic_saa_enabled else "not_evaluated",
+                        "risk_reason": None if selection.stochastic_saa_enabled else "INSUFFICIENT_EFFECTIVE_SCENARIOS",
+                        "sample_count": len(selection.risk_scenarios), "warnings": bundle.warnings,
                         "diagnostics": bundle.diagnostics,
+                        "scenario_count_requested": scenario_count,
+                        "scenario_count_generated": selection.scenario_count_generated,
+                        "unique_scenario_count": selection.unique_scenario_count,
+                        "effective_scenario_count": selection.effective_scenario_count,
+                        "stochastic_fallback_reason": selection.fallback_reason,
                     }
+                    risk_scenarios = selection.risk_scenarios
                 except Exception as exc:
                     # Residual history is a statistical prerequisite, never a
                     # license to manufacture probabilities from quantiles.
@@ -183,32 +213,24 @@ class CoreProcurementAdapter:
                         "risk_status": "not_evaluated", "risk_reason": "RESIDUAL_DISTRIBUTION_NOT_AVAILABLE",
                         "warnings": ["RISK_METRIC_NOT_AVAILABLE"],
                         "diagnostics": {"error_type": type(exc).__name__},
+                        "scenario_count_requested": scenario_count,
+                        "scenario_count_generated": 0,
+                        "unique_scenario_count": 0,
+                        "effective_scenario_count": None,
+                        "stochastic_fallback_reason": "residual_distribution_not_available",
                     }
             else:
                 scenario_metadata.update({
                     "risk_reason": "RESIDUAL_DISTRIBUTION_NOT_AVAILABLE",
                     "warnings": ["RISK_METRIC_NOT_AVAILABLE"],
+                    "stochastic_fallback_reason": "residual_distribution_not_available",
                 })
         elif engine_mode == "stochastic" and predictions:
             scenario_metadata.update({
                 "risk_reason": "RESIDUAL_DISTRIBUTION_NOT_AVAILABLE",
                 "warnings": ["RISK_METRIC_NOT_AVAILABLE"],
+                "stochastic_fallback_reason": "residual_distribution_not_available",
             })
-        # Quantiles remain deterministic design/stress inputs, not probability
-        # scenarios.  They must be present even when risk simulation succeeds.
-        if not scenarios:
-          for scenario_id, quantile in (("p25_design", "p25"), ("p50_design", "p50"), ("p75_design", "p75")):
-            scenarios.append(InventoryDemandScenario(
-                scenario_id=scenario_id, probability_weight=None,
-                simulation_start_date=decision_date, simulation_end_date=horizon_end,
-                lines=[InventoryDemandLine(
-                    scenario_id=scenario_id, store_id=store_id,
-                    ingredient_id=row.ingredient_id, target_date=row.target_date,
-                    quantity=float(getattr(row, quantile)), unit=row.unit,
-                ) for row in demand_rows],
-                provenance={"scenario_kind": "quantile_design_fallback"},
-                warnings=["SCENARIO_HISTORY_INSUFFICIENT"],
-            ))
         optimizer_scenarios = (
             risk_scenarios
             if engine_mode == "stochastic" and risk_scenarios
@@ -291,6 +313,7 @@ class CoreProcurementAdapter:
                 "method": scenario_metadata["method"] if risk_scenarios else None,
                 "sample_count": len(risk_scenarios),
                 "seed": seed,
+                "stochastic_saa_enabled": bool(optimizer_scenarios is risk_scenarios),
             },
             stochastic=(optimizer_scenarios is risk_scenarios), seed=seed,
         )

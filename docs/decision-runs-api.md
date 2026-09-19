@@ -22,6 +22,23 @@ The what-if response is explicitly read-only. It builds an in-memory
 hypothetical Decision Package from the persisted baseline inputs and requested
 mutations; it never mutates inventory, orders, or the source Decision Run.
 
+## Stochastic evidence diagnostics
+
+For a newly created stochastic Decision Run, `technical_metrics` may include
+the additive diagnostics `scenario_count_requested`,
+`scenario_count_generated`, `unique_scenario_count`,
+`effective_scenario_count`, and `stochastic_fallback_reason`.
+
+Generated records with identical business demand paths are aggregated before
+stochastic risk authority is granted. If the effective scenario count is below
+the current minimum of 10, the engine uses the ordinary p25/p50/p75 design
+scenarios, publishes `stochastic_saa_enabled=false` and
+`stochastic_fallback_reason="insufficient_effective_scenarios"`, and does not
+use the insufficient sample to emit `RISK_CONSTRAINT_VIOLATION`. This fallback
+does not make a candidate feasible by itself: Exact FEFO, safety-floor, service,
+supplier, budget, capacity, and other existing rules continue to apply. These
+fields are optional so stored historical packages remain readable as-is.
+
 ## Deterministic ingredient-metric basis
 
 For newly created Decision Runs, each item in
