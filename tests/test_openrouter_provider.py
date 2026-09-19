@@ -79,7 +79,7 @@ def test_gateway_exposes_independent_task_profiles():
 
 
 @pytest.mark.asyncio
-async def test_task_requests_use_strict_schema_reasoning_off_and_pin_siliconflow(monkeypatch):
+async def test_task_requests_use_strict_schema_reasoning_off_and_approved_provider_routes(monkeypatch):
     provider = OpenRouterLLMGateway(Settings(openrouter_api_key="mock-key"))
     sent: list[dict] = []
 
@@ -103,11 +103,20 @@ async def test_task_requests_use_strict_schema_reasoning_off_and_pin_siliconflow
     mapping, narrative, summary, ingredient_synthesis, strategy_expression = sent
     for body, task in ((mapping, LLMTask.EXCEL_MAPPING), (narrative, LLMTask.DECISION_NARRATIVE), (summary, LLMTask.PLAN_SUMMARY), (ingredient_synthesis, LLMTask.INGREDIENT_SYNTHESIS), (strategy_expression, LLMTask.STRATEGY_EXPRESSION)):
         assert body["reasoning"] == {"effort": "none"}
-        assert body["provider"] == {
-            "only": ["siliconflow"],
-            "allow_fallbacks": False,
-            "require_parameters": True,
-        }
+        expected_provider = (
+            {
+                "order": ["deepinfra", "together", "siliconflow"],
+                "allow_fallbacks": False,
+                "require_parameters": True,
+            }
+            if task is LLMTask.PLAN_SUMMARY
+            else {
+                "only": ["siliconflow"],
+                "allow_fallbacks": False,
+                "require_parameters": True,
+            }
+        )
+        assert body["provider"] == expected_provider
         assert body["response_format"]["type"] == "json_schema"
         assert body["response_format"]["json_schema"]["strict"] is True
         assert body["response_format"]["json_schema"]["name"] == task.value

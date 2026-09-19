@@ -27,11 +27,10 @@ from app.schemas.llm import MappingSuggestion
 
 logger = logging.getLogger("shelfcash.llm")
 
-# All Qwen workloads must use the same OpenRouter inference provider.  Keep this
-# at the gateway boundary so every task (including future callers of
-# ``generate_json``) receives the restriction rather than relying on each
-# business service to remember it.
+# Non-summary Qwen workloads use a single approved OpenRouter inference
+# provider. Keep routing at the gateway boundary so callers cannot bypass it.
 QWEN_PROVIDER = "siliconflow"
+SUMMARY_PROVIDER_ORDER = ("deepinfra", "together", QWEN_PROVIDER)
 
 
 class OpenRouterLLMGateway(LLMProvider):
@@ -154,6 +153,26 @@ class OpenRouterLLMGateway(LLMProvider):
             strict_schema=bool(getattr(self.settings, f"{prefix}_strict_schema", True)),
             require_parameters=bool(getattr(self.settings, f"{prefix}_require_parameters", True)),
         )
+
+    @staticmethod
+    def _provider_preferences(task: LLMTask, require_parameters: bool) -> dict[str, Any]:
+        """Return the approved OpenRouter route for a Qwen task.
+
+        The decision summary prefers DeepInfra and may fail over only to
+        Together then SiliconFlow. The application-owned deterministic summary
+        is used if OpenRouter cannot complete through that approved route.
+        """
+        if task is LLMTask.PLAN_SUMMARY:
+            return {
+                "order": list(SUMMARY_PROVIDER_ORDER),
+                "allow_fallbacks": False,
+                "require_parameters": require_parameters,
+            }
+        return {
+            "only": [QWEN_PROVIDER],
+            "allow_fallbacks": False,
+            "require_parameters": require_parameters,
+        }
 
     @staticmethod
     def _response_schema(task: LLMTask) -> dict[str, Any]:
@@ -370,11 +389,7 @@ class OpenRouterLLMGateway(LLMProvider):
                 "temperature": profile.temperature,
                 "max_tokens": profile.max_tokens,
                 "reasoning": {"enabled": True} if profile.reasoning_enabled else {"effort": "none"},
-                "provider": {
-                    "only": [QWEN_PROVIDER],
-                    "allow_fallbacks": False,
-                    "require_parameters": profile.require_parameters,
-                },
+                "provider": self._provider_preferences(task, profile.require_parameters),
             }
             if profile.structured_output:
                 body["response_format"] = {
