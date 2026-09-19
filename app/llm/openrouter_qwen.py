@@ -27,6 +27,12 @@ from app.schemas.llm import MappingSuggestion
 
 logger = logging.getLogger("shelfcash.llm")
 
+# All Qwen workloads must use the same OpenRouter inference provider.  Keep this
+# at the gateway boundary so every task (including future callers of
+# ``generate_json``) receives the restriction rather than relying on each
+# business service to remember it.
+QWEN_PROVIDER = "siliconflow"
+
 
 class OpenRouterLLMGateway(LLMProvider):
     """Task-aware OpenRouter gateway with no model-specific business API."""
@@ -364,7 +370,11 @@ class OpenRouterLLMGateway(LLMProvider):
                 "temperature": profile.temperature,
                 "max_tokens": profile.max_tokens,
                 "reasoning": {"enabled": True} if profile.reasoning_enabled else {"effort": "none"},
-                "provider": {"require_parameters": profile.require_parameters},
+                "provider": {
+                    "only": [QWEN_PROVIDER],
+                    "allow_fallbacks": False,
+                    "require_parameters": profile.require_parameters,
+                },
             }
             if profile.structured_output:
                 body["response_format"] = {

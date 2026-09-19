@@ -79,7 +79,7 @@ def test_gateway_exposes_independent_task_profiles():
 
 
 @pytest.mark.asyncio
-async def test_task_requests_use_strict_schema_reasoning_off_and_required_parameters(monkeypatch):
+async def test_task_requests_use_strict_schema_reasoning_off_and_pin_siliconflow(monkeypatch):
     provider = OpenRouterLLMGateway(Settings(openrouter_api_key="mock-key"))
     sent: list[dict] = []
 
@@ -98,11 +98,16 @@ async def test_task_requests_use_strict_schema_reasoning_off_and_required_parame
     await provider.generate_json("narrative", {}, task=LLMTask.DECISION_NARRATIVE)
     await provider.generate_json("summary", {}, task=LLMTask.PLAN_SUMMARY)
     await provider.generate_json("ingredient synthesis", {"ingredients": []}, task=LLMTask.INGREDIENT_SYNTHESIS)
+    await provider.generate_json("strategy expression", {"strategies": []}, task=LLMTask.STRATEGY_EXPRESSION)
 
-    mapping, narrative, summary, ingredient_synthesis = sent
-    for body, task in ((mapping, LLMTask.EXCEL_MAPPING), (narrative, LLMTask.DECISION_NARRATIVE), (summary, LLMTask.PLAN_SUMMARY), (ingredient_synthesis, LLMTask.INGREDIENT_SYNTHESIS)):
+    mapping, narrative, summary, ingredient_synthesis, strategy_expression = sent
+    for body, task in ((mapping, LLMTask.EXCEL_MAPPING), (narrative, LLMTask.DECISION_NARRATIVE), (summary, LLMTask.PLAN_SUMMARY), (ingredient_synthesis, LLMTask.INGREDIENT_SYNTHESIS), (strategy_expression, LLMTask.STRATEGY_EXPRESSION)):
         assert body["reasoning"] == {"effort": "none"}
-        assert body["provider"] == {"require_parameters": True}
+        assert body["provider"] == {
+            "only": ["siliconflow"],
+            "allow_fallbacks": False,
+            "require_parameters": True,
+        }
         assert body["response_format"]["type"] == "json_schema"
         assert body["response_format"]["json_schema"]["strict"] is True
         assert body["response_format"]["json_schema"]["name"] == task.value
