@@ -133,8 +133,8 @@ class DecisionPlanningService:
 
  def explain_decision(self,rid,body):
   return ExplainDecision(
-   BuildDecisionBrief(self.factory,self.settings,self.llm_provider),
-   self.read_decision_package,self.settings,self.llm_provider,
+  BuildDecisionBrief(self.factory,self.settings,self.llm_provider),
+   self.read_decision_package,self.settings,self.llm_provider,self.factory,
   ).explain(rid,body)
 
  def what_if_decision(self,rid,body):

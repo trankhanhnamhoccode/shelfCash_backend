@@ -30,6 +30,21 @@ For migration sequence and safety gates: `REFACTOR_PLAN.md`.
 
 AS-IS facts, accepted targets, proposals, technical debt, and historical information must remain explicitly labeled and must not be silently merged.
 
+## Explanation ingredient entity resolution — COMPLETE (2026-09-21)
+
+- [x] Contract frozen before implementation: backend owns canonical identity, persisted Decision Run membership, and evidence selection; Qwen only words authorized evidence.
+- [x] Supplied ingredient IDs are validated against persisted `ingredient_demand[] ∪ recommended_plan.items[]`, then constrain the single ingredient-specific Explanation path without requiring a current catalog row.
+- [x] Question-only resolution uses store-scoped canonical names, approved aliases, existing normalization, and conservative deterministic lexical fuzzy recovery; ambiguity and unresolved run scope fail closed.
+- [x] Confident unique contradictory text returns mismatch without ever replacing a supplied ID; generic questions retain generic Explanation routing.
+- [x] Verification: focused Prompt 3 suite **59 passed**; final production regression **672 passed, 22 warnings**; Prompt 4 winner-margin characterization **3 passed** with no production change; `compileall`, `git diff --check`, and OpenAPI **58 paths / 70 operations** pass. No migration, backfill, cache, public request/response DTO change, or business-computation change.
+
+## Explanation query interpretation hardening — COMPLETE (2026-09-21)
+
+- [x] Query purpose is deterministically gated before entity resolution: supported generic explanation, supported ingredient explanation, or unsupported/unclear input.
+- [x] Ingredient mentions alone do not retrieve procurement evidence; out-of-domain and gibberish questions return the existing global error envelope with `422 EXPLANATION_QUERY_UNSUPPORTED`.
+- [x] User numeric premises remain context only. Same-unit explicit procurement mismatches are corrected from persisted evidence without putting the user number into business claims/citations.
+- [x] Final verification: **675 passed, 22 warnings in 634.22s**; no API shape, persistence, migration, Decision Package, or business-computation change.
+
 ## Baseline safety rules
 
 1. No external payload changes hidden inside refactor.

@@ -14,6 +14,8 @@ from app.decision_intelligence.contracts import (
 )
 from app.decision_intelligence.narrative import DecisionNarrativeProvider
 from app.decision_intelligence.semantic_evidence import DecisionSemanticEvidenceBuilder
+from app.models.business import IngredientModel
+from app.models.business import IngredientAliasModel
 from app.models.decision import DecisionRunModel
 from app.schemas.decision import ExplanationRequest
 
@@ -248,3 +250,139 @@ def test_api_backward_compatibility_and_invalid_target_are_deterministic(client)
     invalid = client.post("/api/v1/decision-runs/ingredient-api/explanation", json={"ingredient_id": "orange"})
     assert invalid.status_code == 422
     assert invalid.json()["code"] == "DECISION_RUN_INGREDIENT_NOT_FOUND"
+
+
+def test_api_validates_id_against_persisted_demand_plan_universe_without_catalog(client):
+    package = {
+        "decision_run_id": "ingredient-plan-only", "store_id": "STORE_001", "status": "completed",
+        "recommended_strategy": "balanced",
+        "recommended_plan": {"items": [{"ingredient_id": "plan-only", "order_quantity": 3, "unit": "kg"}]},
+        "ingredient_demand": [],
+        "inventory_risk": {"ingredient_id": "risk-only"},
+        "assistant": {"ingredient_synthesis": [{"ingredient_id": "synthesis-only"}]},
+        "business_metrics": {}, "critic": {"findings": [], "warnings": []},
+        "reason_codes": [], "warnings": [],
+    }
+    with client.app.state.session_factory() as session:
+        session.add(IngredientModel(
+            ingredient_id="catalog-only", store_id="STORE_001", ingredient="Catalog only",
+            normalized_name="catalog only", base_unit="kg", active=True, source="test",
+        ))
+        session.add(_run("ingredient-plan-only", package))
+        session.commit()
+
+    valid = client.post(
+        "/api/v1/decision-runs/ingredient-plan-only/explanation",
+        json={"language": "en", "detail_level": "simple", "question": "Why?", "ingredient_id": "plan-only"},
+    )
+    assert valid.status_code == 200
+    assert valid.json()["entities"]["ingredient_ids"] == ["plan-only"]
+    with client.app.state.session_factory() as session:
+        assert session.get(DecisionRunModel, "ingredient-plan-only").package_json == json.dumps(package)
+
+    for absent_id in ("risk-only", "synthesis-only", "catalog-only"):
+        invalid = client.post(
+            "/api/v1/decision-runs/ingredient-plan-only/explanation",
+            json={"ingredient_id": absent_id},
+        )
+        assert invalid.status_code == 422
+        assert invalid.json()["code"] == "DECISION_RUN_INGREDIENT_NOT_FOUND"
+        assert invalid.json()["details"] == {
+            "decision_run_id": "ingredient-plan-only", "ingredient_id": absent_id,
+        }
+
+
+def test_question_resolver_scopes_evidence_and_detects_only_confident_mismatch(client):
+    package = {
+        "decision_run_id": "resolver-api", "store_id": "STORE_001", "status": "completed",
+        "recommended_strategy": "balanced", "recommended_plan": {"items": [
+            {"ingredient_id": "banana-resolver", "order_quantity": 3, "unit": "kg"},
+            {"ingredient_id": "mango-resolver", "order_quantity": 2, "unit": "kg"},
+        ]},
+        "ingredient_demand": [
+            {"ingredient_id": "banana-resolver", "target_date": "2026-08-21", "unit": "kg", "p25": 1, "p50": 2, "p75": 3},
+            {"ingredient_id": "mango-resolver", "target_date": "2026-08-21", "unit": "kg", "p25": 1, "p50": 2, "p75": 3},
+        ],
+        "business_metrics": {}, "inventory_risk": {}, "critic": {"findings": [], "warnings": []}, "reason_codes": [], "warnings": [],
+    }
+    with client.app.state.session_factory() as session:
+        session.add_all([
+            IngredientModel(ingredient_id="banana-resolver", store_id="STORE_001", ingredient="Chuối", normalized_name="chuối", base_unit="kg", active=True, source="test"),
+            IngredientModel(ingredient_id="mango-resolver", store_id="STORE_001", ingredient="Xoài", normalized_name="xoài", base_unit="kg", active=True, source="test"),
+            IngredientModel(ingredient_id="saffron-resolver", store_id="STORE_001", ingredient="Saffron", normalized_name="saffron", base_unit="kg", active=True, source="test"),
+        ])
+        session.add(IngredientAliasModel(alias_id="resolver-banana-en", store_id="STORE_001", ingredient_id="banana-resolver", alias="banana", normalized_alias="banana"))
+        session.add(_run("resolver-api", package))
+        session.commit()
+
+    alias = client.post("/api/v1/decision-runs/resolver-api/explanation", json={"language": "en", "question": "Why are we buying banana?"})
+    assert alias.status_code == 200
+    assert alias.json()["entities"]["ingredient_ids"] == ["banana-resolver"]
+    generic = client.post("/api/v1/decision-runs/resolver-api/explanation", json={"language": "en", "question": "Why this plan?"})
+    assert generic.status_code == 200
+    out_of_run = client.post("/api/v1/decision-runs/resolver-api/explanation", json={"question": "Tại sao mua saffron?"})
+    assert out_of_run.status_code == 422
+    assert out_of_run.json()["code"] == "INGREDIENT_RESOLUTION_NOT_FOUND"
+    mismatch = client.post("/api/v1/decision-runs/resolver-api/explanation", json={"ingredient_id": "banana-resolver", "question": "Tại sao mua Xoài?"})
+    assert mismatch.status_code == 422
+    assert mismatch.json()["code"] == "INGREDIENT_QUESTION_MISMATCH"
+    ambiguous = client.post("/api/v1/decision-runs/resolver-api/explanation", json={"ingredient_id": "banana-resolver", "question": "So sánh Chuối với Xoài"})
+    assert ambiguous.status_code == 200
+
+
+def test_query_interpretation_rejects_out_of_domain_and_gibberish_without_replacing_grounded_quantity(client):
+    package = {
+        "decision_run_id": "query-interpretation", "store_id": "STORE_001", "status": "completed",
+        "recommended_strategy": "balanced", "recommended_plan": {"items": [
+            {"ingredient_id": "banana-query", "order_quantity": 3, "unit": "kg"},
+            {"ingredient_id": "milk-query", "order_quantity": 50, "unit": "lít"},
+        ]},
+        "ingredient_demand": [
+            {"ingredient_id": "banana-query", "target_date": "2026-08-21", "unit": "kg", "p25": 1, "p50": 2, "p75": 3},
+            {"ingredient_id": "milk-query", "target_date": "2026-08-21", "unit": "lít", "p25": 10, "p50": 12, "p75": 14},
+        ],
+        "business_metrics": {}, "inventory_risk": {}, "critic": {"findings": [], "warnings": []}, "reason_codes": [], "warnings": [],
+    }
+    with client.app.state.session_factory() as session:
+        session.add_all([
+            IngredientModel(ingredient_id="banana-query", store_id="STORE_001", ingredient="Chuối", normalized_name="chuối", base_unit="kg", active=True, source="test"),
+            IngredientModel(ingredient_id="milk-query", store_id="STORE_001", ingredient="Sữa", normalized_name="sữa", base_unit="lít", active=True, source="test"),
+            _run("query-interpretation", package),
+        ])
+        session.commit()
+
+    for question in ("Tôi muốn ăn chuối?", "rekngkjerwgn"):
+        response = client.post("/api/v1/decision-runs/query-interpretation/explanation", json={"question": question})
+        assert response.status_code == 422
+        assert response.json()["code"] == "EXPLANATION_QUERY_UNSUPPORTED"
+
+    false_premise = client.post(
+        "/api/v1/decision-runs/query-interpretation/explanation",
+        json={"language": "vi", "question": "Tại sao lại phải nhập 70 lít sữa?"},
+    )
+    assert false_premise.status_code == 200
+    assert "70" in false_premise.json()["answer"]
+    assert "50" in false_premise.json()["answer"]
+    assert all("70" not in str(claim["value"]) for claim in false_premise.json()["claims"])
+
+    matching_premise = client.post(
+        "/api/v1/decision-runs/query-interpretation/explanation",
+        json={"language": "vi", "question": "Tại sao lại phải nhập 50 lít sữa?"},
+    )
+    assert matching_premise.status_code == 200
+    assert "50" in matching_premise.json()["answer"]
+
+
+def test_qwen_cannot_promote_a_question_number_to_an_authorized_claim():
+    def invented_quantity(payload):
+        order = next(item for item in payload["evidence"] if item["type"] == "PROCUREMENT_QUANTITY")
+        return {
+            "answer": "The plan recommends ordering 70 kg of Banana.",
+            "claims": [{"type": "PROCUREMENT_QUANTITY", "text": "The plan recommends ordering 70 kg of Banana.", "evidence_ids": [order["evidence_id"]]}],
+            "used_evidence_ids": [order["evidence_id"]],
+        }
+
+    response, _ = _explain(invented_quantity, question="Why order 70 kg of Banana?")
+    assert response.provider == "deterministic_fallback"
+    assert "records 30 kg" in response.answer
+    assert all("70" not in str(claim.value) for claim in response.claims)

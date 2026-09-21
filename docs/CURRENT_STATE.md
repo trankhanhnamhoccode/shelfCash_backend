@@ -29,6 +29,18 @@ ShelfCash Backend is a FastAPI modular monolith. HTTP routes call application se
 - **Compatibility:** raw Decision Package and `strategy_comparison`/`strategy_evaluations` remain unchanged. Old packages render on read; missing explanation evidence never changes a persisted selected recommendation into a no-feasible outcome, and only reduces presentation detail.
 - **Verification:** final targeted gates passed **49 tests, 2 warnings**. Final full suite passed **664 tests, 0 failed, 22 warnings in 652.11s**. `compileall`, `git diff --check`, and OpenAPI route counts (**58 paths / 70 operations**) passed.
 
+## Explanation ingredient entity resolution
+
+- **Status:** COMPLETE (2026-09-21). `/decision-runs/{id}/explanation` validates a supplied `ingredient_id` against the persisted package demand/plan union and keeps it authoritative through evidence retrieval and guarded narration. Question-only ingredient requests deterministically resolve current canonical names, approved store aliases, existing normalization, or conservative lexical typos before entering the same ID-scoped path.
+- **Authority / historical safety:** catalog and aliases are identity lookup aids only; the persisted Decision Package remains the membership and business-evidence authority. Ambiguous and out-of-run text fails closed, confident contradictory ID/text requests return a 422 mismatch, generic Explanation questions retain generic routing, and Qwen has no identity authority. There is no migration, package mutation/backfill, alias creation, or business-computation change.
+- **Verification:** Prompt 3 focused regression passed **59 tests**; the final production-code full regression passed **672 tests, 22 warnings in 237.64s**. Prompt 4 certification added a fuzzy winner-margin characterization (**3 passed**) without production-code change, and rechecked `compileall`, `git diff --check`, and OpenAPI **58 paths / 70 operations**.
+
+## Explanation query interpretation hardening
+
+- **Status:** COMPLETE (2026-09-21). Explanation now deterministically distinguishes supported generic/ingredient questions from unsupported text before entity retrieval. Ingredient recognition alone cannot trigger procurement narration; unsupported or gibberish input returns `422 EXPLANATION_QUERY_UNSUPPORTED`.
+- **Grounding:** user-provided quantities are never business facts. Explicit same-unit purchase-quantity premises that differ from persisted evidence receive deterministic correction, while claims and citations retain only the persisted value. No query text, catalog identity, or provider output can change Decision Package truth.
+- **Verification:** focused Explanation/resolver/error-contract regression passed; final full suite passed **675 tests, 22 warnings in 634.22s**. No route, DTO, persistence, migration, or business-computation change.
+
 ## Core business flow
 
 Import → Canonical DB → Forecast → BOM → Ingredient Demand → Inventory/FEFO → Procurement candidates → Exact simulation/critic → Strategy selection → Decision Package → Decision Intelligence.

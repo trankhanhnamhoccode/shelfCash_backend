@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import re
+from decimal import Decimal, InvalidOperation
 
 from shelfcash_forecast.decision_intelligence.contracts import DecisionGraph, EvidencePackage
 from shelfcash_forecast.decision_intelligence.evidence import EvidenceCollector
@@ -10,6 +12,8 @@ from app.decision_intelligence.contracts import (
     Citation, DecisionBriefFacts, DecisionExplanationResponse, EvidenceBrief, ExplanationClaim,
 )
 from app.decision_intelligence.semantic_evidence import SemanticFact
+from app.core.names import normalize_lookup_name
+from app.core.units import normalize_unit
 
 
 def ingredient_scoped_semantic_facts(
@@ -95,6 +99,7 @@ class ShelfCashDecisionIntelligenceAdapter:
         language: str,
         detail_level: str,
         semantic_facts: list[SemanticFact],
+        question: str | None = None,
     ) -> DecisionExplanationResponse:
         """Human-readable deterministic fallback for an explicitly targeted ingredient."""
         scoped_facts = ingredient_scoped_semantic_facts(semantic_facts, ingredient_id)
@@ -147,10 +152,28 @@ class ShelfCashDecisionIntelligenceAdapter:
                     else f"Nhu c\u1ea7u trung v\u1ecb c\u1ee7a {display_name} trong {horizon} ng\u00e0y t\u1edbi kho\u1ea3ng {total} {unit}."
                 )
                 add_fact_line("DEMAND_HORIZON_SUMMARY", text, demand.values.get("p50_total"), unit)
+                if question and "demand" in question.casefold():
+                    for item in evidence.items:
+                        if item.evidence_type != "ingredient_demand" or item.entities.get("ingredient_id") != ingredient_id:
+                            continue
+                        claims.append(ExplanationClaim(
+                            type="INGREDIENT_DEMAND", value=dict(item.payload),
+                            unit=str(item.payload.get("unit") or ""), evidence_ids=[item.evidence_id],
+                        ))
+                        citations.append(Citation(evidence_id=item.evidence_id, label=item.text, source_type=item.source_object))
             order = by_type.get("PROCUREMENT_QUANTITY")
             if order:
                 unit = str(order.values.get("unit") or "")
                 quantity = _display_number(order.values.get("quantity"))
+                premise = _procurement_quantity_premise(question)
+                if premise and _same_quantity_unit(premise[1], unit) and _different_quantity(premise[0], order.values.get("quantity")):
+                    stated = _display_number(premise[0])
+                    correction = (
+                        f"The current plan does not record an order of {stated} {unit}; it records {quantity} {unit} for {display_name}."
+                        if language == "en"
+                        else f"Kế hoạch hiện tại không ghi nhận đề xuất nhập {stated} {unit}; lượng được ghi nhận là {quantity} {unit} {display_name}."
+                    )
+                    add_fact_line("PROCUREMENT_QUANTITY", correction, order.values.get("quantity"), unit)
                 text = (
                     f"The current plan proposes ordering {quantity} {unit} of {display_name}."
                     if language == "en"
@@ -266,7 +289,35 @@ class ShelfCashDecisionIntelligenceAdapter:
 
 
 def _display_number(value: object) -> str:
-    if not isinstance(value, (int, float)):
+    if not isinstance(value, (int, float, Decimal)):
         return ""
     rendered = f"{float(value):,.2f}".rstrip("0").rstrip(".")
     return rendered.replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+def _procurement_quantity_premise(question: str | None) -> tuple[Decimal, str] | None:
+    """Read only an explicit order quantity; other question numbers are context."""
+    if not question:
+        return None
+    normalized = normalize_lookup_name(question)
+    match = re.search(r"\b(?:mua|nhap|dat|order|buy)\s+(\d+(?:[.,]\d+)?)\s+([a-z]+)\b", normalized)
+    if not match:
+        return None
+    try:
+        return Decimal(match.group(1).replace(",", ".")), match.group(2)
+    except InvalidOperation:
+        return None
+
+
+def _same_quantity_unit(question_unit: str, evidence_unit: str) -> bool:
+    try:
+        return normalize_unit(question_unit) == normalize_unit(evidence_unit)
+    except Exception:
+        return False
+
+
+def _different_quantity(question_quantity: Decimal, evidence_quantity: object) -> bool:
+    try:
+        return question_quantity != Decimal(str(evidence_quantity))
+    except (InvalidOperation, ValueError):
+        return False

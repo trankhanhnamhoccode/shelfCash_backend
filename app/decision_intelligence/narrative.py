@@ -346,7 +346,7 @@ class DecisionNarrativeProvider:
         if ingredient_id:
             fallback = self.deterministic.explain_ingredient(
                 brief, ingredient_id=ingredient_id, language=language,
-                detail_level=detail_level, semantic_facts=semantic_facts or [],
+                detail_level=detail_level, semantic_facts=semantic_facts or [], question=question,
             )
         else:
             fallback = self.deterministic.explain(
