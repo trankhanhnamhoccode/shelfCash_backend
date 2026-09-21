@@ -137,6 +137,10 @@ def test_strategy_expression_brief_default_is_deterministic_and_never_persists_e
     response = client.get("/api/v1/decision-runs/strategy-expression-read/brief")
     after = _stored_package(client.app.state.session_factory, "strategy-expression-read")
     assert response.status_code == 200
+    selection = response.json()["strategy_selection_presentation"]
+    assert selection["source"] == "deterministic"
+    assert selection["outcome"] == "selected"
+    assert selection["strategy_notes"][0]["status"] == "selected"
     assert after == before
     assert "strategy_expression" not in after.get("assistant", {})
     event = next(record.message for record in caplog.records if "event=strategy_presentation.completed" in record.message)

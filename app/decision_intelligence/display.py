@@ -24,6 +24,8 @@ def _rounded_decimal(value: float | int | Decimal, precision: int) -> Decimal:
 def vi_number(value: float | int | Decimal, maximum_decimals: int = 2) -> str:
     rounded = _rounded_decimal(value, maximum_decimals)
     rendered = f"{rounded:,.{maximum_decimals}f}".rstrip("0").rstrip(".")
+    if maximum_decimals == 0:
+        rendered = f"{rounded:,.0f}"
     return rendered.replace(",", "X").replace(".", ",").replace("X", ".")
 
 
@@ -33,6 +35,8 @@ def purchase_cost_display(value: float | int | None) -> str | None:
     amount = Decimal(str(value))
     if amount >= 1_000_000:
         return f"{vi_number(amount / Decimal('1000000'))} triệu đồng"
+    if amount >= 1_000:
+        return f"{vi_number(amount / Decimal('1000'), 0)} nghìn đồng"
     return f"{vi_number(amount, 0)} đồng"
 
 

@@ -63,10 +63,16 @@ def test_brief_contract_required_fields_nullability_and_enums_are_frozen():
     assert {
         "procurement_rows", "ingredient_demand", "ingredient_demand_summary", "risk_details",
         "evidence", "data_availability", "assistant_summary", "strategy_comparison",
-        "ingredient_synthesis", "presented_warnings",
+        "ingredient_synthesis", "presented_warnings", "strategy_selection_presentation",
     } <= set(brief["properties"])
     assert brief["properties"]["assistant_summary"]["anyOf"][1] == {"type": "null"}
     assert brief["properties"]["strategy_comparison"]["anyOf"][1] == {"type": "null"}
+    assert brief["properties"]["strategy_selection_presentation"] == {"$ref": "#/components/schemas/StrategySelectionPresentation"}
+    presentation = schemas["StrategySelectionPresentation"]
+    assert presentation["properties"]["source"]["const"] == "deterministic"
+    assert presentation["properties"]["outcome"]["enum"] == ["selected", "no_feasible_strategy"]
+    note = schemas["StrategyPresentationNote"]
+    assert note["properties"]["status"]["enum"] == ["selected", "rejected", "not_selected"]
     assert schemas["IngredientDemandSummaryBrief"]["properties"]["aggregation_method"]["const"] == "sum_daily_quantiles"
     assert schemas["AssistantSummary"]["properties"]["source"]["enum"] == ["llm", "deterministic_fallback"]
     assert schemas["RiskDetail"]["properties"]["classification"]["enum"] == ["risk", "limitation", "unknown"]

@@ -22,6 +22,13 @@ ShelfCash Backend is a FastAPI modular monolith. HTTP routes call application se
 - **Diagnostics / compatibility:** current packages add optional `scenario_count_requested`, `scenario_count_generated`, `unique_scenario_count`, `effective_scenario_count`, and `stochastic_fallback_reason` technical metrics. Old packages without these fields remain readable; no migration or backfill is required.
 - **Verification:** focused scenario/procurement/FEFO/strategy/Decision/What-if regression passed **156 tests, 15 warnings in 88.24s**; full suite passed **656 tests, 22 warnings in 553.07s**. `compileall -q app shelfcash_core tests` and `git diff --check` passed. Generated OpenAPI remains **58 paths / 70 operations** and contains the additive technical-metric fields. No endpoint or route is added.
 
+## Post-R7 strategy-selection presentation slice
+
+- **Status:** COMPLETE (2026-09-21). `GET /decision-runs/{id}/brief` now adds the typed, deterministic `strategy_selection_presentation` field. It gives FE a manager-facing selection headline/summary and per-strategy cards (`label`, `status_label`, `message`, `detail_lines`) without client reason-code mapping.
+- **Authority / safety:** the projection reuses persisted candidate outcomes, critic/reason evidence, and the existing deterministic renderer. It does not call Qwen, recompute candidates, alter selection, or persist/backfill packages. Hard candidate findings are prioritized locally; stress warnings stay informational; conservative/stress facts are not stated as selected-plan failures. Stochastic fallback is informational only.
+- **Compatibility:** raw Decision Package and `strategy_comparison`/`strategy_evaluations` remain unchanged. Old packages render on read; missing explanation evidence never changes a persisted selected recommendation into a no-feasible outcome, and only reduces presentation detail.
+- **Verification:** final targeted gates passed **49 tests, 2 warnings**. Final full suite passed **664 tests, 0 failed, 22 warnings in 652.11s**. `compileall`, `git diff --check`, and OpenAPI route counts (**58 paths / 70 operations**) passed.
+
 ## Core business flow
 
 Import → Canonical DB → Forecast → BOM → Ingredient Demand → Inventory/FEFO → Procurement candidates → Exact simulation/critic → Strategy selection → Decision Package → Decision Intelligence.

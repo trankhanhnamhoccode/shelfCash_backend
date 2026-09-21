@@ -177,6 +177,39 @@ class BriefStrategyEvaluation(_Contract):
     reasons: list[BriefStrategyReason] = Field(default_factory=list)
     presentation: BriefStrategyPresentation | None = None
 
+
+class StrategyPresentationNote(_Contract):
+    """One backend-authored, manager-facing strategy card."""
+
+    strategy: Literal["lean", "balanced", "protected"]
+    label: str
+    status: Literal["selected", "rejected", "not_selected"]
+    status_label: str
+    headline: str
+    message: str
+    detail_lines: list[str] = Field(default_factory=list)
+    reason_codes: list[str] = Field(default_factory=list)
+    evidence_ids: list[str] = Field(default_factory=list)
+
+
+class StrategySelectionPresentation(_Contract):
+    """Deterministic selection copy; reason codes remain audit data only."""
+
+    source: Literal["deterministic"] = "deterministic"
+    outcome: Literal["selected", "no_feasible_strategy"]
+    selected_strategy: Literal["lean", "balanced", "protected"] | None = None
+    headline: str
+    summary: str | None = None
+    strategy_notes: list[StrategyPresentationNote] = Field(default_factory=list)
+
+
+def _empty_strategy_selection_presentation() -> StrategySelectionPresentation:
+    """Keeps standalone fact fixtures/read fallbacks typed and non-null."""
+    return StrategySelectionPresentation(
+        outcome="no_feasible_strategy",
+        headline="Chưa có dữ liệu đánh giá chiến lược cho Decision Run này.",
+    )
+
 class StrategyExpressionItem(_Contract):
     strategy: str
     headline: str = Field(min_length=1, max_length=100)
@@ -216,6 +249,7 @@ class DecisionBriefFacts(_Contract):
     presented_warnings: list[PresentedWarning] = Field(default_factory=list)
     strategy_comparison: StrategyComparisonBrief | None = None
     strategy_evaluations: list[BriefStrategyEvaluation] = Field(default_factory=list)
+    strategy_selection_presentation: StrategySelectionPresentation = Field(default_factory=_empty_strategy_selection_presentation)
     evidence: list[EvidenceBrief] = Field(default_factory=list)
     data_availability: dict[str, str] = Field(default_factory=dict)
     assistant_summary: AssistantSummary | None = None

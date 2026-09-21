@@ -90,6 +90,7 @@ The following fields are required and non-null in the brief: `decision_run_id`, 
 | `risk_details` | Risk/limitation cards | render registry fields directly | not a local code dictionary |
 | `critic` | Technical/detail drawer | raw hard violations/warnings | do not replace `risk_details` with it |
 | `strategy_comparison` | Strategy comparison section | candidates and selected-relative deltas | hide section if null |
+| `strategy_selection_presentation` | Manager-facing strategy cards | render backend-owned copy directly | always typed; cards may be empty for limited evidence |
 | `assistant_summary` | Overall Decision card | headline, summary, bullets, warning | fallback is still a success |
 | `evidence`, `data_availability` | Optional evidence/debug UI | only when product needs it | do not make ordinary UI depend on them |
 | `generated_at` | “Generated at” label | format in store locale | timestamp, not a freshness guarantee |
@@ -157,6 +158,18 @@ selected strategy - this candidate
 For example, `purchase_cost_delta: 1000000` means the selected strategy costs 1,000,000 more than that candidate.
 
 `selection_reason.available` is the gate for a “Why this strategy?” UI. For new runs with proof, the backend rule is valid (`critic.passed`) candidates, lowest purchase cost, then strategy-name ascending tie-break. When unavailable—especially for old runs—do not infer “highest fill rate”, “safest”, or any other reason from comparison metrics.
+
+### Strategy selection presentation
+
+Render `strategy_selection_presentation.headline`, then `summary` when present,
+and one card per `strategy_notes[]`. Use `label`, `status_label`, `message`, and
+`detail_lines` directly. `strategy` and `status` are only for layout/style.
+
+FE SHOULD NOT map `reason_codes` to manager-facing text, inspect
+`critic.findings` to invent explanation, infer feasibility/selection reason, or
+infer scenario provenance. `reason_codes` and `evidence_ids` are audit/debug
+trace fields only. This deterministic presentation never requires Qwen on the
+default `/brief` path.
 
 ## Explanation interactions
 

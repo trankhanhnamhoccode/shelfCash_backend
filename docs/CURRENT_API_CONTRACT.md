@@ -755,6 +755,7 @@ DecisionBriefFacts
   presented_warnings: PresentedWarning[],
   strategy_comparison?: StrategyComparisonBrief,
   strategy_evaluations: BriefStrategyEvaluation[],
+  strategy_selection_presentation?: StrategySelectionPresentation,
   evidence: EvidenceBrief[], data_availability,
   assistant_summary?: AssistantSummary, generated_at
 ```
@@ -764,6 +765,14 @@ Key nested DTOs:
 ```text
 RecommendationBrief
   available, strategy?, summary?, total_purchase_cost?, expected_fill_rate?
+
+StrategySelectionPresentation
+  source="deterministic", outcome=selected|no_feasible_strategy,
+  selected_strategy?, headline, summary?, strategy_notes[]
+
+StrategyPresentationNote
+  strategy, label, status=selected|rejected|not_selected, status_label,
+  headline, message, detail_lines[], reason_codes[], evidence_ids[]
 
 ProcurementRowBrief
   ingredient_id, ingredient_name?, supplier_id?, supplier_name?, quantity,

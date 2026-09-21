@@ -193,6 +193,16 @@ The recommendation in `CURRENT_ARCHITECTURE.md` to consider a future determinist
 - **Rollback:** Remove only the scenario-sufficiency helper, Decision adapter gate/routing, additive diagnostics, focused tests, and this ADR/checkpoint documentation. No schema migration, data migration, or historical rewrite is required.
 - **Affected areas:** `shelfcash_core.scenario`, `CoreProcurementAdapter`, Exact FEFO risk/critic handoff, Decision Package technical diagnostics, Decision Run persistence, and stochastic regression tests.
 
+## ADR-017 â€” Backend-owned Strategy Selection presentation
+
+- **Status:** ACCEPTED
+- **Decision:** `/brief` publishes deterministic, manager-facing Strategy Selection presentation. Frontend renders the provided headline, summary and strategy-note text; it does not translate strategy reason codes, critic findings, feasibility, selection proof, budget evidence, or scenario provenance into copy.
+- **Context:** ADR-004 already freezes deterministic default Strategy Explanation, but the existing lower-level comparison/evaluation fields still required a client to compose the selection/rejection story.
+- **Why:** The backend holds the authoritative candidate outcomes, selection proof, critic evidence and scenario provenance. A typed presentation projection keeps manager-facing wording deterministic and auditable.
+- **Preserved boundaries:** ADR-002 business truth, ADR-003 scenario separation, ADR-004 default-no-Qwen behavior and ADR-007 public-contract discipline remain in force. This ADR does not change Overall Summary or Ingredient Synthesis.
+- **Rejected alternatives:** frontend reason-code dictionaries, inferred prose, and LLM/Qwen on the default Brief path are rejected.
+- **Affected areas:** Decision Brief contract, deterministic strategy presentation/evidence projections, frontend Decision Assistant integration and contract tests.
+
 ## Deferred proposals requiring a future decision
 
 The following are not accepted target architecture: merging the computation packages; deterministic-first Overall Summary; removing all Qwen; adopting Unit of Work everywhere; rewriting persistence; replacing SQLite; renaming or moving modules; and removing legacy routes. Exact final `DecisionPlanningService` layout remains intentionally unfrozen; ADR-015 governs its incremental decomposition. The remaining items are proposals or technical debt until separately approved.

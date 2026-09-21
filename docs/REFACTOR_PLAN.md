@@ -724,6 +724,13 @@ Do not reinterpret or edit ADR-010 in an implementation slice. ADR-014 accepts t
 - **Acceptance / verification:** the real core optimizer is driven through all-infeasible zero-budget input at POST, then validates the HTTP response, persisted JSON, and raw GET; it also asserts a selected successful critic remains unchanged. Targeted Decision API/Intelligence tests: **17 passed, 1 warning**. Full suite: **647 passed, 22 warnings in 245.28s**. Generated OpenAPI remains **58 paths / 70 operations**, with both Decision Run success responses still referencing `DecisionPackage`; `compileall` and `git diff --check` passed.
 - **Rollback:** revert the `_package_critic` helper/call, the Decision API regression assertions, and this documentation section. No database/data rollback is required.
 
+### Post-R7 Strategy Selection Presentation — COMPLETE (2026-09-21)
+
+- **Accepted additive contract:** `DecisionBriefFacts` adds typed `strategy_selection_presentation`, a deterministic manager-facing selection/read model with outcome, selected strategy, headline/summary and per-strategy status/message/detail/reason/evidence fields. Existing `strategy_comparison` and `strategy_evaluations` are preserved.
+- **Authority and lifecycle:** the builder reads only the persisted package and reuses the existing strategy outcome, reason-evidence and presentation projections. It performs no optimizer/critic/risk/scenario recomputation, no Qwen call on default Brief, and no persistence, migration, backfill or historical package rewrite. Stress and conservative evidence remain non-causal unless the existing candidate finding supplies selected-plan authority.
+- **Rollback:** remove the new DTOs/composer/wiring and focused tests, then revert this documentation and the ADR/frontend contract notes. No data rollback is needed.
+- **Verification:** final targeted gates passed **49 tests, 2 warnings**. Final full suite passed **664 tests, 0 failed, 22 warnings in 652.11s**; `compileall`, `git diff --check`, and generated OpenAPI (**58 paths / 70 operations**) passed.
+
 After controlled slices are complete: run full regression; review OpenAPI diff; verify historical Decision Runs; verify public frontend contracts; remove only proven dead code; check performance sanity and migration compatibility; produce stabilized architecture documentation and an updated stable API contract; then archive pre-refactor snapshots.
 
 Only at this point should `STABILIZED_ARCHITECTURE.md` be considered and made authoritative.

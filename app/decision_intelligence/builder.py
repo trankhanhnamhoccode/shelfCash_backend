@@ -74,7 +74,9 @@ class DecisionBriefBuilder:
         strategy_comparison = project_strategy_comparison(brief, facts)
         from app.decision_intelligence.strategy_evaluation_projection import project_strategy_evaluations
         from app.decision_intelligence.strategy_presentation import present_all
+        from app.decision_intelligence.strategy_selection_presentation import build_strategy_selection_presentation
         strategy_evaluations = present_all(project_strategy_evaluations(package))
+        strategy_selection_presentation = build_strategy_selection_presentation(package, strategy_evaluations)
         summaries = [
             IngredientDemandSummaryBrief(
                 ingredient_id=fact.entities["ingredient_id"],
@@ -108,6 +110,7 @@ class DecisionBriefBuilder:
             "risk_details": risk_details,
             "strategy_comparison": strategy_comparison,
             "strategy_evaluations": strategy_evaluations,
+            "strategy_selection_presentation": strategy_selection_presentation,
             "assistant_summary": assistant_summary,
             "ingredient_synthesis": ingredient_synthesis,
             # The Brief is a manager-facing route. Technical projections stay
