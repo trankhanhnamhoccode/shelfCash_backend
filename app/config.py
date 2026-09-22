@@ -82,6 +82,9 @@ class Settings(BaseSettings):
     decision_scenario_method: str = "residual_bootstrap"
     database_url: str = "sqlite:///runtime/shelfcash.db"
     shelfcash_api_key: str = ""
+    # Explicitly separate model-preparation authority from the ordinary API
+    # credential.  An empty value fail-closes the administrative endpoint.
+    shelfcash_admin_api_key: str = ""
     cors_origins: list[str] = ["http://localhost:5173", "http://localhost:3000"]
 
     @field_validator("log_level")

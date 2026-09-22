@@ -5,9 +5,10 @@ import json
 import logging
 import shutil
 import time
+from collections import Counter, defaultdict
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from uuid import uuid4
+from uuid import UUID, uuid4, uuid5
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -58,6 +59,15 @@ class ForecastService:
         root = self.settings.forecast_artifact_root.resolve()
         path = (root / store_id / version).resolve()
         if root not in path.parents: raise ForecastError("FORECAST_INPUT_INVALID", "Artifact path không hợp lệ.")
+        return path
+
+    def _backtest_artifact_dir(self, store_id: str, run_id: str) -> Path:
+        """An immutable, run-scoped artifact location outside production state."""
+        store_id = self._component(store_id, "store_id")
+        root = self.settings.forecast_artifact_root.resolve()
+        path = (root / "backtests" / store_id / run_id).resolve()
+        if root not in path.parents:
+            raise ForecastError("FORECAST_INPUT_INVALID", "Backtest artifact path is invalid.")
         return path
 
     def _config(self): return ForecastConfig(horizons=tuple(range(1, self.settings.forecast_max_horizon + 1)))
@@ -137,6 +147,213 @@ class ForecastService:
             logger.warning("forecast_shadow_inference_failed request_id=%s store_id=%s production_provider=%s shadow_provider=%s production_model_version=%s duration=%.3f error_type=%s",
                 request_id, store_id, self.production_provider.name, self.shadow_provider.name, version,
                 time.monotonic()-started, type(exc).__name__, exc_info=True)
+
+    @staticmethod
+    def _backtest_origins(start: date, end: date, frequency: str) -> list[date]:
+        step_days = 1 if frequency == "daily" else 7
+        origins: list[date] = []
+        current = start
+        while current <= end:
+            origins.append(current)
+            current += timedelta(days=step_days)
+        return origins
+
+    @staticmethod
+    def _backtest_run_id(*, store_id: str, model_version: str, origin: date, horizon: int, history_days: int) -> str:
+        # The primary key is deliberately deterministic.  It is the natural
+        # database-level idempotency key for this exact historical forecast.
+        identity = f"shelfcash-backtest-v1|{store_id}|{model_version}|{origin.isoformat()}|{horizon}|{history_days}"
+        return str(uuid5(UUID("a1352601-35bf-4194-afd9-22cbcf8fcd0a"), identity))
+
+    @staticmethod
+    def _residual_exists(session, *, store_id, product_id, target_date, horizon, forecast_origin, model_version) -> bool:
+        """Do not let a later bootstrap overwrite an existing OOS observation."""
+        return session.scalar(select(ForecastResidualModel.residual_id).where(
+            ForecastResidualModel.store_id == store_id,
+            ForecastResidualModel.product_id == product_id,
+            ForecastResidualModel.target_date == target_date,
+            ForecastResidualModel.horizon == horizon,
+            ForecastResidualModel.forecast_origin == forecast_origin,
+            ForecastResidualModel.model_version == model_version,
+        )) is not None
+
+    def _persist_backtest_residuals(self, session, *, run, predictions, store_id, origin, model_version):
+        """Persist only observable target actuals; residual convention is actual - p50."""
+        target_dates = sorted({prediction.target_date for prediction in predictions})
+        actual_rows = session.scalars(select(SalesDailyModel).where(
+            SalesDailyModel.store_id == store_id,
+            SalesDailyModel.date.in_(target_dates),
+        )).all() if target_dates else []
+        actuals = {(row.product_id, row.date): row for row in actual_rows}
+        created = unchanged = missing_actual = 0
+        for prediction in predictions:
+            actual = actuals.get((prediction.product_id, prediction.target_date))
+            if actual is None:
+                missing_actual += 1
+                continue
+            if self._residual_exists(
+                session, store_id=store_id, product_id=prediction.product_id,
+                target_date=prediction.target_date, horizon=prediction.horizon,
+                forecast_origin=origin, model_version=model_version,
+            ):
+                unchanged += 1
+                continue
+            session.add(ForecastResidualModel(
+                residual_id=str(uuid4()), store_id=store_id, forecast_run_id=run.forecast_run_id,
+                product_id=prediction.product_id, target_date=prediction.target_date,
+                horizon=prediction.horizon, actual_value=actual.quantity,
+                predicted_p25=prediction.p25, predicted_p50=prediction.p50,
+                predicted_p75=prediction.p75, residual=actual.quantity-prediction.p50,
+                forecast_origin=origin, model_version=model_version, created_at=_now(),
+            ))
+            created += 1
+        return created, unchanged, missing_actual
+
+    def _backtest_coverage(self, session, *, store_id: str, model_version: str):
+        rows = session.scalars(select(ForecastResidualModel).where(
+            ForecastResidualModel.store_id == store_id,
+            ForecastResidualModel.model_version == model_version,
+        )).all()
+        grouped: dict[tuple[str, int], list[ForecastResidualModel]] = defaultdict(list)
+        by_origin: Counter[date] = Counter()
+        for row in rows:
+            grouped[(row.product_id, row.horizon)].append(row)
+            by_origin[row.forecast_origin] += 1
+        coverage = []
+        for (product_id, horizon), values in sorted(grouped.items()):
+            count = len(values)
+            # Product/horizon sampling uses a pool of three.  Coherent blocks
+            # are an operation-level property because a block spans products
+            # and horizons for one forecast origin.
+            ready = count >= 3
+            coverage.append({
+                "product_id": product_id, "horizon": horizon, "residual_count": count,
+                "ready": ready, "reason": None if ready else "INSUFFICIENT_RESIDUALS",
+            })
+        overall_ready = len(rows) >= 3 and max(by_origin.values(), default=0) >= 2
+        return coverage, overall_ready
+
+    def backtest_residuals(self, body, request_id=None):
+        """Build genuine OOS residuals from explicit historical forecast origins.
+
+        The sales query passed to both train and inference ends at the current
+        origin.  Actual target data is queried only after prediction creation,
+        so a future sale cannot become a model feature.
+        """
+        history_days = body.history_days or self.settings.forecast_history_days
+        if body.forecast_horizon > self.settings.forecast_max_horizon:
+            raise ForecastError("FORECAST_INPUT_INVALID", "forecast_horizon exceeds forecast_max_horizon.", {
+                "forecast_horizon": body.forecast_horizon,
+                "forecast_max_horizon": self.settings.forecast_max_horizon,
+            })
+        with self.session_factory() as session:
+            StoreRepository(session).get_required(body.store_id)
+            active = ForecastRepository(session).active_model(body.store_id)
+            model_version = body.model_version or (active.model_version if active else self.settings.forecast_default_model_version)
+
+        origins = self._backtest_origins(body.origin_date_from, body.origin_date_to, body.origin_frequency)
+        summary = Counter()
+        warnings: list[str] = []
+        evaluated_products: set[str] = set()
+        for origin in origins:
+            run_id = self._backtest_run_id(
+                store_id=body.store_id, model_version=model_version, origin=origin,
+                horizon=body.forecast_horizon, history_days=history_days,
+            )
+            with self.session_factory() as session:
+                existing = session.get(ForecastRunModel, run_id)
+                if existing is not None and existing.status == "completed":
+                    predictions = ForecastRepository(session).predictions(run_id)
+                    created, unchanged, missing = self._persist_backtest_residuals(
+                        session, run=existing, predictions=predictions, store_id=body.store_id,
+                        origin=origin, model_version=model_version,
+                    )
+                    session.commit()
+                    summary.update(completed=1, created=created, unchanged=unchanged, missing_actual=missing)
+                    evaluated_products.update(item.product_id for item in predictions)
+                    continue
+
+            history_start = origin - timedelta(days=history_days - 1)
+            try:
+                with self.session_factory() as session:
+                    data = ForecastDataRepository(session)
+                    # This is the leakage boundary: never load sales after origin.
+                    sales = data.sales_history(body.store_id, history_start, origin)
+                    calendar = data.calendar_features(body.store_id, history_start, origin + timedelta(days=body.forecast_horizon))
+                canonical_data = {"sales_history": sales, "calendar_features": calendar}
+                artifact_dir = self._backtest_artifact_dir(body.store_id, run_id)
+                self.production_provider.train(canonical_data, artifact_dir, config=self._core_config(), model_version=model_version)
+                package = self.production_provider.predict(canonical_data, artifact_dir, origin, body.forecast_horizon)
+            except (InsufficientTrainingDataError, InsufficientDataError, DataValidationError) as exc:
+                summary["skipped"] += 1
+                warnings.append(f"{origin.isoformat()}: {getattr(exc, 'code', type(exc).__name__)}")
+                continue
+
+            with self.session_factory() as session:
+                run = session.get(ForecastRunModel, run_id)
+                if run is None:
+                    request_hash = canonical_hash({
+                        "kind": "historical_backtest_residuals", "store_id": body.store_id,
+                        "origin": origin, "horizon": body.forecast_horizon,
+                        "history_days": history_days, "model_version": model_version,
+                    })
+                    run = ForecastRunModel(
+                        forecast_run_id=run_id, store_id=body.store_id, cutoff_date=origin,
+                        horizon_days=body.forecast_horizon, quantiles_json="[0.25,0.5,0.75]",
+                        scope_json='{"purpose":"historical_backtest_residuals"}', use_latest_calendar=True,
+                        status="completed", engine_status="historical_backtest", request_hash=request_hash,
+                        model_version=model_version, warnings_json=_json(package.warnings),
+                        created_at=_now(), completed_at=_now(),
+                    )
+                    session.add(run)
+                    session.flush()
+                    for item in package.predictions:
+                        # The forecast provider contract itself defines D+1..D+H.
+                        if item.target_date <= origin or item.horizon < 1 or item.horizon > body.forecast_horizon:
+                            raise ForecastError("BACKTEST_CHRONOLOGY_INVALID", "Historical forecast returned an invalid target date.", {
+                                "origin": origin.isoformat(), "target_date": item.target_date.isoformat(), "horizon": item.horizon,
+                            }, http_status=500)
+                        session.add(ForecastPredictionModel(
+                            prediction_id=str(uuid4()), forecast_run_id=run_id, store_id=body.store_id,
+                            product_id=item.product_id, product_name=item.product_name, target_date=item.target_date,
+                            horizon=item.horizon, p25=item.p25, p50=item.p50, p75=item.p75,
+                            interval_lower=item.interval_lower, interval_upper=item.interval_upper,
+                            baseline_p50=item.baseline_p50, calibration_source=item.calibration_source,
+                            warnings_json=_json(item.warnings), created_at=_now(),
+                        ))
+                    session.flush()
+                predictions = ForecastRepository(session).predictions(run_id)
+                created, unchanged, missing = self._persist_backtest_residuals(
+                    session, run=run, predictions=predictions, store_id=body.store_id,
+                    origin=origin, model_version=model_version,
+                )
+                AuditService(AuditLogRepository(session)).record(
+                    store_id=body.store_id, action="forecast_backtest_residuals_generated",
+                    resource_type="forecast_run", resource_id=run_id,
+                    after={"origin": origin, "model_version": model_version, "residuals_created": created,
+                           "residuals_unchanged": unchanged, "residuals_missing_actual": missing},
+                    source="forecast_backtest_admin",
+                )
+                session.commit()
+                summary.update(completed=1, created=created, unchanged=unchanged, missing_actual=missing)
+                evaluated_products.update(item.product_id for item in predictions)
+
+        with self.session_factory() as session:
+            coverage, stochastic_ready = self._backtest_coverage(session, store_id=body.store_id, model_version=model_version)
+        ready_products = {item["product_id"] for item in coverage if item["ready"]}
+        all_products = {item["product_id"] for item in coverage} | evaluated_products
+        if not stochastic_ready:
+            warnings.append("RESIDUAL_BOOTSTRAP_NOT_READY")
+        warnings.append("DECISION_RUNTIME_STILL_VALIDATES_EFFECTIVE_SCENARIOS")
+        return {
+            "store_id": body.store_id, "model_version": model_version,
+            "origins_requested": len(origins), "origins_completed": summary["completed"],
+            "origins_skipped": summary["skipped"], "residuals_created": summary["created"],
+            "residuals_unchanged": summary["unchanged"], "residuals_missing_actual": summary["missing_actual"],
+            "products_evaluated": len(all_products), "products_stochastic_ready": len(ready_products),
+            "products_not_ready": len(all_products - ready_products), "coverage": coverage,
+            "stochastic_ready": stochastic_ready, "warnings": sorted(set(warnings)),
+        }
 
     def train(self, body, request_id=None):
         started = time.monotonic(); version = body.model_version or self.settings.forecast_default_model_version

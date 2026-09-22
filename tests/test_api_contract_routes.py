@@ -12,7 +12,7 @@ GROUP_COUNTS = {
     "history": 5,
     "supplier_alias_settings_calendar": 13,
     "forecast_plan_po": 12,
-    "forecast_core": 3,
+    "forecast_core": 4,
     "demand_planning": 4,
     "decision_runs": 5,
 }
@@ -48,12 +48,12 @@ EXPECTED_IMPLEMENTED = {
 }
 
 
-def test_contract_manifest_has_exact_unique_70_operations():
+def test_contract_manifest_has_exact_unique_71_operations():
     entries = json.loads(
         Path("docs/API_CONTRACT_ROUTE_MANIFEST.json").read_text(encoding="utf-8")
     )
     pairs = {(entry["method"], entry["path"]) for entry in entries}
-    assert len(entries) == len(pairs) == 70
+    assert len(entries) == len(pairs) == 71
     assert Counter(entry["group"] for entry in entries) == Counter(GROUP_COUNTS)
 
 
@@ -69,7 +69,7 @@ def test_application_routes_are_exact_contract_subset(client):
         for method in methods
     }
     assert actual <= contract, f"Unexpected operations: {sorted(actual - contract)}"
-    assert len(actual) == 70
+    assert len(actual) == 71
     assert actual == contract, (
         f"Missing: {sorted(contract - actual)}; "
         f"unexpected: {sorted(actual - contract)}"

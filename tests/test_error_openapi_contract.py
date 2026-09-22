@@ -98,8 +98,8 @@ def test_openapi_manifest_and_representative_success_schemas_remain_frozen(clien
         if method in {"delete", "get", "head", "options", "patch", "post", "put"}
     }
 
-    assert len(document["paths"]) == 58
-    assert len(operations) == 70
+    assert len(document["paths"]) == 59
+    assert len(operations) == 71
     assert _response_schema(document, "/api/v1/imports/{import_id}", "get", 200) == {
         "$ref": "#/components/schemas/StatusResponse"
     }

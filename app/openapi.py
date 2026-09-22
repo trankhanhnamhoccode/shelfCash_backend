@@ -42,6 +42,14 @@ def _requires_api_key(operation: dict) -> bool:
     )
 
 
+def _requires_admin_api_key(operation: dict) -> bool:
+    return any(
+        parameter.get("in") == "header"
+        and parameter.get("name") == "x-shelfcash-admin-key"
+        for parameter in operation.get("parameters", [])
+    )
+
+
 def build_openapi(app: FastAPI) -> dict:
     if app.openapi_schema:
         return app.openapi_schema
@@ -61,6 +69,8 @@ def build_openapi(app: FastAPI) -> dict:
                 responses["422"] = _error_response("Request validation failed.")
             if _requires_api_key(operation):
                 responses.setdefault("401", _error_response("Invalid or missing API key."))
+            if _requires_admin_api_key(operation):
+                responses.setdefault("403", _error_response("A valid administrative API key is required."))
             for status, description in _OPERATION_ERROR_RESPONSES.get((path, method), {}).items():
                 responses.setdefault(status, _error_response(description))
 

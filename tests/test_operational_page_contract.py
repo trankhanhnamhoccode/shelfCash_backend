@@ -212,5 +212,5 @@ def test_operational_page_openapi_contracts_are_explicit_and_preserve_prior_r1_b
     assert schema["paths"]["/api/v1/stores/{store_id}/forecast-runs/{forecast_run_id}/ingredient-demand"]["get"]["responses"]["200"]["content"]["application/json"]["schema"] == {"$ref": "#/components/schemas/IngredientDemandRunResponse"}
     assert schema["paths"]["/api/v1/stores/{store_id}/forecast-runs/{forecast_run_id}/procurement-plans"]["get"]["responses"]["200"]["content"]["application/json"]["schema"] == {"$ref": "#/components/schemas/ProcurementPlanRunResponse"}
     assert schema["paths"]["/api/v1/stores/{store_id}/menu"]["get"]["responses"]["200"]["content"]["application/json"]["schema"] == {"$ref": "#/components/schemas/MenuResponse"}
-    assert len(schema["paths"]) == 58
-    assert sum(len(methods) for methods in schema["paths"].values()) == 70
+    assert len(schema["paths"]) == 59
+    assert sum(len(methods) for methods in schema["paths"].values()) == 71

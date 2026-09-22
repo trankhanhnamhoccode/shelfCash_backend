@@ -41,6 +41,14 @@ ShelfCash Backend is a FastAPI modular monolith. HTTP routes call application se
 - **Grounding:** user-provided quantities are never business facts. Explicit same-unit purchase-quantity premises that differ from persisted evidence receive deterministic correction, while claims and citations retain only the persisted value. No query text, catalog identity, or provider output can change Decision Package truth.
 - **Verification:** focused Explanation/resolver/error-contract regression passed; final full suite passed **675 tests, 22 warnings in 634.22s**. No route, DTO, persistence, migration, or business-computation change.
 
+## Historical forecast residual bootstrap
+
+- **Status:** COMPLETE (2026-09-22). Admin-only `POST /api/v1/admin/forecast-models/backtest-residuals` explicitly runs chronology-safe historical forecast origins against already-imported sales history and persists auditable `forecast_residuals` for stochastic preparation.
+- **Chronology / authority:** each origin D receives sales only through D for training and inference, emits D+1..D+H predictions, and only then reads observed target actuals to persist `actual - p50`. The operation uses isolated backtest artifacts and never overwrites/activates the production artifact. It does not run during import, choose a strategy, or compute risk metrics/expected fill rate.
+- **Safety / access:** a separately configured `SHELFCASH_ADMIN_API_KEY` is mandatory and fail-closed; the ordinary API key cannot invoke the endpoint. Deterministic run IDs make same-input bootstrap reruns database-idempotent, while existing logical OOS observations are never replaced.
+- **Stochastic relationship:** the endpoint reports residual coverage/readiness only. Decision stochastic mode retains its existing model-version filter, scenario evidence sufficiency gate, and deterministic fallback. Runtime technical metrics remain the authority for whether a specific Decision Run actually used stochastic SAA.
+- **Verification:** focused forecast/backtest/scenario/Decision/contract gate passed **59 tests, 1 warning**; final full suite passed **678 tests, 22 warnings in 205.26s** after one transient Windows native access-violation runner abort was retried unchanged and passed. `compileall`, `git diff --check`, and OpenAPI passed at **59 paths / 71 operations**.
+
 ## Core business flow
 
 Import → Canonical DB → Forecast → BOM → Ingredient Demand → Inventory/FEFO → Procurement candidates → Exact simulation/critic → Strategy selection → Decision Package → Decision Intelligence.

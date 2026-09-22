@@ -226,5 +226,5 @@ def test_completion_and_purchase_order_openapi_boundaries_are_explicit(client):
     assert schema["paths"][f"{OPENAPI_BASE}/dashboard"]["get"]["responses"]["200"]["content"]["application/json"]["schema"] == {}
     assert schema["paths"]["/api/v1/stores/{store_id}/menu"]["get"]["responses"]["200"]["content"]["application/json"]["schema"] == {"$ref": "#/components/schemas/MenuResponse"}
     assert schema["paths"][f"{OPENAPI_BASE}/inventory"]["get"]["responses"]["200"]["content"]["application/json"]["schema"] == {"$ref": "#/components/schemas/Page_InventoryLotResponse_"}
-    assert len(schema["paths"]) == 58
-    assert sum(len(item) for item in schema["paths"].values()) == 70
+    assert len(schema["paths"]) == 59
+    assert sum(len(item) for item in schema["paths"].values()) == 71

@@ -54,3 +54,14 @@ def require_api_key(request: Request, x_shelfcash_key: str | None = Header(defau
     expected = request.app.state.settings.shelfcash_api_key
     if expected and (not x_shelfcash_key or not secrets.compare_digest(expected, x_shelfcash_key)):
         raise HTTPException(status_code=401, detail={"code": "unauthorized", "message": "Invalid or missing API key", "details": {}})
+
+
+def require_admin_api_key(request: Request, x_shelfcash_admin_key: str | None = Header(default=None)):
+    """Fail closed unless the dedicated administrative credential matches."""
+    expected = request.app.state.settings.shelfcash_admin_api_key
+    if not expected or not x_shelfcash_admin_key or not secrets.compare_digest(expected, x_shelfcash_admin_key):
+        raise HTTPException(status_code=403, detail={
+            "code": "admin_forbidden",
+            "message": "A valid administrative API key is required",
+            "details": {},
+        })

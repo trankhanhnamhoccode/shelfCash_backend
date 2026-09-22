@@ -750,6 +750,15 @@ After controlled slices are complete: run full regression; review OpenAPI diff; 
 
 Only at this point should `STABILIZED_ARCHITECTURE.md` be considered and made authoritative.
 
+## Post-R7 historical residual bootstrap — COMPLETE (2026-09-22)
+
+- Added one explicit administrative preparation operation, not an import or Decision side effect: `POST /api/v1/admin/forecast-models/backtest-residuals`.
+- The implementation fits and infers separately per historical origin with sales bounded at that origin, persists only target actual/prediction pairs as `actual - p50`, and preserves forecast-run/prediction/residual provenance. It uses deterministic forecast-run IDs for rerun safety and does not overwrite the active production artifact.
+- A dedicated, fail-closed `SHELFCASH_ADMIN_API_KEY` guard was introduced because the prior runtime had only the ordinary API key and no admin primitive. Ordinary endpoint auth is unchanged.
+- The endpoint reports residual coverage but makes no strategy, feasibility, risk, or expected-fill-rate claim. Existing model-version filtering, effective-scenario sufficiency gate, and deterministic fallback remain unchanged.
+- Rollback is local to the admin route/guard/settings, backtest schemas/service logic, route-manifest/OpenAPI/docs updates, and focused tests. No migration or data backfill is needed.
+- Verification: focused forecast/backtest/scenario/Decision/contract gate passed **59 tests, 1 warning**. Final full suite passed **678 tests, 22 warnings in 205.26s**; `compileall`, `git diff --check`, and OpenAPI **59 paths / 71 operations** passed.
+
 ## High-risk contract debt review
 
 | Boundary | Classification | Evidence and intended handling |

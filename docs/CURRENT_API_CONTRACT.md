@@ -5,7 +5,7 @@
 ## 1. Contract snapshot
 
 - API version prefix: `/api/v1`
-- Runtime surface: **70 operations / 58 paths**
+- Runtime surface: **71 operations / 59 paths**
 - Interactive docs: `GET /docs`
 - OpenAPI: `GET /openapi.json`
 - ReDoc: `GET /redoc`
@@ -29,6 +29,10 @@ Mọi operation dưới `/api/v1` trừ `GET /api/v1/llm/health` dùng header:
 ```http
 x-shelfcash-key: <configured key>
 ```
+
+The administrative residual-bootstrap endpoint is fail-closed and instead
+requires `x-shelfcash-admin-key` matching `SHELFCASH_ADMIN_API_KEY`. An ordinary
+`x-shelfcash-key` never authorizes that endpoint.
 
 `GET /health` cũng public. Việc kiểm tra chỉ được enforce khi `SHELFCASH_API_KEY` khác rỗng; ở config mặc định development, header được OpenAPI mô tả optional và API mở.
 
@@ -175,6 +179,7 @@ Paging rules: `page >= 1`, `1 <= page_size <= 200`; default `page=1`, `page_size
 | Method | Path | Input | Success output | Mục đích |
 |---|---|---|---|---|
 | POST | `/api/v1/forecast-models/train` | `ForecastTrainRequest` | `200 T:ForecastTrainingResponse` | train/version model artifacts |
+| POST | `/api/v1/admin/forecast-models/backtest-residuals` | `ForecastBacktestResidualRequest`; admin key | `200 T:ForecastBacktestResidualResponse` | chronology-safe historical residual bootstrap; does not train/activate the production model |
 | POST | `/api/v1/forecasts` | `ForecastPredictRequest` | `201 T:ForecastResponse` | predict; **deprecated** |
 | GET | `/api/v1/forecasts/{forecast_run_id}` | query `store_id?` | `200 T:ForecastResponse` | đọc predict result; **deprecated** |
 
@@ -410,6 +415,30 @@ ForecastTrainRequest
 
 ForecastPredictRequest extends ForecastTrainRequest
   forecast_horizon: int >= 1
+
+ForecastBacktestResidualRequest
+  store_id: safe path string 1..128
+  origin_date_from, origin_date_to: date (from <= to)
+  origin_frequency: daily | weekly = weekly
+  forecast_horizon: int >= 1, bounded by configured forecast_max_horizon
+  history_days?: int > 0
+  model_version?: safe model-family version
+
+ForecastBacktestResidualResponse
+  store_id, model_version, origins_requested, origins_completed, origins_skipped,
+  residuals_created, residuals_unchanged, residuals_missing_actual,
+  products_evaluated, products_stochastic_ready, products_not_ready,
+  coverage: ForecastResidualCoverage[], stochastic_ready, warnings[]
+
+ForecastResidualCoverage
+  product_id, horizon, residual_count, ready, reason?
+
+Backtest semantics: for every origin D, trainer and inference receive sales
+only through D; forecasts target D+1..D+H; actuals are loaded only after the
+forecast exists. Persisted residual is `actual - p50`. This endpoint creates
+auditable historical forecast runs/predictions and residuals, does not select a
+strategy or compute expected fill rate, and does not remove Decision's final
+effective-scenario fallback gate.
 
 ForecastIn (compatibility)
   cutoff_date: date

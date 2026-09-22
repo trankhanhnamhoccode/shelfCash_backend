@@ -125,8 +125,8 @@ def test_ingredient_demand_typed_response_contract_and_openapi(client, monkeypat
     expected={"$ref":"#/components/schemas/IngredientDemandRunResponse"}
     assert operation["post"]["responses"]["200"]["content"]["application/json"]["schema"]==expected
     assert operation["get"]["responses"]["200"]["content"]["application/json"]["schema"]==expected
-    assert len(document["paths"])==58
-    assert sum(method in {"get","post","put","patch","delete","head","options","trace"} for item in document["paths"].values() for method in item)==70
+    assert len(document["paths"])==59
+    assert sum(method in {"get","post","put","patch","delete","head","options","trace"} for item in document["paths"].values() for method in item)==71
 
 
 def test_planning_facade_delegates_demand_lifecycle(client, monkeypatch):
@@ -198,8 +198,8 @@ def test_procurement_plan_typed_response_contract_and_openapi(client):
     expected={"$ref":"#/components/schemas/ProcurementPlanRunResponse"}
     assert operation["post"]["responses"]["200"]["content"]["application/json"]["schema"]==expected
     assert operation["get"]["responses"]["200"]["content"]["application/json"]["schema"]==expected
-    assert len(document["paths"])==58
-    assert sum(method in {"get","post","put","patch","delete","head","options","trace"} for item in document["paths"].values() for method in item)==70
+    assert len(document["paths"])==59
+    assert sum(method in {"get","post","put","patch","delete","head","options","trace"} for item in document["paths"].values() for method in item)==71
 
 
 def test_procurement_plan_typed_response_supports_no_recommendation_and_blocked_run(client):

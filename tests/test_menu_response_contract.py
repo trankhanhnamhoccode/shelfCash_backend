@@ -167,7 +167,7 @@ def test_product_menu_openapi_uses_explicit_response_models_without_route_drift(
 
     components = schema["components"]["schemas"]
     assert {"MenuComponentResponse", "MenuProductResponse", "MenuSummaryResponse", "MenuResponse"} <= set(components)
-    assert len(schema["paths"]) == 58
+    assert len(schema["paths"]) == 59
     assert sum(1 for path in schema["paths"].values() for method in path if method in {
         "get", "post", "put", "patch", "delete", "head", "options", "trace",
-    }) == 70
+    }) == 71
