@@ -29,6 +29,18 @@ the additive diagnostics `scenario_count_requested`,
 `scenario_count_generated`, `unique_scenario_count`,
 `effective_scenario_count`, and `stochastic_fallback_reason`.
 
+`scenario_count_requested` is the caller's requested bootstrap count, while
+`scenario_count_generated` is the count actually materialized before
+ingredient-path deduplication. For a small eligible coherent-block pool
+(`K <= 100`), generation samples without replacement when the request is below
+`K`, and enumerates all `K` blocks once when the request is at least `K`.
+Consequently `scenario_count_generated` can be less than the request. The
+bounded `technical_metrics.scenario_diagnostics` object records
+`eligible_coherent_block_count`, `selected_coherent_block_count`,
+`distinct_selected_coherent_block_count`, and
+`coherent_block_sampling_mode` (`without_replacement`, `enumerate_all`, or
+`bootstrap_with_replacement`) for residual-bootstrap runs.
+
 Generated records with identical business demand paths are aggregated before
 stochastic risk authority is granted. If the effective scenario count is below
 the current minimum of 10, the engine uses the ordinary p25/p50/p75 design

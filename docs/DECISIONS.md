@@ -203,6 +203,18 @@ The recommendation in `CURRENT_ARCHITECTURE.md` to consider a future determinist
 - **Rejected alternatives:** frontend reason-code dictionaries, inferred prose, and LLM/Qwen on the default Brief path are rejected.
 - **Affected areas:** Decision Brief contract, deterministic strategy presentation/evidence projections, frontend Decision Assistant integration and contract tests.
 
+## ADR-018 — Small coherent-block empirical support is sampled without replacement
+
+- **Status:** ACCEPTED
+- **Decision:** For `ResidualVectorBootstrapScenarioGenerator`, when every forecast store has at most `MAX_UNIQUE_COHERENT_BLOCK_POOL = 100` eligible coherent origin blocks, ShelfCash does not bootstrap the same small empirical support with replacement. If the requested scenario count is below the limiting support size, it selects that many distinct blocks without replacement using the supplied deterministic seed. If the request is at least the limiting support size, it enumerates the available support exactly once with equal base weights. The materialized scenario count may therefore be lower than the request.
+- **Context:** A verified pool of 11 coherent historical blocks, requested as 10 bootstrap draws with seed 42, previously selected only 7 blocks because replacement created collisions. The resulting merged weights produced `N_eff = 6.25` and disabled stochastic SAA even though the empirical support contained 11 blocks.
+- **Why:** Repeated draws of a small historical support do not create independent empirical evidence. Enumeration preserves the actual support and lets the existing exact-path deduplication and effective-scenario gate measure any genuine downstream collapse.
+- **Preserved authority:** Forecast residual construction, scaled-residual reconstruction, clipping, BOM propagation, exact ingredient-path canonicalization, merged weights, `N_eff`, the minimum effective threshold of 10, Exact FEFO, critic, risk thresholds, optimizer, and strategy selection are unchanged. Large pools (`K > 100`) retain the existing with-replacement bootstrap behavior in this slice. No LLM participates.
+- **Diagnostics / contract:** Existing bounded `technical_metrics.scenario_diagnostics` gains `eligible_coherent_block_count`, `selected_coherent_block_count`, `distinct_selected_coherent_block_count`, and `coherent_block_sampling_mode`. `scenario_count_requested` remains the request; `scenario_count_generated` is the actual materialized count and is never fabricated to equal the request. No route, DTO, schema, migration, or OpenAPI change is introduced.
+- **Known separate debt:** Canonical residual lookup currently filters by store and model version without bounding residual observations by a backdated Decision Run cutoff. That possible chronology/look-ahead issue is explicitly deferred to a separate slice and is not changed here.
+- **Rollback:** Remove only the small-pool selector/diagnostics, focused tests, and this checkpoint documentation. No database/data rollback is required.
+- **Affected areas:** `shelfcash_core.scenario.bootstrap`, Decision stochastic diagnostics, scenario-sufficiency handoff, and focused regression tests.
+
 ## Deferred proposals requiring a future decision
 
 The following are not accepted target architecture: merging the computation packages; deterministic-first Overall Summary; removing all Qwen; adopting Unit of Work everywhere; rewriting persistence; replacing SQLite; renaming or moving modules; and removing legacy routes. Exact final `DecisionPlanningService` layout remains intentionally unfrozen; ADR-015 governs its incremental decomposition. The remaining items are proposals or technical debt until separately approved.

@@ -14,6 +14,13 @@
 
 ShelfCash Backend is a FastAPI modular monolith. HTTP routes call application services, repositories/direct SQLAlchemy access, and deterministic computation adapters. `shelfcash_core` is the production computation authority for Forecast, BOM, Ingredient Demand and Decision/What-if computation. `shelfcash_forecast` is the optional forecast/BOM shadow-parity implementation; Decision Intelligence imports some non-computation contracts/helpers from it, which does not confer production authority. Under ADR-014, the operational `/procurement-plans` planner is a distinct accepted authority rather than a shadow of the Decision core. Persistence uses SQLAlchemy and SQLite by default. OpenRouter/Qwen is a bounded narrative or ambiguity-resolution integration; it is not business authority.
 
+## Small coherent-block stochastic support stabilization
+
+- **Status:** COMPLETE (2026-09-23). ADR-018 changes only `shelfcash_core` residual-bootstrap block selection for small empirical pools (`K <= 100`). `N < K` selects `N` distinct coherent blocks without replacement; `N >= K` materializes every eligible block once, so generated scenarios can be fewer than requested.
+- **Runtime / evidence semantics:** every selected block starts with equal base weight. Existing clipping, deterministic BOM propagation, exact ingredient-demand path collapse, probability merge, `N_eff`, and the unchanged `MIN_EFFECTIVE_STOCHASTIC_SCENARIOS = 10` gate remain authoritative. Thus six blocks requested as 100 still yield `N_eff <= 6` and deterministic fallback, while ten or more genuinely distinct final paths may enable SAA.
+- **Diagnostics / compatibility:** existing `technical_metrics.scenario_diagnostics` now records eligible, selected, and distinct-selected coherent-block counts plus the deterministic mode: `without_replacement`, `enumerate_all`, or `bootstrap_with_replacement`. `scenario_count_requested` is the caller input and `scenario_count_generated` is the actual materialized count. No route, Pydantic DTO, OpenAPI, persistence, migration, forecast, BOM, FEFO, optimizer, critic, risk threshold, strategy, or LLM behavior changed. Current OpenAPI remains **59 paths / 71 operations**.
+- **Verification:** targeted scenario/BOM/risk/strategy/Decision regression passed **31 tests, 1 warning**; final full suite passed **685 tests, 22 warnings in 594.58s**. `compileall` and `git diff --check` passed.
+
 ## Post-R7 stochastic risk-evidence sufficiency slice
 
 - **Status:** COMPLETE (2026-09-19). ADR-016 makes empirical stochastic stockout risk authoritative only after scenario evidence passes `MIN_EFFECTIVE_STOCHASTIC_SCENARIOS = 10`.
@@ -81,6 +88,7 @@ Import → Canonical DB → Forecast → BOM → Ingredient Demand → Inventory
 - Persisted JSON blobs retain some permissive reads in Decision Intelligence. Under ADR-013, old SQLite rows do not require migration/backfill compatibility; preserve only behavior that supports the current public runtime contract.
 - OpenRouter transport/guard complexity remains broad relative to the reduced default LLM scope.
 - Dense responsibility hotspots are confirmed in planning/completion route and service modules.
+- **Deferred stochastic chronology debt:** `CoreProcurementAdapter._canonical_residuals` currently limits residuals by store and forecast model version, but not a backdated Decision Run cutoff. This can admit future residual observations for a historical Decision Run. It was observed during stochastic investigation and is deliberately outside ADR-018's block-selection scope.
 
 ## R0 verification
 

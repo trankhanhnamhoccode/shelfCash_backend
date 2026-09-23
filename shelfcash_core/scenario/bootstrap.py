@@ -17,6 +17,9 @@ from shelfcash_core.scenario.residuals import validate_residual_history
 from shelfcash_core.scenario.validation import scenario_reproduction_diagnostics
 
 
+MAX_UNIQUE_COHERENT_BLOCK_POOL = 100
+
+
 class ResidualVectorBootstrapScenarioGenerator:
     """Sample coherent store/origin residual blocks with explicit fallbacks."""
 
@@ -30,6 +33,110 @@ class ResidualVectorBootstrapScenarioGenerator:
     ) -> None:
         self.minimum_block_observations = minimum_block_observations
         self.minimum_pool_observations = minimum_pool_observations
+
+    @staticmethod
+    def _ordered_block_keys(
+        blocks: dict[tuple[str, pd.Timestamp], pd.DataFrame],
+        store_id: str,
+    ) -> list[tuple[str, pd.Timestamp]]:
+        """Return the stable candidate support for one forecast store.
+
+        The global fallback is retained for the pre-existing multi-store core
+        behavior.  Decision Runs currently construct one-store packages, so
+        ordinary stochastic planning has one coherent empirical support.
+        """
+        store_blocks = [key for key in blocks if key[0] == store_id]
+        return sorted(store_blocks or list(blocks), key=lambda key: (key[0], key[1]))
+
+    def _select_coherent_blocks(
+        self,
+        blocks: dict[tuple[str, pd.Timestamp], pd.DataFrame],
+        stores: list[str],
+        *,
+        n_scenarios: int,
+        rng: np.random.Generator,
+    ) -> tuple[list[dict[str, tuple[str, pd.Timestamp]]], dict[str, Any]]:
+        """Select one coherent origin per store for each generated scenario.
+
+        Small empirical supports are sampled without replacement.  Repeating
+        the same small set cannot create independent evidence, so when the
+        caller asks for at least the support size we enumerate it exactly once.
+        Larger pools deliberately retain the established bootstrap-with-
+        replacement behavior.
+        """
+        candidates_by_store = {
+            store_id: self._ordered_block_keys(blocks, store_id)
+            for store_id in stores
+        }
+        support_sizes = {
+            store_id: len(candidates)
+            for store_id, candidates in candidates_by_store.items()
+        }
+        # ``blocks`` is non-empty, and the global fallback above guarantees a
+        # non-empty candidate set for every forecast store.
+        smallest_support = min(support_sizes.values())
+        small_pool = all(
+            count <= MAX_UNIQUE_COHERENT_BLOCK_POOL
+            for count in support_sizes.values()
+        )
+
+        if small_pool:
+            generated_count = min(n_scenarios, smallest_support)
+            sampling_mode = (
+                "enumerate_all"
+                if n_scenarios >= smallest_support
+                else "without_replacement"
+            )
+            schedules: dict[str, list[tuple[str, pd.Timestamp]]] = {}
+            for store_id, candidates in candidates_by_store.items():
+                if generated_count >= len(candidates):
+                    schedules[store_id] = candidates
+                else:
+                    selected_indexes = rng.choice(
+                        len(candidates), size=generated_count, replace=False
+                    )
+                    schedules[store_id] = [
+                        candidates[int(index)] for index in selected_indexes
+                    ]
+        else:
+            generated_count = n_scenarios
+            sampling_mode = "bootstrap_with_replacement"
+            schedules = {
+                store_id: [
+                    candidates[int(rng.integers(len(candidates)))]
+                    for _ in range(generated_count)
+                ]
+                for store_id, candidates in candidates_by_store.items()
+            }
+
+        selections = [
+            {
+                store_id: schedules[store_id][scenario_index]
+                for store_id in stores
+            }
+            for scenario_index in range(generated_count)
+        ]
+        distinct_selected = {
+            store_id: len(set(schedules[store_id]))
+            for store_id in stores
+        }
+        diagnostics: dict[str, Any] = {
+            # Scalar values describe the limiting support when a core caller
+            # supplies more than one store.  The per-store map retains the
+            # exact provenance without changing ordinary single-store output.
+            "eligible_coherent_block_count": smallest_support,
+            "selected_coherent_block_count": generated_count,
+            "distinct_selected_coherent_block_count": min(
+                distinct_selected.values()
+            ),
+            "coherent_block_sampling_mode": sampling_mode,
+        }
+        if len(stores) > 1:
+            diagnostics["eligible_coherent_block_counts_by_store"] = support_sizes
+            diagnostics["distinct_selected_coherent_block_counts_by_store"] = (
+                distinct_selected
+            )
+        return selections, diagnostics
 
     def _fallback_pool(
         self,
@@ -108,19 +215,18 @@ class ResidualVectorBootstrapScenarioGenerator:
 
         stores = sorted({prediction.store_id for prediction in predictions})
         rng = np.random.default_rng(seed)
+        coherent_block_selections, block_diagnostics = self._select_coherent_blocks(
+            blocks, stores, n_scenarios=n_scenarios, rng=rng
+        )
         fallback_counts: Counter[str] = Counter()
         sampled_records: list[dict[str, Any]] = []
         scenarios: list[ProductDemandScenario] = []
         clipped_count = 0
         total_count = 0
 
-        for scenario_index in range(n_scenarios):
+        generated_count = len(coherent_block_selections)
+        for scenario_index, selected_blocks in enumerate(coherent_block_selections):
             scenario_id = f"scenario_{scenario_index + 1:04d}"
-            selected_blocks: dict[str, tuple[str, pd.Timestamp]] = {}
-            for store_id in stores:
-                store_blocks = [key for key in blocks if key[0] == store_id]
-                candidates = store_blocks or list(blocks)
-                selected_blocks[store_id] = candidates[int(rng.integers(len(candidates)))]
 
             lines: list[ProductDemandScenarioLine] = []
             for prediction in predictions:
@@ -172,7 +278,7 @@ class ResidualVectorBootstrapScenarioGenerator:
             scenarios.append(
                 ProductDemandScenario(
                     scenario_id=scenario_id,
-                    probability_weight=1.0 / n_scenarios,
+                    probability_weight=1.0 / generated_count,
                     lines=lines,
                     metadata={
                         "seed": seed,
@@ -196,9 +302,14 @@ class ResidualVectorBootstrapScenarioGenerator:
         diagnostics.update(
             {
                 "seed": seed,
-                "scenario_count": n_scenarios,
+                # Retained for existing bundle-diagnostic readers; it is the
+                # count actually materialized in ``scenarios``.
+                "scenario_count": generated_count,
+                "scenario_count_requested": n_scenarios,
+                "scenario_count_generated": generated_count,
                 "residual_row_count": len(residuals),
                 "fallback_counts": dict(sorted(fallback_counts.items())),
+                **block_diagnostics,
             }
         )
         return ProductDemandScenarioBundle(

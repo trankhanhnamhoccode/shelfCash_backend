@@ -45,6 +45,15 @@ AS-IS facts, accepted targets, proposals, technical debt, and historical informa
 - [x] User numeric premises remain context only. Same-unit explicit procurement mismatches are corrected from persisted evidence without putting the user number into business claims/citations.
 - [x] Final verification: **675 passed, 22 warnings in 634.22s**; no API shape, persistence, migration, Decision Package, or business-computation change.
 
+## Small coherent-block stochastic support stabilization — COMPLETE (2026-09-23)
+
+- [x] ADR-018 accepts a small-pool evidence policy without changing the forecast, BOM, FEFO, optimizer, critic, risk-threshold, or strategy authorities.
+- [x] For coherent-block support `K <= 100`, residual bootstrap selects distinct blocks without replacement for `N < K`, and enumerates each block once for `N >= K`; `K > 100` retains existing with-replacement bootstrap behavior.
+- [x] `scenario_count_requested` remains the request while `scenario_count_generated` records actual materialized records. Existing final-path deduplication, merged weights, and `N_eff >= 10` sufficiency remain mandatory; the change does not manufacture evidence from a six-block support.
+- [x] Existing bounded scenario diagnostics expose coherent-support count, selection count, distinct selection count, and sampling mode. No public route/DTO/OpenAPI or persistence change is needed.
+- [x] Targeted scenario/BOM/risk/strategy/Decision regression passed **31 tests, 1 warning**; final full regression passed **685 tests, 22 warnings in 594.58s**. `compileall` and `git diff --check` passed. Rollback is limited to the generator policy, diagnostics, focused tests, ADR-018, and these status notes.
+- [ ] Follow-up technical-debt slice (not part of this completion): bound canonical residual lookup by a backdated Decision Run cutoff to prevent possible future-observation look-ahead.
+
 ## Baseline safety rules
 
 1. No external payload changes hidden inside refactor.
