@@ -6,8 +6,8 @@ from app.core.exceptions import PlanningError
 from app.services.decision.decision_run_ingredient_scope import decision_run_ingredient_ids
 from app.services.decision.explanation_ingredient_resolver import ExplanationIngredientResolver
 from app.services.decision.explanation_query_interpretation import (
-    ExplanationQueryIntent,
-    classify_explanation_question,
+    QuestionScope,
+    classify_question_scope,
 )
 
 
@@ -30,10 +30,10 @@ class ExplainDecision:
 
         package = self._read_decision_package.read(decision_run_id)
         requested_ingredient_id = body.ingredient_id
-        query_intent = classify_explanation_question(
+        question_scope = classify_question_scope(
             body.question, has_explicit_ingredient_id=bool(requested_ingredient_id),
         )
-        if query_intent is ExplanationQueryIntent.UNSUPPORTED:
+        if question_scope is QuestionScope.UNSUPPORTED:
             raise PlanningError(
                 "EXPLANATION_QUERY_UNSUPPORTED",
                 "Unable to determine a supported explanation request.",
@@ -62,11 +62,14 @@ class ExplainDecision:
             )
         try:
             brief = self._build_decision_brief.build(decision_run_id)
-            if query_intent is ExplanationQueryIntent.GENERIC:
+            if question_scope is not QuestionScope.ENTITY_OPERATIONAL:
+                # QuestionScope is authoritative for broad retrieval scope.
+                # Slice C gives PLAN_STRATEGY a distinct evidence path.
                 semantic_facts = DecisionSemanticEvidenceBuilder().build(brief, package)
                 return DecisionNarrativeProvider(self._llm_provider, self._settings).explain(
                     brief, question=body.question, language=body.language,
                     detail_level=body.detail_level, semantic_facts=semantic_facts,
+                    question_scope=question_scope.value,
                 ).model_dump(mode="json")
             resolution = self._resolve_question(body.question, brief.store_id, package)
             if resolution.status == "ambiguous":
@@ -91,6 +94,7 @@ class ExplainDecision:
             return DecisionNarrativeProvider(self._llm_provider, self._settings).explain(
                 brief, question=body.question, language=body.language,
                 detail_level=body.detail_level, semantic_facts=semantic_facts,
+                question_scope=question_scope.value,
             ).model_dump(mode="json")
         except PlanningError:
             raise

@@ -42,7 +42,9 @@ def detect_intent(question: str) -> str:
     return "PLAN"
 
 
-def retrieve_narrative_evidence(brief, records: list[dict[str, Any]], *, question: str, ingredient_id: str | None, detail_level: str) -> NarrativeRetrieval:
+def retrieve_narrative_evidence(brief, records: list[dict[str, Any]], *, question: str, ingredient_id: str | None, detail_level: str, question_scope: str | None = None) -> NarrativeRetrieval:
+    if question_scope == "plan_strategy":
+        return _retrieve_plan_strategy(records, question)
     intent = detect_intent(question)
     target = resolve_ingredient_id(brief, question, ingredient_id)
     scoped = [item for item in records if not target or not item.get("ingredient_id") or item.get("ingredient_id") == target]
@@ -51,7 +53,9 @@ def retrieve_narrative_evidence(brief, records: list[dict[str, Any]], *, questio
         return [item for item in scoped if item.get("type") in allowed]
 
     if intent == "WHY_PROCUREMENT":
-        causal = [item for item in scoped if item.get("type") == "PROCUREMENT_REASON" or item.get("classification") == "CAUSAL"]
+        # A strategy-selection proof is causal at strategy scope, but it is
+        # never procurement causality for an ingredient question.
+        causal = types("PROCUREMENT_REASON")
         selected = [*causal[:1], *types("PROCUREMENT_QUANTITY")[:1], *types("DEMAND_HORIZON_SUMMARY")[:1], *types("DEMAND_ORDER_ALIGNMENT")[:1]]
         return NarrativeRetrieval(intent, target, _unique(selected), bool(causal))
     if intent == "PROCUREMENT_QUANTITY":
@@ -76,6 +80,38 @@ def retrieve_narrative_evidence(brief, records: list[dict[str, Any]], *, questio
     if intent == "STRATEGY_COMPARISON":
         return NarrativeRetrieval(intent, target, _unique(types("STRATEGY_COMPARISON", "STRATEGY_SELECTION_PROOF", "STRATEGY_CANDIDATE_METRICS")), False)
     return NarrativeRetrieval(intent, target, _unique(types("PLAN_OVERVIEW", "PROCUREMENT_QUANTITY", "SELECTED_PLAN_RISK_METRICS")[:3]), False)
+
+
+def _retrieve_plan_strategy(records: list[dict[str, Any]], question: str) -> NarrativeRetrieval:
+    """Select existing plan/strategy facts without re-inferring broad scope."""
+    lowered = question.lower()
+    selected = next((str(item.get("strategy")).lower() for item in records if item.get("type") == "PLAN_OVERVIEW" and item.get("strategy")), None)
+    mentioned = {name for name in ("lean", "balanced", "protected") if re.search(rf"(?<![a-z0-9]){name}(?![a-z0-9])", lowered)}
+    alternatives = mentioned - ({selected} if selected else set())
+    tradeoff = any(token in lowered for token in ("trade-off", "trade off", "tradeoff"))
+    comparison = len(mentioned) >= 2 or bool(alternatives)
+    intent = "PLAN_TRADEOFF" if tradeoff else "STRATEGY_COMPARISON" if comparison else "PLAN_SELECTION"
+
+    overview = [item for item in records if item.get("type") == "PLAN_OVERVIEW"][:1]
+    proof = [item for item in records if item.get("type") == "STRATEGY_SELECTION_PROOF"][:1]
+    comparisons = [
+        item for item in records
+        if item.get("type") == "STRATEGY_COMPARISON"
+        and (not alternatives or str(item.get("right_strategy", "")).lower() in alternatives)
+    ]
+    if not alternatives and (tradeoff or intent == "PLAN_SELECTION"):
+        comparisons = comparisons[:2]
+    metrics_strategies = ({selected} if selected else set()) | alternatives | {
+        item.get("right_strategy") for item in comparisons if item.get("right_strategy")
+    }
+    metrics = [
+        item for item in records
+        if item.get("type") == "STRATEGY_CANDIDATE_METRICS" and str(item.get("strategy", "")).lower() in metrics_strategies
+    ]
+    relevant = [*overview, *proof, *comparisons, *metrics]
+    if any(token in lowered for token in ("rủi ro", "rui ro", "risk", "chú ý", "chu y", "limitation", "giới hạn", "gioi han")):
+        relevant.extend(item for item in records if item.get("type") == "SELECTED_PLAN_RISK_METRICS" or item.get("classification") == "LIMITATION")
+    return NarrativeRetrieval(intent, None, _unique(relevant), bool(proof))
 
 
 def _date_token(question: str) -> str | None:

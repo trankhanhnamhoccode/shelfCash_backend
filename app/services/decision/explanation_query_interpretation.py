@@ -1,4 +1,4 @@
-"""Small deterministic intent gate for Explanation question routing."""
+"""Small deterministic scope gate for Decision Explanation questions."""
 
 from enum import StrEnum
 import re
@@ -6,42 +6,57 @@ import re
 from app.core.names import normalize_lookup_name
 
 
-class ExplanationQueryIntent(StrEnum):
-    GENERIC = "generic"
-    INGREDIENT = "ingredient"
+class QuestionScope(StrEnum):
+    ENTITY_OPERATIONAL = "entity_operational"
+    PLAN_STRATEGY = "plan_strategy"
+    GENERAL_DECISION = "general_decision"
+    CLOSED_FACT = "closed_fact"
     UNSUPPORTED = "unsupported"
 
 
 _OUT_OF_DOMAIN = ("muon an", "want to eat", "i want to eat")
-_INGREDIENT_MARKERS = (
-    "mua", "nhap", "dat", "can", "tai sao", "vi sao", "why", "explain",
-    "giai thich", "van de", "problem", "nhu cau", "demand",
+_ENTITY_OPERATIONAL_MARKERS = (
+    "mua", "nhap", "dat", "can", "nhu cau", "demand", "thieu", "stockout",
+    "buy", "buying", "order", "ordering", "need",
 )
-_GENERIC_MARKERS = (
-    "ke hoach", "plan", "rui ro", "risk", "trade off", "tradeoff",
-    "gia dinh", "assumption", "chien luoc", "strategy",
+_PLAN_STRATEGY_MARKERS = (
+    "phuong an", "chien luoc", "strategy", "trade off", "trade-off", "tradeoff", "chon",
+    "selected", "de xuat", "lean", "balanced", "protected",
+)
+_GENERAL_DECISION_MARKERS = ("ke hoach", "plan", "rui ro", "risk", "chu y", "van de", "problem", "gia dinh", "assumption")
+_WHY_MARKERS = ("tai sao", "vi sao", "why")
+_CLOSED_FACT_MARKERS = (
+    "tong chi phi", "total cost", "ke hoach nao duoc chon", "phuong an nao duoc chon",
+    "which plan is selected", "vuot ngan sach", "over budget",
 )
 
 
-def classify_explanation_question(question: str | None, *, has_explicit_ingredient_id: bool) -> ExplanationQueryIntent:
-    """Classify explanation purpose without resolving canonical identity.
+def classify_question_scope(question: str | None, *, has_explicit_ingredient_id: bool) -> QuestionScope:
+    """Classify the Decision Run object being asked about, not an answer template.
 
-    An ingredient selector is not itself proof that arbitrary user prose asks
-    for a procurement explanation. Explicit IDs retain their established
-    target behavior except for recognized out-of-domain requests.
+    This deterministic boundary decides scope before generic ``why`` wording.
+    Canonical ingredient identity is still resolved later by the existing
+    resolver. Closed facts retain the existing narrative flow until a later
+    approved execution policy exists.
     """
     if not question or not question.strip():
-        return ExplanationQueryIntent.INGREDIENT if has_explicit_ingredient_id else ExplanationQueryIntent.GENERIC
+        return QuestionScope.ENTITY_OPERATIONAL if has_explicit_ingredient_id else QuestionScope.GENERAL_DECISION
     normalized = normalize_lookup_name(question)
     if _contains_any(normalized, _OUT_OF_DOMAIN):
-        return ExplanationQueryIntent.UNSUPPORTED
+        return QuestionScope.UNSUPPORTED
     if has_explicit_ingredient_id:
-        return ExplanationQueryIntent.INGREDIENT
-    if _contains_any(normalized, _INGREDIENT_MARKERS):
-        return ExplanationQueryIntent.INGREDIENT
-    if _contains_any(normalized, _GENERIC_MARKERS):
-        return ExplanationQueryIntent.GENERIC
-    return ExplanationQueryIntent.UNSUPPORTED
+        return QuestionScope.ENTITY_OPERATIONAL
+    if _contains_any(normalized, _CLOSED_FACT_MARKERS):
+        return QuestionScope.CLOSED_FACT
+    if _contains_any(normalized, _PLAN_STRATEGY_MARKERS):
+        return QuestionScope.PLAN_STRATEGY
+    if _contains_any(normalized, _GENERAL_DECISION_MARKERS):
+        return QuestionScope.GENERAL_DECISION
+    if _contains_any(normalized, _ENTITY_OPERATIONAL_MARKERS):
+        return QuestionScope.ENTITY_OPERATIONAL
+    if _contains_any(normalized, _WHY_MARKERS):
+        return QuestionScope.GENERAL_DECISION
+    return QuestionScope.UNSUPPORTED
 
 
 def _contains_any(text: str, phrases: tuple[str, ...]) -> bool:

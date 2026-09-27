@@ -54,6 +54,46 @@ AS-IS facts, accepted targets, proposals, technical debt, and historical informa
 - [x] Targeted scenario/BOM/risk/strategy/Decision regression passed **31 tests, 1 warning**; final full regression passed **685 tests, 22 warnings in 594.58s**. `compileall` and `git diff --check` passed. Rollback is limited to the generator policy, diagnostics, focused tests, ADR-018, and these status notes.
 - [ ] Follow-up technical-debt slice (not part of this completion): bound canonical residual lookup by a backdated Decision Run cutoff to prevent possible future-observation look-ahead.
 
+## R7 Ask-AI Grounded Semantic Reasoning — Slice A COMPLETE
+
+- **Decision gate:** ADR-019 is accepted before production routing/retrieval/provider work. It permits Qwen only as a bounded grounded semantic-reasoning layer for on-demand Decision Explanation. Backend keeps all business truth and all unsupported number/entity/comparison/causal/strategy/provenance/selection claims remain fail-closed.
+- **Current characterization:** `Tại sao chọn kế hoạch này?` is not fixed. The current lexical gate sees `tại sao` as ingredient-oriented; after unresolved entity handling, narrative retrieval can classify it as `WHY_PROCUREMENT`, selecting procurement/demand rather than strategy-selection/comparison evidence. The generic deterministic fallback omits semantic strategy facts even though the Qwen path can receive them.
+- **Fact capability:** focused tests prove the existing `DecisionSemanticEvidenceBuilder` derives valid `STRATEGY_SELECTION_PROOF` only after persisted selection-rule reconciliation and derives selected-versus-alternative `STRATEGY_COMPARISON` from `DecisionRun.package_json`. Existing grounded explicit strategy comparison remains covered; no duplicate fact or computation was introduced.
+- **Frozen non-goals:** no production behavior, closed deterministic routing, public DTO/OpenAPI, persistence/database, strategy/risk computation, `/brief` Strategy Explanation, Ingredient Synthesis, Overall Summary, What-if, or Excel Mapping change.
+- **Next accepted slice:** Slice B — Question Scope Classification. It must correct scope classification without changing retrieval, prompt, grounding, fallback, or public contracts in the same slice.
+
+## R7 Ask-AI Grounded Semantic Reasoning — Slice B COMPLETE
+
+- **Scope-only production change:** a deterministic internal `QuestionScope` now distinguishes `ENTITY_OPERATIONAL`, `PLAN_STRATEGY`, `GENERAL_DECISION`, and `CLOSED_FACT` before generic lexical `why` handling. Only `ENTITY_OPERATIONAL` enters existing ingredient resolver/scoped narration; explicit `ingredient_id` remains authoritative. `CLOSED_FACT` is recognized but still uses the existing accepted runtime flow; no deterministic closed-question execution was enabled.
+- **Regression boundary:** Ingredient operational examples and English aliases remain resolver-scoped; plan/strategy selection, named strategy, alternative, and trade-off questions become `PLAN_STRATEGY`; general attention/risk questions become `GENERAL_DECISION`. Existing explicit strategy-comparison behavior remains unchanged.
+- **Known remaining gap:** Slice B intentionally does not modify narrative retrieval, communication plan, prompt, provider schema, grounding, fallback, semantic evidence, public contract, persistence, or business computation. A correctly scoped `PLAN_STRATEGY` question can still receive `WHY_PROCUREMENT` retrieval, so it does not yet reliably receive selection proof/comparison/candidate/risk context.
+- **Next accepted slice:** Slice C — Plan/Strategy Evidence Retrieval. It must consume the established scope signal and select only relevant existing semantic evidence, without changing fallback, prompt, grounding, or public contracts in the same slice.
+
+## R7 Ask-AI Grounded Semantic Reasoning — Slice C COMPLETE
+
+- **Evidence-selection production change:** `QuestionScope.PLAN_STRATEGY` is now propagated into narrative retrieval and takes a bounded plan/strategy path. It never re-infers the broad scope from generic `tại sao`/`vì sao`/`why`. The branch reuses `PLAN_OVERVIEW`, valid reconciled `STRATEGY_SELECTION_PROOF`, relevant selected-versus-requested `STRATEGY_COMPARISON`, and only necessary `STRATEGY_CANDIDATE_METRICS`; selected-plan risk/limitation evidence is included only for risk/limitation questions.
+- **Safety and relevance:** missing or invalid selection proof never becomes a manufactured cause or a procurement fallback. Named alternatives limit comparison/candidate evidence to the requested strategy; general selection/trade-off questions use bounded selected-versus-alternative comparison context. Ingredient operational `WHY_PROCUREMENT` retrieval remains separate and now accepts only `PROCUREMENT_REASON` as procurement causality, preventing strategy-selection proof from leaking into ingredient narration.
+- **Frozen non-goals:** no semantic fact/business calculation, strategy-selection/recommendation/risk computation, package persistence, database, public API/OpenAPI, provider schema, grounding rule, Qwen prompt, deterministic fallback, `/brief` Strategy Explanation, Ingredient Synthesis, Overall Summary, What-if, or closed deterministic Ask-AI execution change.
+- **Next accepted slice:** Slice D — Grounded Comparative & Multi-Fact Semantic Claims. It should add only the claim/grounding categories required to safely synthesize the newly selected backend facts; prompt and fallback remain separate subsequent work unless evidence requires a narrower intermediate slice.
+
+## R7 Ask-AI Grounded Semantic Reasoning — Slice D COMPLETE
+
+- **Grounding change:** the existing internal claim `type` plus `evidence_ids` remains sufficient; no public schema or Qwen-declared semantic kind was added. Backend derives strategy premises from cited evidence. A comparative phrase must match the cited comparison's left/right strategies, metric, and backend-derived direction. A compound claim must satisfy every cited comparison premise.
+- **Selection and ranking safety:** a selection cause or lowest-cost-among-eligible ranking requires valid reconciled `STRATEGY_SELECTION_PROOF` with its persisted cost selection rule. Candidate metrics or pairwise comparison cannot create selection causality, and pairwise evidence cannot create a global ranking. Numeric, entity, scenario/provenance, operational-causal, and recommendation checks remain fail-closed; no arithmetic is performed by the guard.
+- **Frozen non-goals:** no prompt/provider-schema, retrieval/scope, fallback, closed deterministic execution, semantic business computation, persistence/database, public API/OpenAPI, `/brief`, Ingredient Synthesis, Overall Summary, or What-if change.
+- **Next accepted slice:** Slice E — Shared Semantic Deterministic Fallback. Retrieval and grounding now expose/validate authorized selection facts, while the unavailable/invalid-Qwen path still cannot use those same facts.
+
+## R7 Ask-AI Grounded Semantic Reasoning — Slice E COMPLETE
+
+- **Fallback alignment:** PLAN_STRATEGY provider-unavailable and provider-failure paths now render selected semantic plan facts rather than discarding them. Valid reconciled selection proof renders only its persisted lowest-cost-among-eligible basis; absent proof produces a scoped limitation. Comparison wording uses only existing directional `STRATEGY_COMPARISON` facts and performs no arithmetic.
+- **Next accepted slice:** Slice F — Prompt Contract & End-to-End Semantic Reasoning. Prompt wording remains unchanged; CLOSED_FACT execution remains disabled.
+
+## R7 Ask-AI Grounded Semantic Reasoning — Slice F COMPLETE
+
+- **Prompt/communication contract:** Decision Narrative now explicitly answers the user question first, follows supplied scope and primary communication facts, uses selection proof for selection causes, and permits only supplied directional comparisons/trade-offs. It keeps claims granular, numbers exact, and manager-facing prose free of UUIDs/evidence IDs/internal implementation noise.
+- **Authority/non-goals:** Qwen remains a grounded semantic renderer only; guard and deterministic fallback remain authoritative safety boundaries. No business computation, retrieval, persistence, public API/OpenAPI, prompt-output schema, `/brief`, Ingredient Synthesis, Overall Summary, What-if, or CLOSED_FACT deterministic execution changed.
+- **Next recommendation:** R7 Ask-AI Exit Review, after full end-to-end acceptance verification.
+
 ## Baseline safety rules
 
 1. No external payload changes hidden inside refactor.

@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 import re
 import time
+import unicodedata
 from collections import defaultdict
 from typing import Any
 
@@ -179,6 +180,22 @@ Nếu không đủ dữ liệu để trả lời nguyên nhân:
 """
 
 SYSTEM_PROMPT += """
+SLICE F QUESTION CONTRACT:
+Answer the user's QUESTION first; do not merely summarize the easiest evidence.
+Use COMMUNICATION_PLAN.answer_with as the primary answer facts.
+For PLAN_SELECTION, name the selected strategy first and state "selected because"
+only with STRATEGY_SELECTION_PROOF. For comparisons/trade-offs, state only
+supplied directional relations; never calculate, rank, or turn comparison into
+rejection causality. If proof is absent, say that the selection reason cannot
+be confirmed. ENTITY_OPERATIONAL stays within the resolved ingredient.
+GENERAL_DECISION uses only relevant selected-plan facts, explicit risks, or
+limitations. Do not expose UUIDs, evidence IDs, or internal implementation
+terms. Use numbers only when material and copy authorized display tokens exactly:
+never round, convert units, or derive values. Keep claims granular, with each
+material premise mapped to its evidence. Simple answers are 1-3 concise sentences;
+manager may add a supported trade-off/risk; technical may add user-facing
+provenance detail without internal codes.
+
 
 STYLE_EXAMPLES ARE NOT EVIDENCE. They only demonstrate tone and sentence structure.
 Never take a number, date, ingredient, supplier, strategy, cause, or factual claim from a
@@ -340,6 +357,7 @@ class DecisionNarrativeProvider:
         detail_level: str,
         semantic_facts: list[SemanticFact] | None = None,
         ingredient_id: str | None = None,
+        question_scope: str | None = None,
     ) -> DecisionExplanationResponse:
         # Preserve the existing human-readable deterministic fallback. Semantic
         # facts are machine evidence for retrieval/Qwen/grounding, not fallback prose.
@@ -352,16 +370,19 @@ class DecisionNarrativeProvider:
             fallback = self.deterministic.explain(
                 brief, question=question, language=language, detail_level=detail_level,
             )
+        if question_scope == "plan_strategy":
+            records = self._selected_semantic_records(brief, question, detail_level, semantic_facts, question_scope)
+            fallback = self._semantic_plan_fallback(fallback, records, language)
         if not self.llm_provider or not self.llm_provider.available:
             return fallback
         return self._qwen_or_fallback(
             brief, question, language, detail_level, fallback, semantic_facts,
-            ingredient_id=ingredient_id,
+            ingredient_id=ingredient_id, question_scope=question_scope,
         )
 
     def _qwen_or_fallback(
         self, brief, question, language, detail_level, fallback, semantic_facts,
-        *, ingredient_id: str | None = None,
+        *, ingredient_id: str | None = None, question_scope: str | None = None,
     ):
         started = time.monotonic()
         request_id = get_request_id()
@@ -391,7 +412,7 @@ class DecisionNarrativeProvider:
             )
             retrieval = retrieve_narrative_evidence(
                 brief, all_structured, question=resolved_question,
-                ingredient_id=ingredient_id, detail_level=detail_level,
+                ingredient_id=ingredient_id, detail_level=detail_level, question_scope=question_scope,
             )
             structured = retrieval.evidence
             intent = retrieval.intent
@@ -405,6 +426,8 @@ class DecisionNarrativeProvider:
             plan = narrative_communication_plan(structured, str(intent))
             selected_ids = set(plan.evidence_ids)
             selected = [item for item in structured if item["evidence_id"] in selected_ids]
+            if question_scope == "plan_strategy":
+                fallback = self._semantic_plan_fallback(fallback, selected, language)
             payload = {
                 "question": resolved_question, "language": language, "detail_level": detail_level,
                 "communication_plan": {
@@ -505,6 +528,39 @@ class DecisionNarrativeProvider:
                 update_dict["raw_response"] = {"failure_stage": failure_stage, "reason": type(exc).__name__}
             return fallback.model_copy(update=update_dict)
 
+    def _selected_semantic_records(self, brief, question, detail_level, semantic_facts, question_scope):
+        evidence = self.deterministic._evidence(brief, semantic_facts=semantic_facts)
+        records = aggregate_evidence(brief, evidence.items, semantic_facts=semantic_facts, include_daily=True)
+        retrieval = retrieve_narrative_evidence(
+            brief, records, question=question or "", ingredient_id=None,
+            detail_level=detail_level, question_scope=question_scope,
+        )
+        return retrieval.evidence
+
+    @staticmethod
+    def _semantic_plan_fallback(fallback, records: list[dict], language: str):
+        """Render only already-materialized strategy facts; never calculate."""
+        overview = next((item for item in records if item.get("type") == "PLAN_OVERVIEW"), None)
+        selected = str((overview or {}).get("strategy") or "").upper()
+        proof = next((item for item in records if item.get("type") == "STRATEGY_SELECTION_PROOF"), None)
+        comparisons = [item for item in records if item.get("type") == "STRATEGY_COMPARISON"]
+        if proof and proof.get("rule") == "lowest_valid_candidate_cost_then_strategy_name":
+            answer = f"{selected} được chọn vì đây là phương án có chi phí mua thấp nhất trong các phương án đủ điều kiện."
+        elif selected:
+            answer = f"{selected} là phương án được chọn, nhưng dữ liệu Decision Run hiện không đủ để xác nhận lý do lựa chọn."
+        else:
+            return fallback
+        rendered = []
+        for item in comparisons[:2]:
+            left, right = str(item.get("left_strategy", "")).upper(), str(item.get("right_strategy", "")).upper()
+            if isinstance(item.get("purchase_cost_delta"), (int, float)) and item["purchase_cost_delta"] < 0:
+                rendered.append(f"{left} có chi phí mua thấp hơn {right}.")
+            elif isinstance(item.get("stockout_probability_delta"), (int, float)) and item["stockout_probability_delta"] < 0:
+                rendered.append(f"{left} có xác suất thiếu hàng thấp hơn {right}.")
+        if rendered:
+            answer = " ".join([answer, *rendered])
+        return fallback.model_copy(update={"summary": answer, "answer": answer, "why_this_plan": [answer]})
+
     def _guard(
         self, raw, structured, evidence_items, brief, language, detail_level, intent,
         *, target_ingredient_id: str | None = None,
@@ -544,6 +600,7 @@ class DecisionNarrativeProvider:
             self._validate_supported_concepts(claim["text"], [structured_by_id[evidence_id] for evidence_id in ids])
             self._validate_causal_language(claim["text"], [structured_by_id[evidence_id] for evidence_id in ids])
             self._validate_strategy_selection_language(claim["text"], [structured_by_id[evidence_id] for evidence_id in ids])
+            self._validate_strategy_semantics(claim["text"], [structured_by_id[evidence_id] for evidence_id in ids])
             self._validate_baseline_language(claim["text"], [structured_by_id[evidence_id] for evidence_id in ids])
             self._validate_public_text(claim["text"])
             claim_source_ids = sorted({source_id for evidence_id in ids for source_id in structured_by_id[evidence_id].get("evidence_ids", [evidence_id])})
@@ -562,6 +619,7 @@ class DecisionNarrativeProvider:
         self._validate_supported_concepts(raw["answer"], answer_items)
         self._validate_causal_language(raw["answer"], answer_items)
         self._validate_strategy_selection_language(raw["answer"], answer_items)
+        self._validate_strategy_semantics(raw["answer"], answer_items)
         self._validate_baseline_language(raw["answer"], answer_items)
         citations = [Citation(evidence_id=item.evidence_id, label=item.text, source_type=item.source_object) for item in evidence_items if item.evidence_id in citation_ids]
         entities = {"ingredient_ids": sorted({item.entities["ingredient_id"] for item in evidence_items if item.evidence_id in citation_ids and item.entities.get("ingredient_id")}), "supplier_ids": sorted({item.entities["supplier_id"] for item in evidence_items if item.evidence_id in citation_ids and item.entities.get("supplier_id")})}
@@ -710,6 +768,80 @@ class DecisionNarrativeProvider:
         if any(marker in f" {lowered} " for marker in (" vì ", " do ", " because ", " due to ")):
             if not any(marker in lowered for marker in ("chi phí", "purchase cost", "cost")):
                 raise ValueError("selection_reason_missing_persisted_metric")
+
+
+    @staticmethod
+    def _validate_strategy_semantics(text: str, items: list[dict]):
+        """Accept only relations already materialized by semantic evidence."""
+        normalized = _semantic_normalize(text)
+        comparisons = [item for item in items if item.get("type") == "STRATEGY_COMPARISON"]
+        proofs = [item for item in items if item.get("type") == "STRATEGY_SELECTION_PROOF"]
+        ranking_words = ("tot nhat", "an toan nhat", "toi uu nhat", "re nhat", "thap nhat", "cao nhat", "best", "safest", "optimal", "lowest", "highest", "cheapest")
+        if any(word in normalized for word in ranking_words):
+            if not _selection_proof_authorizes_lowest_cost(normalized, proofs):
+                raise ValueError("unsupported_strategy_ranking")
+        if any(marker in normalized for marker in ("duoc chon vi", "selected because")):
+            if not _selection_proof_authorizes_lowest_cost(normalized, proofs):
+                raise ValueError("unsupported_selection_cause")
+        if not comparisons:
+            return
+        for comparison in comparisons:
+            if not _comparison_premise_is_stated(comparison, [normalized]):
+                raise ValueError("unsupported_comparative_claim")
+
+
+def _semantic_normalize(text: str) -> str:
+    decomposed = unicodedata.normalize("NFD", text.lower())
+    return "".join(char for char in decomposed if unicodedata.category(char) != "Mn")
+
+
+def _strategy_aliases(strategy: object) -> tuple[str, ...]:
+    normalized = _semantic_normalize(str(strategy))
+    return {
+        "balanced": ("balanced", "can bang"),
+        "protected": ("protected", "an toan"),
+        "lean": ("lean", "tiet kiem"),
+    }.get(normalized, (normalized,))
+
+
+def _comparison_premise_is_stated(comparison: dict, clauses: list[str]) -> bool:
+    left = _strategy_aliases(comparison.get("left_strategy"))
+    right = _strategy_aliases(comparison.get("right_strategy"))
+    metrics = (
+        ("purchase_cost_delta", ("chi phi", "purchase cost", "cost")),
+        ("expected_fill_rate_delta", ("fill rate", "muc dap ung")),
+        ("stockout_probability_delta", ("xac suat thieu", "stockout probability", "rui ro thieu")),
+    )
+    for delta_key, metric_words in metrics:
+        delta = comparison.get(delta_key)
+        if isinstance(delta, bool):
+            continue
+        try:
+            directional_delta = float(delta)
+        except (TypeError, ValueError):
+            continue
+        if directional_delta == 0:
+            continue
+        expected = ("thap hon", "lower", "less") if directional_delta < 0 else ("cao hon", "higher", "more")
+        for clause in clauses:
+            left_positions = [clause.find(alias) for alias in left if clause.find(alias) >= 0]
+            right_positions = [clause.find(alias) for alias in right if clause.find(alias) >= 0]
+            metric_positions = [clause.find(word) for word in metric_words if clause.find(word) >= 0]
+            direction_positions = [clause.find(word) for word in expected if clause.find(word) >= 0]
+            if (left_positions and right_positions and metric_positions and direction_positions
+                    and ("than" in clause or "hon" in clause)
+                    and min(left_positions) < min(metric_positions + direction_positions) < max(metric_positions + direction_positions) < min(right_positions)):
+                return True
+    return False
+
+
+def _selection_proof_authorizes_lowest_cost(text: str, proofs: list[dict]) -> bool:
+    if not any(proof.get("rule") == "lowest_valid_candidate_cost_then_strategy_name"
+               and proof.get("selection_metric") == "purchase_cost" for proof in proofs):
+        return False
+    has_cost = any(word in text for word in ("chi phi", "purchase cost", "cost", "re nhat", "lowest"))
+    has_eligibility = any(word in text for word in ("du dieu kien", "eligible", "kha thi", "valid candidate"))
+    return has_cost and has_eligibility
 
 
 def _ingredient_display_name(brief: DecisionBriefFacts, ingredient_id: str) -> str:

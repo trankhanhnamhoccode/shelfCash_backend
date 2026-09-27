@@ -82,8 +82,8 @@ def summary_communication_plan(records: list[dict[str, Any]]) -> CommunicationPl
 def narrative_communication_plan(records: list[dict[str, Any]], intent: str) -> CommunicationPlan:
     """Use existing retrieval intent to select answer-first evidence deterministically."""
     upper_intent = str(intent).upper()
-    if "STRATEGY_COMPARISON" in upper_intent:
-        primary = _ids(records, lambda item: item.get("type") in {"STRATEGY_COMPARISON", "STRATEGY_SELECTION_PROOF"})
+    if any(token in upper_intent for token in ("PLAN_SELECTION", "STRATEGY_COMPARISON", "PLAN_TRADEOFF")):
+        primary = _ids(records, lambda item: item.get("type") in {"PLAN_OVERVIEW", "STRATEGY_COMPARISON", "STRATEGY_SELECTION_PROOF"})
         supporting = _ids(records, lambda item: item.get("type") == "STRATEGY_CANDIDATE_METRICS")
     elif any(token in upper_intent for token in ("NEED", "WHY", "EXPLAIN")):
         primary = _ids(records, lambda item: item.get("type") == "PROCUREMENT_REASON" or item.get("classification") == "CAUSAL", 1)

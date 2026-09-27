@@ -1,6 +1,8 @@
 import json
 from datetime import date, datetime, timezone
 
+import pytest
+
 from app.decision_intelligence.adapter import ShelfCashDecisionIntelligenceAdapter
 from app.decision_intelligence.contracts import (
     CriticBrief,
@@ -134,6 +136,50 @@ def test_strategy_qwen_claims_accept_comparison_and_reject_unproved_selection_re
         raise AssertionError("selection reason not supported by proof was accepted")
 
 
+def test_slice_d_guard_accepts_direct_pairwise_multi_fact_and_selection_proof_claims():
+    brief = _brief()
+    facts = DecisionSemanticEvidenceBuilder().build(brief, _package())
+    evidence = ShelfCashDecisionIntelligenceAdapter()._evidence(brief, semantic_facts=facts)
+    structured = aggregate_evidence(brief, evidence.items, semantic_facts=facts)
+    protected = next(item for item in structured if item["type"] == "STRATEGY_COMPARISON" and item["right_strategy"] == "protected")
+    lean = next(item for item in structured if item["type"] == "STRATEGY_COMPARISON" and item["right_strategy"] == "lean")
+    proof = next(item for item in structured if item["type"] == "STRATEGY_SELECTION_PROOF")
+    overview = next(item for item in structured if item["type"] == "PLAN_OVERVIEW")
+    provider = DecisionNarrativeProvider(None, None)
+
+    direct = {"answer": "Balanced is selected.", "claims": [{"type": "PLAN_OVERVIEW", "text": "Balanced is selected.", "evidence_ids": [overview["evidence_id"]]}], "used_evidence_ids": [overview["evidence_id"]]}
+    assert provider._guard(direct, structured, evidence.items, brief, "en", "simple", "PLAN_SELECTION").grounded is True
+
+    synthesis_text = "Balanced has lower stockout probability than Lean and lower purchase cost than Protected."
+    synthesis = {"answer": synthesis_text, "claims": [{"type": "STRATEGY_COMPARISON", "text": synthesis_text, "evidence_ids": [lean["evidence_id"], protected["evidence_id"]]}], "used_evidence_ids": [lean["evidence_id"], protected["evidence_id"]]}
+    assert provider._guard(synthesis, structured, evidence.items, brief, "en", "simple", "PLAN_TRADEOFF").grounded is True
+
+    cause_text = "Balanced was selected because it has the lowest purchase cost among eligible candidates."
+    cause = {"answer": cause_text, "claims": [{"type": "STRATEGY_SELECTION_PROOF", "text": cause_text, "evidence_ids": [proof["evidence_id"]]}], "used_evidence_ids": [proof["evidence_id"]]}
+    assert provider._guard(cause, structured, evidence.items, brief, "en", "simple", "PLAN_SELECTION").grounded is True
+
+
+@pytest.mark.parametrize(("text", "ids", "error"), [
+    ("Protected has lower purchase cost than Balanced.", ("protected",), "unsupported_comparative_claim"),
+    ("Balanced has higher fill rate than Protected.", ("protected",), "unsupported_comparative_claim"),
+    ("Balanced has lower purchase cost than Protected.", ("protected", "lean"), "unsupported_comparative_claim"),
+    ("Balanced is the cheapest option.", ("protected",), "unsupported_strategy_ranking"),
+    ("Balanced was selected because it has lower purchase cost than Protected.", ("protected",), "unsupported_causal_claim"),
+])
+def test_slice_d_guard_rejects_unproved_strategy_semantics(text, ids, error):
+    brief = _brief()
+    facts = DecisionSemanticEvidenceBuilder().build(brief, _package())
+    evidence = ShelfCashDecisionIntelligenceAdapter()._evidence(brief, semantic_facts=facts)
+    structured = aggregate_evidence(brief, evidence.items, semantic_facts=facts)
+    comparisons = {
+        item["right_strategy"]: item for item in structured if item["type"] == "STRATEGY_COMPARISON"
+    }
+    evidence_ids = [comparisons[strategy]["evidence_id"] for strategy in ids]
+    raw = {"answer": text, "claims": [{"type": "STRATEGY_COMPARISON", "text": text, "evidence_ids": evidence_ids}], "used_evidence_ids": evidence_ids}
+    with pytest.raises(ValueError, match=error):
+        DecisionNarrativeProvider(None, None)._guard(raw, structured, evidence.items, brief, "en", "simple", "PLAN_TRADEOFF")
+
+
 class _Gateway:
     available = True
 
@@ -167,6 +213,39 @@ def test_on_demand_strategy_question_uses_canonical_strategy_comparison_evidence
     assert response.source == "openrouter_qwen"
     assert response.grounded is True
     assert response.claims[0].type == "STRATEGY_COMPARISON"
+
+
+@pytest.mark.parametrize("gateway", [
+    type("Unavailable", (), {"available": False})(),
+    type("Broken", (), {"available": True, "generate_json": staticmethod(lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("boom")))})(),
+    type("Malformed", (), {"available": True, "generate_json": staticmethod(lambda *_args, **_kwargs: {"answer": "bad", "claims": "bad"})})(),
+])
+def test_slice_e_qwen_failure_retains_valid_selection_proof(gateway):
+    brief = _brief(); facts = DecisionSemanticEvidenceBuilder().build(brief, _package())
+    response = DecisionNarrativeProvider(gateway, None).explain(
+        brief, question="Tại sao chọn kế hoạch này?", language="vi", detail_level="simple",
+        semantic_facts=facts, question_scope="plan_strategy",
+    )
+    assert "BALANCED" in response.answer
+    assert "chi phí mua thấp nhất" in response.answer
+    assert "Không đủ dữ liệu để xác nhận" not in response.answer
+
+
+def test_slice_e_missing_proof_and_comparison_fallback_remain_scoped():
+    brief = _brief(); facts = DecisionSemanticEvidenceBuilder().build(brief, _package(selection=False))
+    missing = DecisionNarrativeProvider(None, None).explain(
+        brief, question="Tại sao chọn kế hoạch này?", language="vi", detail_level="simple",
+        semantic_facts=facts, question_scope="plan_strategy",
+    )
+    assert "BALANCED là phương án được chọn" in missing.answer
+    assert "không đủ để xác nhận lý do" in missing.answer
+
+    facts = DecisionSemanticEvidenceBuilder().build(brief, _package())
+    comparison = DecisionNarrativeProvider(None, None).explain(
+        brief, question="Protected khác Balanced thế nào?", language="vi", detail_level="simple",
+        semantic_facts=facts, question_scope="plan_strategy",
+    )
+    assert "BALANCED có chi phí mua thấp hơn PROTECTED" in comparison.answer
 
 
 def test_brief_exposes_additive_strategy_comparison_and_old_runs_remain_readable(client):
