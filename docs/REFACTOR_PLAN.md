@@ -78,6 +78,14 @@ AS-IS facts, accepted targets, proposals, technical debt, and historical informa
 - [x] Claim and answer revalidation preserves entity, causal, strategy, scenario, and public-text guards. Current Decision facts override CHAT-3 history; baseline/hypothetical What-if provenance remains distinct.
 - [x] Final verification: **744 passed, 22 warnings in 234.75s**; `compileall`, `git diff --check`, and generated OpenAPI (**59 paths / 71 operations**) passed. No public API, persistence, migration, optimizer, Strategy Explanation, Ingredient Synthesis, Overall Summary architecture, or What-if computation change.
 
+## CHAT-6 Conversational Provider Simplification — COMPLETE (2026-09-28)
+
+- [x] `CONVERSATIONAL_EXPLANATION` has a dedicated strict provider schema with only `answer`; claims/evidence IDs are no longer provider requirements or authority inputs.
+- [x] Backend sentence-level validation derives truthful public claim/citation metadata from the selected retrieval scope and retains CHAT-5 numeric repair/removal plus entity, causal, strategy, scenario/baseline, and history-non-authority guards.
+- [x] Prompt is answer-first and compact; no raw Decision Package, evidence dump, provider metadata, or suggested-questions public feature was added.
+- [x] Public `DecisionExplanationResponse`, routes, OpenAPI requiredness, Overall Summary HYBRID architecture, and Strategy/Ingredient deterministic defaults remain unchanged.
+- [x] Final verification: focused **220 passed, 2 warnings**; full **745 passed, 23 warnings in 261.23s**; `compileall` and `git diff --check` passed; generated OpenAPI remains **59 paths / 71 operations**.
+
 ## Small coherent-block stochastic support stabilization — COMPLETE (2026-09-23)
 
 - [x] ADR-018 accepts a small-pool evidence policy without changing the forecast, BOM, FEFO, optimizer, critic, risk-threshold, or strategy authorities.

@@ -99,9 +99,10 @@ async def test_task_requests_use_strict_schema_reasoning_off_and_approved_provid
     await provider.generate_json("summary", {}, task=LLMTask.PLAN_SUMMARY)
     await provider.generate_json("ingredient synthesis", {"ingredients": []}, task=LLMTask.INGREDIENT_SYNTHESIS)
     await provider.generate_json("strategy expression", {"strategies": []}, task=LLMTask.STRATEGY_EXPRESSION)
+    await provider.generate_json("conversation", {}, task=LLMTask.CONVERSATIONAL_EXPLANATION)
 
-    mapping, narrative, summary, ingredient_synthesis, strategy_expression = sent
-    for body, task in ((mapping, LLMTask.EXCEL_MAPPING), (narrative, LLMTask.DECISION_NARRATIVE), (summary, LLMTask.PLAN_SUMMARY), (ingredient_synthesis, LLMTask.INGREDIENT_SYNTHESIS), (strategy_expression, LLMTask.STRATEGY_EXPRESSION)):
+    mapping, narrative, summary, ingredient_synthesis, strategy_expression, conversational = sent
+    for body, task in ((mapping, LLMTask.EXCEL_MAPPING), (narrative, LLMTask.DECISION_NARRATIVE), (summary, LLMTask.PLAN_SUMMARY), (ingredient_synthesis, LLMTask.INGREDIENT_SYNTHESIS), (strategy_expression, LLMTask.STRATEGY_EXPRESSION), (conversational, LLMTask.CONVERSATIONAL_EXPLANATION)):
         assert body["reasoning"] == {"effort": "none"}
         expected_provider = (
             {
@@ -122,6 +123,7 @@ async def test_task_requests_use_strict_schema_reasoning_off_and_approved_provid
         assert body["response_format"]["json_schema"]["name"] == task.value
     assert "column_mapping" in mapping["response_format"]["json_schema"]["schema"]["properties"]
     assert "used_evidence_ids" in narrative["response_format"]["json_schema"]["schema"]["properties"]
+    assert set(conversational["response_format"]["json_schema"]["schema"]["properties"]) == {"answer"}
     assert "headline" in summary["response_format"]["json_schema"]["schema"]["properties"]
     ingredient_schema = ingredient_synthesis["response_format"]["json_schema"]["schema"]["properties"]
     assert {"headline", "summary", "claims", "used_evidence_ids"} <= set(ingredient_schema)

@@ -37,3 +37,6 @@ artifacts/
 *.pth
 *.h5
 run.txt
+
+.env.example
+.env

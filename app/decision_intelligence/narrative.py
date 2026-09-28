@@ -15,7 +15,7 @@ from app.decision_intelligence.adapter import (
     ShelfCashDecisionIntelligenceAdapter,
     ingredient_scoped_semantic_facts,
 )
-from app.decision_intelligence.contracts import Citation, DecisionBriefFacts, DecisionExplanationResponse, DecisionNarrativeLLMResponse, ExplanationClaim
+from app.decision_intelligence.contracts import Citation, ConversationalExplanationLLMResponse, DecisionBriefFacts, DecisionExplanationResponse, ExplanationClaim
 from app.decision_intelligence.communication_plan import narrative_communication_plan
 from app.decision_intelligence.display import add_numeric_display_contract, purchase_cost_display
 from app.decision_intelligence.narrative_retrieval import retrieve_narrative_evidence
@@ -355,9 +355,9 @@ def aggregate_evidence(
 
 CONVERSATIONAL_SYSTEM_PROMPT = """You are ShelfCash's operations assistant. Answer the store owner's current question directly and naturally.
 
-The current BUSINESS_BRIEF is the authoritative source for business facts and numbers. Recent history is only conversational context: never reuse an old number when it conflicts with the current brief. Do not calculate forecast, procurement, strategy, risk, or feasibility. If the brief is insufficient, say so.
+Use only the current BUSINESS_BRIEF for business facts and numbers. Recent history is conversational context only: never reuse an old number when it conflicts with the current brief. Do not calculate forecast, procurement, strategy, risk, or feasibility. If the brief is insufficient, say so. Be concise for the requested detail level.
 
-Return the required JSON schema. `answer` is the primary answer; claims must cite only fact ids supplied in BUSINESS_BRIEF."""
+Return the required JSON object with only `answer`."""
 
 
 def _business_brief(selected: list[dict[str, Any]]) -> list[dict[str, str]]:
@@ -542,7 +542,19 @@ class DecisionNarrativeProvider:
 
             logger.info("decision_narrative_qwen_completed request_id=%s decision_run_id=%s task=%s", request_id, brief.decision_run_id, LLMTask.CONVERSATIONAL_EXPLANATION.value)
             try:
-                typed_raw = DecisionNarrativeLLMResponse.model_validate(raw)
+                # Existing in-process integrations may still send the retired
+                # bookkeeping fields. They are ignored only as a bounded
+                # compatibility adapter; OpenRouter's strict task schema now
+                # emits just `answer`, and no legacy field reaches grounding.
+                parseable_raw = raw
+                if (
+                    isinstance(raw, dict)
+                    and set(raw) <= {"answer", "claims", "used_evidence_ids"}
+                    and isinstance(raw.get("claims"), list)
+                    and raw["claims"]
+                ):
+                    parseable_raw = {"answer": raw.get("answer")}
+                typed_raw = ConversationalExplanationLLMResponse.model_validate(parseable_raw)
             except PydanticValidationError as exc:
                 failure_stage = LLMFailureStage.SCHEMA_VALIDATION.value
                 raise ValueError("narrative_schema_validation_failed") from exc
@@ -679,90 +691,153 @@ class DecisionNarrativeProvider:
         self, raw, structured, evidence_items, brief, language, detail_level, intent,
         *, target_ingredient_id: str | None = None,
     ):
-        if not isinstance(raw.get("answer"), str) or not isinstance(raw.get("claims"), list):
+        # Conversational Qwen supplies wording only.  It never declares claims,
+        # evidence IDs, citations, grounding, or provider metadata.  The
+        # selected retrieval scope remains the authority and is applied below
+        # per sentence rather than trusting the whole answer wholesale.
+        if not isinstance(raw.get("answer"), str) or not raw["answer"].strip():
             raise ValueError("malformed_qwen_output")
-        by_id = {item.evidence_id: item for item in evidence_items}
-        structured_by_id = {item["evidence_id"]: item for item in structured}
-        allowed_ids = set(structured_by_id)
         if target_ingredient_id:
             for item in structured:
                 item_ingredient_id = item.get("ingredient_id")
                 if item_ingredient_id and item_ingredient_id != target_ingredient_id:
                     raise ValueError("target_evidence_entity_mismatch")
-        claims = []
-        citation_ids = set()
-        model_used = raw.get("used_evidence_ids")
-        if not isinstance(model_used, list) or not set(model_used) <= allowed_ids:
-            raise ValueError("unsupported_used_evidence_id")
-        claimed_evidence_ids = set()
-        for claim in raw["claims"]:
-            if not isinstance(claim, dict) or not isinstance(claim.get("text"), str):
-                raise ValueError("malformed_claim")
-            ids = claim.get("evidence_ids")
-            if not isinstance(ids, list) or not ids or not set(ids) <= allowed_ids:
-                raise ValueError("unsupported_evidence_id")
-            supported_types = {structured_by_id[evidence_id]["type"] for evidence_id in ids}
-            if claim.get("type") not in supported_types:
-                raise ValueError("unsupported_claim_type")
-            claim_text = claim["text"]
-            claim_items = [structured_by_id[evidence_id] for evidence_id in ids]
+        legacy_scopes: dict[str, list[dict]] = {}
+        # Direct internal callers from before CHAT-6 may exercise `_guard`
+        # with the retired shape. Keep that test-only/backward-compatible
+        # adapter separate from the conversational provider path above.
+        if isinstance(raw.get("claims"), list) and raw["claims"]:
+            by_id = {item["evidence_id"]: item for item in structured}
+            for claim in raw["claims"]:
+                if not isinstance(claim, dict) or not isinstance(claim.get("text"), str):
+                    raise ValueError("malformed_claim")
+                ids = claim.get("evidence_ids")
+                if not isinstance(ids, list) or not ids or not set(ids) <= set(by_id):
+                    raise ValueError("unsupported_evidence_id")
+                items = [by_id[evidence_id] for evidence_id in ids]
+                if claim.get("type") not in {item.get("type") for item in items}:
+                    raise ValueError("unsupported_claim_type")
+                self._validate_or_repair_fragment(claim["text"], items, brief, target_ingredient_id)
+                legacy_scopes[claim["text"]] = items
+        claims, citation_ids, accepted = [], set(), []
+        for fragment in self._answer_fragments(raw["answer"]):
+            items = legacy_scopes.get(fragment) or self._scope_fragment(fragment, structured, brief, target_ingredient_id)
             try:
-                self._validate_numbers(claim_text, claim_items)
+                fragment, repaired = self._validate_or_repair_fragment(
+                    fragment, items, brief, target_ingredient_id,
+                )
             except ValueError as exc:
-                if not str(exc).startswith("unsupported_numeric_claim"):
-                    raise
-                claim_text, repaired = self._repair_numeric_text(claim_text, claim_items)
-                if not repaired:
-                    # A local unsupported number may be discarded only when
-                    # other grounded claims still carry a useful answer.
-                    self._validate_entities(claim_text, claim_items, brief)
-                    self._validate_target_entity(claim_text, claim_items, brief, target_ingredient_id)
+                # CHAT-5 permits a single unsupported numeric sentence to be
+                # removed when a coherent grounded answer remains. Other
+                # grounding failures remain fail-closed.
+                if str(exc).startswith("unsupported_numeric_claim"):
                     continue
-                self._validate_numbers(claim_text, claim_items)
-            self._validate_entities(claim_text, claim_items, brief)
-            self._validate_target_entity(
-                claim_text, claim_items,
-                brief, target_ingredient_id,
-            )
-            self._validate_supported_concepts(claim_text, claim_items)
-            self._validate_causal_language(claim_text, claim_items)
-            self._validate_strategy_selection_language(claim_text, claim_items)
-            self._validate_strategy_semantics(claim_text, claim_items)
-            self._validate_baseline_language(claim_text, claim_items)
-            self._validate_public_text(claim_text)
-            claim_source_ids = sorted({source_id for evidence_id in ids for source_id in structured_by_id[evidence_id].get("evidence_ids", [evidence_id])})
-            claims.append(ExplanationClaim(type=claim["type"], value=claim_text, evidence_ids=claim_source_ids))
-            claimed_evidence_ids.update(ids)
-            for evidence_id in ids:
-                citation_ids.update(structured_by_id[evidence_id].get("evidence_ids", [evidence_id]))
-        # The model must not reference an unknown ID, but Python owns the
-        # mechanically-derived union. This avoids asking a 9B model to do
-        # bookkeeping while retaining per-claim grounding validation.
-        used = claimed_evidence_ids
-        self._validate_public_text(raw["answer"])
-        answer_items = [structured_by_id[evidence_id] for evidence_id in used]
-        answer = raw["answer"]
-        try:
-            self._validate_numbers(answer, answer_items)
-        except ValueError as exc:
-            if not str(exc).startswith("unsupported_numeric_claim"):
                 raise
-            answer, repaired = self._repair_numeric_text(answer, answer_items)
-            if not repaired:
-                answer = self._remove_invalid_numeric_sentences(answer, answer_items)
-                if not answer:
-                    raise
-            self._validate_numbers(answer, answer_items)
-        self._validate_entities(answer, answer_items, brief)
-        self._validate_target_entity(answer, answer_items, brief, target_ingredient_id)
-        self._validate_supported_concepts(answer, answer_items)
-        self._validate_causal_language(answer, answer_items)
-        self._validate_strategy_selection_language(answer, answer_items)
-        self._validate_strategy_semantics(answer, answer_items)
-        self._validate_baseline_language(answer, answer_items)
+            accepted.append(fragment)
+            source_ids = sorted({source_id for item in items for source_id in item.get("evidence_ids", [item["evidence_id"]])})
+            if source_ids:
+                claims.append(ExplanationClaim(
+                    type=str(items[0].get("type", "FACT")), value=fragment,
+                    evidence_ids=source_ids,
+                ))
+                citation_ids.update(source_ids)
+        answer = " ".join(accepted).strip()
+        if not answer:
+            raise ValueError("material_unsupported_numeric_answer")
         citations = [Citation(evidence_id=item.evidence_id, label=item.text, source_type=item.source_object) for item in evidence_items if item.evidence_id in citation_ids]
         entities = {"ingredient_ids": sorted({item.entities["ingredient_id"] for item in evidence_items if item.evidence_id in citation_ids and item.entities.get("ingredient_id")}), "supplier_ids": sorted({item.entities["supplier_id"] for item in evidence_items if item.evidence_id in citation_ids and item.entities.get("supplier_id")})}
         return DecisionExplanationResponse(source="openrouter_qwen", language=language, detail_level=detail_level, summary=answer, why_this_plan=[answer], main_risks=brief.critic.warnings, tradeoffs=[], important_assumptions=["Narrative is grounded only in the persisted decision package."], decision_run_id=brief.decision_run_id, answer=answer, intent=str(intent).upper(), entities=entities, claims=claims, citations=citations, grounded=True, provider="openrouter_qwen", raw_response=raw)
+
+    @staticmethod
+    def _answer_fragments(answer: str) -> list[str]:
+        return [part.strip() for part in re.split(r"(?<=[.!?])\s+|\n+", answer.strip()) if part.strip()]
+
+    def _validate_or_repair_fragment(self, text, items, brief, target_ingredient_id):
+        self._validate_public_text(text)
+        try:
+            self._validate_numbers(text, items)
+        except ValueError as exc:
+            if not str(exc).startswith("unsupported_numeric_claim"):
+                raise
+            text, repaired = self._repair_numeric_text(text, items)
+            if not repaired:
+                raise
+            self._validate_numbers(text, items)
+        self._validate_entities(text, items, brief)
+        self._validate_target_entity(text, items, brief, target_ingredient_id)
+        self._validate_supported_concepts(text, items)
+        self._validate_causal_language(text, items)
+        self._validate_strategy_selection_language(text, items)
+        self._validate_strategy_semantics(text, items)
+        self._validate_baseline_language(text, items)
+        return text, True
+
+    @staticmethod
+    def _scope_fragment(text, structured, brief, target_ingredient_id):
+        """Narrow backend-selected evidence deterministically for one sentence.
+
+        This is deliberately a scope filter, never a model-selected citation
+        lookup and never nearest-number matching.  It leaves the retrieval
+        scope intact when wording is genuinely generic.
+        """
+        lowered = text.casefold()
+        candidates = list(structured)
+        types: set[str] = set()
+        if any(token in lowered for token in ("ngân sách", "budget", "vượt", "overage", "remaining")):
+            types.add("BUDGET_STATUS")
+        if any(token in lowered for token in ("nhập", "đặt", "order", "ordering", "procurement")):
+            types.add("PROCUREMENT_QUANTITY")
+        if any(token in lowered for token in ("balanced", "lean", "protected", "cân bằng", "tiết kiệm", "an toàn", "strategy", "chiến lược", "fill rate", "mức đáp ứng", "purchase cost", "chi phí mua", "stockout")):
+            if any(token in lowered for token in ("được chọn", "selected", "lowest", "thấp nhất", "cheapest")):
+                if any(token in lowered for token in ("lowest", "thấp nhất", "cheapest")):
+                    types.update({"STRATEGY_SELECTION_PROOF", "PLAN_OVERVIEW"})
+                else:
+                    types.add("STRATEGY_COMPARISON")
+            else:
+                types.add("STRATEGY_COMPARISON")
+        if any(token in lowered for token in ("vì", "because", "due to", "nguyên nhân")):
+            causal = [item for item in candidates if item.get("classification") == "CAUSAL" or item.get("type") == "PROCUREMENT_REASON"]
+            if causal:
+                candidates = causal
+        if types:
+            typed = [item for item in candidates if item.get("type") in types]
+            if typed:
+                candidates = typed
+        normalized = _semantic_normalize(text)
+        mentioned_strategies = {
+            strategy for strategy in ("balanced", "lean", "protected")
+            if any(alias in normalized for alias in _strategy_aliases(strategy))
+        }
+        if len(mentioned_strategies) >= 2:
+            pairwise = [
+                item for item in candidates
+                if item.get("type") != "STRATEGY_COMPARISON" or {
+                    _semantic_normalize(item.get("left_strategy")),
+                    _semantic_normalize(item.get("right_strategy")),
+                } <= mentioned_strategies
+            ]
+            if pairwise:
+                candidates = pairwise
+        mentioned_ids = {
+            row.ingredient_id for row in [*brief.ingredient_demand, *brief.procurement_rows]
+            if row.ingredient_name and row.ingredient_name.casefold() in lowered
+        }
+        if target_ingredient_id:
+            mentioned_ids.add(target_ingredient_id)
+        if mentioned_ids:
+            entity_items = [item for item in candidates if item.get("ingredient_id") in mentioned_ids]
+            if entity_items:
+                candidates = entity_items
+        mentions = list(iter_numeric_mentions(text))
+        if mentions:
+            numeric_items = []
+            for item in candidates:
+                registry = build_numeric_authority([item])
+                if any(DecisionNarrativeProvider._is_authorized_numeric(mention, registry, False) for mention in mentions):
+                    numeric_items.append(item)
+            if numeric_items:
+                candidates = numeric_items
+        return candidates
 
     @staticmethod
     def _validate_numbers(text: str, payloads: list[dict]):

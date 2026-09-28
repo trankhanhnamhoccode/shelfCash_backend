@@ -17,6 +17,7 @@ from app.core.logging_context import get_request_id
 from app.core.rule_mapper import finalize_mapping
 from app.decision_intelligence.contracts import (
     IngredientSynthesisLLMResponse,
+    ConversationalExplanationLLMResponse,
     DecisionNarrativeLLMResponse,
     DecisionOverallSummaryLLMResponse,
     StrategyExpressionLLMResponse,
@@ -179,8 +180,10 @@ class OpenRouterLLMGateway(LLMProvider):
     def _response_schema(task: LLMTask) -> dict[str, Any]:
         if task is LLMTask.EXCEL_MAPPING:
             return MappingSuggestion.model_json_schema()
-        if task in (LLMTask.DECISION_NARRATIVE, LLMTask.CONVERSATIONAL_EXPLANATION):
+        if task is LLMTask.DECISION_NARRATIVE:
             return DecisionNarrativeLLMResponse.model_json_schema()
+        if task is LLMTask.CONVERSATIONAL_EXPLANATION:
+            return ConversationalExplanationLLMResponse.model_json_schema()
         if task is LLMTask.PLAN_SUMMARY:
             return DecisionOverallSummaryLLMResponse.model_json_schema()
         if task is LLMTask.INGREDIENT_SYNTHESIS:

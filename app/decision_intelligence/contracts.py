@@ -279,6 +279,17 @@ class DecisionNarrativeLLMResponse(_Contract):
     used_evidence_ids: list[str]
 
 
+class ConversationalExplanationLLMResponse(_Contract):
+    """Minimal provider contract for on-demand Decision Explanation wording.
+
+    Evidence selection, grounding, public claims, citations, and metadata are
+    deliberately backend-owned.  This model is not shared with the stricter
+    summary, What-if, or ingredient-polish provider paths.
+    """
+
+    answer: str
+
+
 class DecisionOverallSummaryLLMResponse(_Contract):
     """Strict internal schema for an overall grounded assistant summary."""
 

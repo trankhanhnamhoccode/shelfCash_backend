@@ -5,7 +5,7 @@ import pytest
 
 from app.config import Settings
 from app.decision_intelligence.contracts import (
-    CriticBrief, DecisionBriefFacts, ForecastBrief, IngredientDemandBrief,
+    ConversationalExplanationLLMResponse, CriticBrief, DecisionBriefFacts, ForecastBrief, IngredientDemandBrief,
     ProcurementRowBrief, RecommendationBrief, RiskBrief,
 )
 from app.decision_intelligence.narrative import DecisionNarrativeProvider, aggregate_evidence
@@ -67,6 +67,18 @@ def test_qwen_narrative_accepts_supported_quantity():
     assert result.claims[0].evidence_ids
     assert result.raw_response is not None
     assert result.raw_response["answer"] == "Kế hoạch ghi nhận đặt 60 lít Sữa tươi."
+
+
+def test_conversational_answer_only_contract_is_sufficient_and_backend_owned():
+    assert ConversationalExplanationLLMResponse.model_json_schema()["required"] == ["answer"]
+    result = DecisionNarrativeProvider(
+        MockQwen(lambda _: {"answer": "Order 60 litres of milk."}), settings(),
+    ).explain(brief(), question="milk", language="en", detail_level="simple")
+
+    assert result.provider == "openrouter_qwen"
+    assert result.grounded is True
+    assert result.claims and result.citations
+    assert result.raw_response == {"answer": "Order 60 litres of milk."}
 
 
 def test_narrative_uses_semantic_task_and_rejects_raw_schema_failure():
