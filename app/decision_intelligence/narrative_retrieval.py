@@ -60,7 +60,7 @@ def retrieve_narrative_evidence(brief, records: list[dict[str, Any]], *, questio
         # A strategy-selection proof is causal at strategy scope, but it is
         # never procurement causality for an ingredient question.
         causal = types("PROCUREMENT_REASON")
-        selected = [*causal[:1], *types("PROCUREMENT_QUANTITY")[:1], *types("DEMAND_HORIZON_SUMMARY")[:1], *types("DEMAND_ORDER_ALIGNMENT")[:1]]
+        selected = [*causal[:1], *types("PROCUREMENT_QUANTITY")[:1], *types("DEMAND_HORIZON_SUMMARY")[:1], *types("DEMAND_ORDER_ALIGNMENT")[:1], *types("NO_PLANNED_PURCHASE_BASELINE")[:1]]
         return NarrativeRetrieval(intent, target, _unique(selected), bool(causal))
     if intent == "PROCUREMENT_QUANTITY":
         return NarrativeRetrieval(intent, target, _unique(types("PROCUREMENT_QUANTITY")[:1]), False)

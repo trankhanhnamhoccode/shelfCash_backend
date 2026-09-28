@@ -71,6 +71,14 @@ ShelfCash Backend is a FastAPI modular monolith. HTTP routes call application se
 
 ## CHAT-7 Conversational Quality Evaluation
 
+## CHAT-8 Semantic Grounding and Live Failure Corrections
+
+- **Status:** COMPLETE for deterministic correctness (2026-09-29). Live provider retest remains unmeasured because neither process environment nor local `.env` has a non-production `OPENROUTER_API_KEY`.
+- **Budget:** selected `BUDGET_STATUS` now states availability and exceeded/not-exceeded status plainly in the compact Qwen brief. A deterministic sentence guard checks explicit availability and exceeded-state assertions against the persisted snapshot before `grounded=true`; contradictory Qwen prose falls back to the same backend budget facts. Numeric Authority remains the only numeric validator.
+- **Ingredient:** why-procurement retrieval now includes the authoritative no-planned-purchase baseline when present. Compact cards distinguish proposed purchase, p50 demand observation, signed derived alignment, baseline scenario, and a causal reason only if an actual `PROCUREMENT_REASON` fact exists. Current semantic builder does not produce a procurement-reason fact; line `reason_codes` are not promoted to causal authority. Unsupported shortage claims from demand/order arithmetic are rejected.
+- **Renderer/unit/provider:** ingredient fallback renders alignment from signed `absolute_gap` (below/above/equal) and uses structured row units. The backend response fixture for 40 kg Cam contains `40 kg Cam`, not `40 quả Cam`; the observed UI card is classified `FRONTEND_DISPLAY_BOUNDARY` pending the exact live response. Token-limit diagnostics and fallback policy are unchanged; generated garbage is not accepted as answer.
+- **Verification:** new CHAT-8 live regressions passed 17 tests, 1 warning; final full suite passed **764 tests, 22 warnings**. `compileall`, `git diff --check`, and generated OpenAPI **59 paths / 71 operations** passed.
+
 - **Status:** PARTIAL (2026-09-28). A deterministic corpus/harness and review artifact cover budget, What-if, strategy, ingredient, natural Vietnamese, ambiguity, and three multi-turn chains. Local OpenRouter configuration is unavailable, so no real Qwen call or naturalness/directness conclusion was fabricated. Current profile remains `qwen/qwen3.5-9b`, SiliconFlow-only, temperature 0, max 1200, reasoning off. See `docs/evaluations/CHAT-7_CONVERSATIONAL_QUALITY.md`.
 
 - **Status:** COMPLETE (2026-09-23). ADR-018 changes only `shelfcash_core` residual-bootstrap block selection for small empirical pools (`K <= 100`). `N < K` selects `N` distinct coherent blocks without replacement; `N >= K` materializes every eligible block once, so generated scenarios can be fewer than requested.

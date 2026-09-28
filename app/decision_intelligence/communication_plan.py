@@ -92,7 +92,7 @@ def narrative_communication_plan(records: list[dict[str, Any]], intent: str) -> 
         primary = _ids(records, lambda item: item.get("type") == "PROCUREMENT_REASON" or item.get("classification") == "CAUSAL", 1)
         # Deliberately leave primary empty when no causal fact exists. The
         # existing prompt/fallback then says that a cause cannot be confirmed.
-        supporting = _ids(records, lambda item: item.get("type") in {"PROCUREMENT_QUANTITY", "DEMAND_HORIZON_SUMMARY"}, 2)
+        supporting = _ids(records, lambda item: item.get("type") in {"PROCUREMENT_QUANTITY", "DEMAND_HORIZON_SUMMARY", "DEMAND_ORDER_ALIGNMENT", "NO_PLANNED_PURCHASE_BASELINE"})
     elif "QUANTITY" in upper_intent:
         primary = _ids(records, lambda item: item.get("type") == "PROCUREMENT_QUANTITY", 1)
         supporting = _ids(records, lambda item: item.get("type") == "DEMAND_HORIZON_SUMMARY", 1)

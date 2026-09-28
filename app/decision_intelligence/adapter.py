@@ -189,13 +189,17 @@ class ShelfCashDecisionIntelligenceAdapter:
             alignment = by_type.get("DEMAND_ORDER_ALIGNMENT")
             if alignment:
                 unit = str(alignment.values.get("unit") or "")
-                quantity = _display_number(alignment.values.get("order_quantity_total"))
                 gap = _display_number(alignment.values.get("absolute_gap_magnitude"))
-                text = (
-                    f"The planned quantity is {gap} {unit} above the median-demand total."
-                    if language == "en"
-                    else f"L\u01b0\u1ee3ng \u0111\u1eb7t cao h\u01a1n t\u1ed5ng nhu c\u1ea7u trung v\u1ecb {gap} {unit}."
-                )
+                signed_gap = alignment.values.get("absolute_gap")
+                if isinstance(signed_gap, (int, float)) and signed_gap < 0:
+                    text = (f"The planned quantity is {gap} {unit} below the median-demand total."
+                            if language == "en" else f"Lượng đặt thấp hơn tổng nhu cầu trung vị khoảng {gap} {unit}.")
+                elif isinstance(signed_gap, (int, float)) and signed_gap > 0:
+                    text = (f"The planned quantity is {gap} {unit} above the median-demand total."
+                            if language == "en" else f"Lượng đặt cao hơn tổng nhu cầu trung vị khoảng {gap} {unit}.")
+                else:
+                    text = ("The planned quantity equals the median-demand total."
+                            if language == "en" else "Lượng đặt bằng tổng nhu cầu trung vị.")
                 add_fact_line("DEMAND_ORDER_ALIGNMENT", text, alignment.values.get("absolute_gap_magnitude"), unit)
             baseline = by_type.get("NO_PLANNED_PURCHASE_BASELINE")
             if baseline and baseline.values.get("shortage_quantity") is not None:

@@ -16,6 +16,7 @@ from app.decision_intelligence.adapter import (
     ingredient_scoped_semantic_facts,
 )
 from app.decision_intelligence.contracts import Citation, ConversationalExplanationLLMResponse, DecisionBriefFacts, DecisionExplanationResponse, ExplanationClaim
+from app.decision_intelligence.semantic_state import validate_semantic_state
 from app.decision_intelligence.communication_plan import narrative_communication_plan
 from app.decision_intelligence.display import add_numeric_display_contract, purchase_cost_display
 from app.decision_intelligence.narrative_retrieval import retrieve_narrative_evidence
@@ -254,10 +255,12 @@ def aggregate_evidence(
     records: list[dict[str, Any]] = []
     for item in retrieved_items:
         if item.evidence_type == "first_stage_order":
+            ingredient_name = next((row.ingredient_name for row in brief.procurement_rows if row.ingredient_id == item.entities.get("ingredient_id") and row.ingredient_name), None)
             records.append({
                 "evidence_id": item.evidence_id,
                 "type": "PROCUREMENT_QUANTITY",
                 "ingredient_id": item.entities.get("ingredient_id"),
+                "ingredient_name": ingredient_name,
                 "supplier_id": item.entities.get("supplier_id"),
                 "value": item.payload.get("quantity"),
                 "unit": item.payload.get("unit"),
@@ -369,18 +372,35 @@ def _business_brief(selected: list[dict[str, Any]]) -> list[dict[str, str]]:
     """
     cards: list[dict[str, str]] = []
     for item in selected:
-        values = item.get("values") if isinstance(item.get("values"), dict) else {}
+        values = item.get("values") if isinstance(item.get("values"), dict) else item
         fact_type = str(item.get("type") or "FACT")
         if fact_type == "BUDGET_STATUS":
             if values.get("availability") != "available":
-                text = "Budget snapshot is unavailable for this Decision Run."
+                text = f"Budget data availability: {values.get('availability')}; an exceeded/not-exceeded conclusion is unavailable."
             else:
                 currency = values.get("currency") or "VND"
                 text = (
-                    f"Budget limit: {values.get('budget_limit')}; planned spend: {values.get('planned_spend')}; "
-                    f"exceeds budget: {values.get('exceeds_budget')}; over by: {values.get('over_by')}; "
+                    f"Budget data available. The plan {'exceeds' if values.get('exceeds_budget') else 'does not exceed'} "
+                    f"the budget. Budget limit: {values.get('budget_limit')} {currency}; "
+                    f"planned spend: {values.get('planned_spend')} {currency}; "
+                    f"over by: {values.get('over_by')} {currency}; "
                     f"remaining: {values.get('remaining_budget')}; utilization: {values.get('budget_utilization_pct')}%; currency: {currency}."
                 )
+        elif fact_type == "PROCUREMENT_QUANTITY":
+            quantity = (item.get("display_values") or {}).get("value", values.get("value"))
+            text = f"Recommendation: the current plan proposes buying {quantity} {values.get('unit')} {values.get('ingredient_name')}. This is a proposed purchase, not an existing order."
+        elif fact_type == "DEMAND_HORIZON_SUMMARY":
+            p50 = (item.get("display_values") or {}).get("p50_total", values.get("p50_total"))
+            text = f"Demand observation: p50 demand over the horizon is {p50} {values.get('unit')} for {values.get('ingredient_name')}. This observation alone does not explain the purchase quantity."
+        elif fact_type == "DEMAND_ORDER_ALIGNMENT":
+            gap = values.get("absolute_gap")
+            direction = "below" if isinstance(gap, (int, float)) and gap < 0 else "above" if isinstance(gap, (int, float)) and gap > 0 else "equal to"
+            magnitude = (item.get("display_values") or {}).get("absolute_gap_magnitude", values.get("absolute_gap_magnitude"))
+            text = f"Derived comparison: planned purchase is {direction} p50 demand by {magnitude} {values.get('unit')}. This gap is not a shortage or a procurement reason."
+        elif fact_type == "NO_PLANNED_PURCHASE_BASELINE":
+            text = f"Baseline scenario excluding planned Decision Run purchases (existing inbound retained): simulated shortage is {values.get('shortage_quantity')} {values.get('unit')}. This is not selected-plan shortage."
+        elif fact_type == "PROCUREMENT_REASON":
+            text = f"Authoritative procurement reason: {values.get('meaning') or values.get('reason')}."
         elif fact_type == "STRATEGY_COMPARISON":
             entities = item.get("entities") if isinstance(item.get("entities"), dict) else {}
             deltas = "; ".join(f"{key}: {value}" for key, value in values.items() if value is not None and key.endswith("_delta"))
@@ -402,7 +422,7 @@ def _turn_hint(intent: str) -> str:
         "BUDGET": "Answer the budget status and state the overage or remaining amount when available.",
         "STRATEGY_COMPARISON": "Explain only the requested strategy trade-off from the supplied comparison facts.",
         "PLAN_STRATEGY": "Explain the selected strategy and relevant trade-offs.",
-        "WHY_PROCUREMENT": "Explain why the requested ingredient needs procurement and its stated consequence.",
+        "WHY_PROCUREMENT": "Use an authoritative procurement reason only if supplied. Otherwise describe the recommendation, demand, derived comparison, and baseline as separate facts; say the exact cause is unavailable.",
     }
     return hints.get(intent, "Answer the user's question from the supplied facts without summarizing the whole plan.")
 
@@ -766,6 +786,8 @@ class DecisionNarrativeProvider:
         self._validate_entities(text, items, brief)
         self._validate_target_entity(text, items, brief, target_ingredient_id)
         self._validate_supported_concepts(text, items)
+        validate_semantic_state(text, items)
+        self._validate_ingredient_semantics(text, items)
         self._validate_causal_language(text, items)
         self._validate_strategy_selection_language(text, items)
         self._validate_strategy_semantics(text, items)
@@ -976,8 +998,34 @@ class DecisionNarrativeProvider:
             raise ValueError("baseline_inbound_semantics_contradicted")
 
     @staticmethod
+    def _validate_ingredient_semantics(text: str, items: list[dict]):
+        normalized = _semantic_normalize(text).replace("đ", "d")
+        ingredient_scope = any(item.get("type") in {"PROCUREMENT_QUANTITY", "DEMAND_HORIZON_SUMMARY", "DEMAND_ORDER_ALIGNMENT", "NO_PLANNED_PURCHASE_BASELINE", "INGREDIENT_OPERATIONAL_RISK"} for item in items)
+        if ingredient_scope and any(word in normalized for word in ("thieu hut", "du kien thieu", "shortage")):
+            shortage_items = [item for item in items if item.get("type") in {"NO_PLANNED_PURCHASE_BASELINE", "INGREDIENT_OPERATIONAL_RISK"}]
+            if not shortage_items:
+                raise ValueError("unsupported_shortage_concept")
+            mentioned_shortage = re.search(r"(?:thieu hut|du kien thieu|shortage)(?:\s+(?:la|of|khoang|about))?\s+([0-9][\d.,]*)", normalized)
+            if mentioned_shortage:
+                mention = next(iter_numeric_mentions(mentioned_shortage.group(1)), None)
+                shortage_facts = [fact for fact in build_numeric_authority(shortage_items) if fact.semantic_key == "shortage_quantity"]
+                if mention is None or not any(equivalent_or_rounded(mention, fact, approximate=False) for fact in shortage_facts):
+                    raise ValueError("unsupported_shortage_quantity")
+            if any(phrase in normalized for phrase in ("ke hoach hien tai thieu", "selected plan shortage", "current plan shortage")):
+                if not any(item.get("type") == "INGREDIENT_OPERATIONAL_RISK" for item in shortage_items):
+                    raise ValueError("baseline_misrepresented_as_selected_plan")
+        alignment = next((item for item in items if item.get("type") == "DEMAND_ORDER_ALIGNMENT"), None)
+        if alignment and any(word in normalized for word in ("cao hon", "thap hon", "above", "below")):
+            gap = alignment.get("absolute_gap")
+            if isinstance(gap, (int, float)):
+                if (gap < 0 and any(word in normalized for word in ("cao hon", "above"))) or (gap > 0 and any(word in normalized for word in ("thap hon", "below"))):
+                    raise ValueError("alignment_direction_contradicted")
+
+    @staticmethod
     def _validate_public_text(text: str):
         """Machine codes are evidence identifiers, never manager-facing prose."""
+        if re.fullmatch(r"[!`~\s]{16,}", text):
+            raise ValueError("degenerate_provider_answer")
         if re.search(r"\b[A-Z][A-Z0-9]+(?:_[A-Z0-9]+)+\b", text):
             raise ValueError("raw_machine_code_in_narrative")
         if re.search(r"\b[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}\b", text, re.IGNORECASE):

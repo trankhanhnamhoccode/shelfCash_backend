@@ -1,5 +1,9 @@
 # ShelfCash Backend Refactor Plan
 
+## CHAT-8 semantic grounding correction (2026-09-29)
+
+The current Decision Explanation path validates explicit budget availability and exceeded-state assertions against `BUDGET_STATUS`, keeps numeric values under Numeric Authority, and gives ingredient why-questions typed recommendation/demand/alignment/baseline cards. The signed alignment renderer now preserves direction. There is no new public API, persistence, model-setting, or ADR change. The current backend lacks an authoritative `PROCUREMENT_REASON` fact; future causal decomposition would require a separate deterministic business decision. Live provider quality remains unmeasured locally without an OpenRouter credential.
+
 This document is a migration plan, not runtime truth. Runtime facts come from current code/tests and the two pre-refactor AS-IS snapshots. Accepted target intent comes only from `DECISIONS.md`.
 
 ## Refactor principles
