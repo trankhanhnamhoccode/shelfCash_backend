@@ -28,6 +28,38 @@ ShelfCash Backend is a FastAPI modular monolith. HTTP routes call application se
 - **Prompt contract:** Qwen now receives an answer-first, scope-aware contract: selection proof is required for selection causality, comparisons remain directional backend facts, numbers must use exact display tokens, and internal IDs/noise are omitted. Qwen remains non-authoritative; CLOSED_FACT is classification-only.
 - **Next slice:** R7 Ask-AI Slice F — Prompt Contract & End-to-End Semantic Reasoning.
 
+## CHAT-1 Budget Explanation Facts & Routing
+
+- **Status:** COMPLETE (2026-09-27). Decision Explanation now recognizes Vietnamese/English budget wording through one internal `BUDGET` question scope and retrieves `BUDGET_STATUS` as its primary evidence rather than generic plan/procurement facts.
+- **Authority / historical safety:** the core adapter snapshots the exact `BudgetResolver` result used for each newly generated Decision Run in existing opaque `technical_metrics.scenario_diagnostics`. Semantic evidence combines that persisted snapshot with the selected candidate's persisted purchase cost to deterministically materialize budget limit, planned spend, exceeds-budget state, overage, remaining amount, utilization, and currency. Explanation never re-reads live store settings. Historical packages without the snapshot fail closed as unavailable; no historical row is rewritten.
+- **Narration:** Qwen receives only the selected deterministic budget evidence and may not calculate it. Provider-unavailable/rejected paths render the same persisted budget facts. Zero budget avoids division by zero and does not manufacture a percentage.
+- **Compatibility / non-goals:** no Explanation request/response/OpenAPI field, optimizer, strategy selection, Overall Summary, Strategy Explanation, Ingredient Synthesis, conversation state, What-if bridge, migration, or package backfill changed. The additive snapshot stays inside the existing bounded diagnostics JSON.
+- **Verification:** targeted budget/routing/evidence/narrative/endpoint regression passed **94 tests, 1 warning**. Full regression, compile/OpenAPI, whitespace, and status gates are recorded with this task's final verification.
+
+## CHAT-2 Budget What-if Bridge
+
+- **Status:** COMPLETE (2026-09-27). Standalone budget-change questions on Decision Explanation now deterministically parse a concrete VND amount, resolve relative changes from the persisted CHAT-1 budget snapshot, and reuse the existing in-memory What-if application path. The Explanation response remains the existing `DecisionExplanationResponse` returned by the grounded What-if narrator.
+- **Authority / safety:** Qwen receives only the already-computed What-if facts. It cannot parse the amount, calculate the cap, run procurement, select strategy, or calculate risk. Relative changes fail closed without a snapshot; absolute caps may run independently. Ambiguous amounts return a deterministic clarification and no simulation. No historical run is rewritten.
+- **Non-goals:** no conversation memory, internal HTTP loopback, public contract change, prompt redesign, grounding relaxation, or What-if computation duplication.
+
+## CHAT-4 Conversational Decision Explanation Context
+
+- **Status:** COMPLETE (2026-09-27). On-demand Decision Explanation now uses the dedicated `CONVERSATIONAL_EXPLANATION` provider task. It keeps the existing Qwen/OpenRouter narrative model profile and strict response/grounding contract, but sends a thin conversational instruction plus a compact business brief selected from current semantic evidence.
+- **Authority / safety:** retrieval and What-if remain deterministic. The brief is a human-readable projection of selected evidence; current facts override client-owned history. Communication plans, style examples, raw structured evidence, and Decision Package diagnostics remain server-side and are not serialized to Qwen on this path. Existing deterministic fallbacks remain unchanged.
+- **Compatibility / verification:** no route, response DTO, persistence, migration, optimizer, Strategy Explanation, Ingredient Synthesis, or Overall Summary behavior changed. CHAT-3 closing full suite passed **733 tests, 22 warnings in 241.53s**. CHAT-4 focused checks passed **80 tests, 1 warning**; final full suite passed **734 tests, 22 warnings in 210.57s**. OpenAPI remains **59 paths / 71 operations**; `compileall` and `git diff --check` passed.
+
+## CHAT-3 Client-owned Explanation History
+
+- **Status:** COMPLETE (2026-09-27). `ExplanationRequest.history` is an additive bounded client-owned context (`user|assistant`, max six turns, 4,000 total characters). Backend remains stateless; no conversation persistence or migration exists.
+- **Authority:** history is used only for deterministic referent resolution. Current persisted Decision facts and current What-if output remain authoritative; history cannot supply a budget cap or business result.
+
+## CHAT-5 Numeric Grounding, Local Repair & Safe Salvage
+
+- **Status:** COMPLETE (2026-09-28). Decision Explanation normalizes selected structured evidence into one `AuthorizedNumericFact` registry before validating Qwen prose. Each fact carries a Decimal value, numeric kind, semantic key, evidence identity, optional unit, scenario/provenance metadata, backend display projection, and rounding policy. Client history and question text never populate this registry.
+- **Validation / repair:** money, percentage, quantity, count, and day mentions are parsed deterministically across VND separators/scales and Vietnamese/English unit forms. Equivalent rendering and bounded approximate money/percentage wording are accepted; quantity, count, and day remain exact by default. A single bad number is repaired only when cited evidence plus kind/unit and semantic wording narrow to one backend value. Compatibility display projections are normalized into the same registry, never used as a parallel string allow-list.
+- **Failure safety:** no nearest-value matching exists. An ambiguous value is not guessed. One unsupported numeric sentence may be removed if a coherent grounded answer remains; multiple/material unsupported numeric statements cause the existing deterministic fallback. Claims and final answer are both revalidated after repair/removal; entity, causal, strategy, scenario, and public-text guards remain in force.
+- **Compatibility / verification:** no route, public DTO/OpenAPI field, persistence, migration, computation authority, Strategy Explanation default, Ingredient Synthesis default, Overall Summary architecture, or What-if computation changed. Focused numeric/narrative/ingredient/budget/strategy/history/provider/semantic/API checks passed; final full suite passed **744 tests, 22 warnings in 234.75s**. `compileall` and `git diff --check` passed; generated OpenAPI is **59 paths / 71 operations**.
+
 ## Small coherent-block stochastic support stabilization
 
 - **Status:** COMPLETE (2026-09-23). ADR-018 changes only `shelfcash_core` residual-bootstrap block selection for small empirical pools (`K <= 100`). `N < K` selects `N` distinct coherent blocks without replacement; `N >= K` materializes every eligible block once, so generated scenarios can be fewer than requested.

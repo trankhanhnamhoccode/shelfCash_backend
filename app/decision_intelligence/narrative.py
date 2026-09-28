@@ -6,6 +6,7 @@ import re
 import time
 import unicodedata
 from collections import defaultdict
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from pydantic import ValidationError as PydanticValidationError
@@ -16,14 +17,24 @@ from app.decision_intelligence.adapter import (
 )
 from app.decision_intelligence.contracts import Citation, DecisionBriefFacts, DecisionExplanationResponse, DecisionNarrativeLLMResponse, ExplanationClaim
 from app.decision_intelligence.communication_plan import narrative_communication_plan
-from app.decision_intelligence.display import add_numeric_display_contract
+from app.decision_intelligence.display import add_numeric_display_contract, purchase_cost_display
 from app.decision_intelligence.narrative_retrieval import retrieve_narrative_evidence
 from app.decision_intelligence.semantic_evidence import DecisionSemanticEvidenceBuilder, SemanticFact
 from app.decision_intelligence.style_examples import retrieve_style_examples
+from app.decision_intelligence.numeric_authority import (
+    NumericKind,
+    build_numeric_authority,
+    equivalent_or_rounded,
+    iter_numeric_mentions,
+    parse_numeric_mention,
+    render_fact,
+)
 from app.llm.tasks import LLMFailureStage, LLMTask
 from app.llm.runtime import generate_json_sync
 
 logger = logging.getLogger("shelfcash.decision_narrative")
+
+_APPROX_WORDS = ("khoảng", "xấp xỉ", "gần", "approximately", "about", "around")
 
 SYSTEM_PROMPT = """Bạn là ShelfCash Decision Narrative Assistant.
 
@@ -342,6 +353,79 @@ def aggregate_evidence(
     return [add_numeric_display_contract(record) for record in records]
 
 
+CONVERSATIONAL_SYSTEM_PROMPT = """You are ShelfCash's operations assistant. Answer the store owner's current question directly and naturally.
+
+The current BUSINESS_BRIEF is the authoritative source for business facts and numbers. Recent history is only conversational context: never reuse an old number when it conflicts with the current brief. Do not calculate forecast, procurement, strategy, risk, or feasibility. If the brief is insufficient, say so.
+
+Return the required JSON schema. `answer` is the primary answer; claims must cite only fact ids supplied in BUSINESS_BRIEF."""
+
+
+def _business_brief(selected: list[dict[str, Any]]) -> list[dict[str, str]]:
+    """Render selected grounded evidence as small, human-readable fact cards.
+
+    Validation still receives the original structured evidence server-side. This
+    presentation intentionally excludes numeric guard metadata and internal
+    provenance so Qwen sees a compact brief, not a Decision Package dump.
+    """
+    cards: list[dict[str, str]] = []
+    for item in selected:
+        values = item.get("values") if isinstance(item.get("values"), dict) else {}
+        fact_type = str(item.get("type") or "FACT")
+        if fact_type == "BUDGET_STATUS":
+            if values.get("availability") != "available":
+                text = "Budget snapshot is unavailable for this Decision Run."
+            else:
+                currency = values.get("currency") or "VND"
+                text = (
+                    f"Budget limit: {values.get('budget_limit')}; planned spend: {values.get('planned_spend')}; "
+                    f"exceeds budget: {values.get('exceeds_budget')}; over by: {values.get('over_by')}; "
+                    f"remaining: {values.get('remaining_budget')}; utilization: {values.get('budget_utilization_pct')}%; currency: {currency}."
+                )
+        elif fact_type == "STRATEGY_COMPARISON":
+            entities = item.get("entities") if isinstance(item.get("entities"), dict) else {}
+            deltas = "; ".join(f"{key}: {value}" for key, value in values.items() if value is not None and key.endswith("_delta"))
+            text = f"Comparison {entities.get('left_strategy')} vs {entities.get('right_strategy')}. {deltas or 'No authoritative delta is available.'}"
+        elif fact_type == "STRATEGY_CANDIDATE_METRICS":
+            entities = item.get("entities") if isinstance(item.get("entities"), dict) else {}
+            useful = "; ".join(f"{key}: {value}" for key, value in values.items() if value is not None and key in {"purchase_cost", "fill_rate", "stockout_probability", "shortage_quantity", "feasible"})
+            text = f"Strategy {entities.get('strategy')}: {useful}."
+        else:
+            display = item.get("display_values") if isinstance(item.get("display_values"), dict) else values
+            concise = "; ".join(f"{key}: {value}" for key, value in display.items() if value is not None)
+            text = f"{fact_type}: {concise or 'available as supplied.'}"
+        cards.append({"fact_id": str(item["evidence_id"]), "evidence_id": str(item["evidence_id"]), "type": fact_type, "text": text})
+    return cards
+
+
+def _turn_hint(intent: str) -> str:
+    hints = {
+        "BUDGET": "Answer the budget status and state the overage or remaining amount when available.",
+        "STRATEGY_COMPARISON": "Explain only the requested strategy trade-off from the supplied comparison facts.",
+        "PLAN_STRATEGY": "Explain the selected strategy and relevant trade-offs.",
+        "WHY_PROCUREMENT": "Explain why the requested ingredient needs procurement and its stated consequence.",
+    }
+    return hints.get(intent, "Answer the user's question from the supplied facts without summarizing the whole plan.")
+
+
+class _ConversationalPayload(dict):
+    """Keep legacy in-process test doubles readable without serializing raw evidence.
+
+    The compatibility accessor is deliberately not a dictionary key, so JSON
+    transport to OpenRouter contains only the compact `business_brief`.
+    """
+    def __init__(self, payload: dict[str, Any], *, legacy_evidence: list[dict[str, Any]], legacy_target: dict[str, str] | None):
+        super().__init__(payload)
+        self._legacy_evidence = legacy_evidence
+        self._legacy_target = legacy_target
+
+    def __getitem__(self, key):
+        if key == "evidence":
+            return self._legacy_evidence
+        if key == "target" and self._legacy_target is not None:
+            return self._legacy_target
+        return super().__getitem__(key)
+
+
 class DecisionNarrativeProvider:
     def __init__(self, llm_provider, settings):
         self.llm_provider = llm_provider
@@ -358,6 +442,7 @@ class DecisionNarrativeProvider:
         semantic_facts: list[SemanticFact] | None = None,
         ingredient_id: str | None = None,
         question_scope: str | None = None,
+        history: list[Any] | None = None,
     ) -> DecisionExplanationResponse:
         # Preserve the existing human-readable deterministic fallback. Semantic
         # facts are machine evidence for retrieval/Qwen/grounding, not fallback prose.
@@ -373,16 +458,19 @@ class DecisionNarrativeProvider:
         if question_scope == "plan_strategy":
             records = self._selected_semantic_records(brief, question, detail_level, semantic_facts, question_scope)
             fallback = self._semantic_plan_fallback(fallback, records, language)
+        elif question_scope == "budget":
+            records = self._selected_semantic_records(brief, question, detail_level, semantic_facts, question_scope)
+            fallback = self._semantic_budget_fallback(fallback, records, language)
         if not self.llm_provider or not self.llm_provider.available:
             return fallback
         return self._qwen_or_fallback(
             brief, question, language, detail_level, fallback, semantic_facts,
-            ingredient_id=ingredient_id, question_scope=question_scope,
+            ingredient_id=ingredient_id, question_scope=question_scope, history=history,
         )
 
     def _qwen_or_fallback(
         self, brief, question, language, detail_level, fallback, semantic_facts,
-        *, ingredient_id: str | None = None, question_scope: str | None = None,
+        *, ingredient_id: str | None = None, question_scope: str | None = None, history: list[Any] | None = None,
     ):
         started = time.monotonic()
         request_id = get_request_id()
@@ -390,7 +478,7 @@ class DecisionNarrativeProvider:
         failure_stage = LLMFailureStage.UNKNOWN.value
         request_context: dict[str, Any] = {"decision_run_id": brief.decision_run_id}
         try:
-            logger.info("decision_narrative_started request_id=%s decision_run_id=%s task=%s", request_id, brief.decision_run_id, LLMTask.DECISION_NARRATIVE.value)
+            logger.info("decision_narrative_started request_id=%s decision_run_id=%s task=%s", request_id, brief.decision_run_id, LLMTask.CONVERSATIONAL_EXPLANATION.value)
             scoped_facts = (
                 ingredient_scoped_semantic_facts(semantic_facts or [], ingredient_id)
                 if ingredient_id else semantic_facts
@@ -428,39 +516,31 @@ class DecisionNarrativeProvider:
             selected = [item for item in structured if item["evidence_id"] in selected_ids]
             if question_scope == "plan_strategy":
                 fallback = self._semantic_plan_fallback(fallback, selected, language)
-            payload = {
-                "question": resolved_question, "language": language, "detail_level": detail_level,
-                "communication_plan": {
-                    "answer_with": plan.decision,
-                    "main_attention": plan.main_attention,
-                    "limitation": plan.limitation,
-                    "supporting": plan.supporting,
-                    "causal_allowed": retrieval.causal_allowed,
-                },
-                "style_examples": retrieve_style_examples(
-                    task="decision_narrative", intent=intent,
-                    case="CAUSAL_AVAILABLE" if retrieval.causal_allowed else "CAUSAL_UNAVAILABLE" if intent == "WHY_PROCUREMENT" else "DEFAULT",
-                    detail_level=detail_level,
-                    limit=2 if intent == "WHY_PROCUREMENT" and not retrieval.causal_allowed else 1,
-                ),
-                "evidence": selected,
-            }
+            elif question_scope == "budget":
+                fallback = self._semantic_budget_fallback(fallback, selected, language)
+            payload = _ConversationalPayload({
+                "question": resolved_question,
+                "task_hint": _turn_hint(str(intent)),
+                "business_brief": _business_brief(selected),
+                "recent_history": [
+                    {"role": str(turn.role), "content": str(turn.content)}
+                    for turn in (history or [])
+                ],
+            }, legacy_evidence=selected, legacy_target=(
+                {"ingredient_name": _ingredient_display_name(brief, retrieval.target_ingredient_id), "scope": "one_ingredient_only"}
+                if retrieval.target_ingredient_id else None
+            ))
             logger.info(
                 "decision_narrative_communication_plan decision_run_id=%s intent=%s answer_with=%s attention=%s limitation=%s supporting=%s",
                 brief.decision_run_id, intent, plan.decision, plan.main_attention, plan.limitation, plan.supporting,
             )
-            if retrieval.target_ingredient_id:
-                payload["target"] = {
-                    "ingredient_name": _ingredient_display_name(brief, retrieval.target_ingredient_id),
-                    "scope": "one_ingredient_only",
-                }
             raw = generate_json_sync(
-                self.llm_provider, SYSTEM_PROMPT, payload,
-                task=LLMTask.DECISION_NARRATIVE,
+                self.llm_provider, CONVERSATIONAL_SYSTEM_PROMPT, payload,
+                task=LLMTask.CONVERSATIONAL_EXPLANATION,
                 request_context=request_context,
             )
 
-            logger.info("decision_narrative_qwen_completed request_id=%s decision_run_id=%s task=%s", request_id, brief.decision_run_id, LLMTask.DECISION_NARRATIVE.value)
+            logger.info("decision_narrative_qwen_completed request_id=%s decision_run_id=%s task=%s", request_id, brief.decision_run_id, LLMTask.CONVERSATIONAL_EXPLANATION.value)
             try:
                 typed_raw = DecisionNarrativeLLMResponse.model_validate(raw)
             except PydanticValidationError as exc:
@@ -474,7 +554,7 @@ class DecisionNarrativeProvider:
             except Exception:
                 failure_stage = LLMFailureStage.GROUNDING.value
                 raise
-            logger.info("decision_narrative_grounding_passed request_id=%s decision_run_id=%s task=%s duration_ms=%d", request_id, brief.decision_run_id, LLMTask.DECISION_NARRATIVE.value, int((time.monotonic() - started) * 1000))
+            logger.info("decision_narrative_grounding_passed request_id=%s decision_run_id=%s task=%s duration_ms=%d", request_id, brief.decision_run_id, LLMTask.CONVERSATIONAL_EXPLANATION.value, int((time.monotonic() - started) * 1000))
             return response.model_copy(update={
                 "raw_response": request_context.get("openrouter_raw_content", raw),
                 "llm_diagnostics": {
@@ -491,18 +571,18 @@ class DecisionNarrativeProvider:
             metadata = request_context.get("openrouter_metadata", {})
             metadata = metadata if isinstance(metadata, dict) else {}
             task_profile = getattr(self.llm_provider, "task_profile", None)
-            profile = task_profile(LLMTask.DECISION_NARRATIVE) if callable(task_profile) else None
+            profile = task_profile(LLMTask.CONVERSATIONAL_EXPLANATION) if callable(task_profile) else None
             configured_model = details.get("configured_model") or getattr(profile, "model", None)
             resolved_model = details.get("resolved_model") or metadata.get("resolved_model")
             resolved_provider = details.get("resolved_provider") or metadata.get("resolved_provider")
             logger.warning(
                 "decision_narrative_failed request_id=%s decision_run_id=%s task=%s configured_model=%s resolved_model=%s resolved_provider=%s failure_stage=%s reason=%s",
-                request_id, brief.decision_run_id, LLMTask.DECISION_NARRATIVE.value, configured_model, resolved_model,
+                request_id, brief.decision_run_id, LLMTask.CONVERSATIONAL_EXPLANATION.value, configured_model, resolved_model,
                 resolved_provider, failure_stage, f"{type(exc).__name__}:{exc}",
             )
             logger.warning(
                 "decision_narrative_fallback request_id=%s decision_run_id=%s task=%s configured_model=%s resolved_provider=%s failure_stage=%s duration_ms=%d",
-                request_id, brief.decision_run_id, LLMTask.DECISION_NARRATIVE.value, configured_model, resolved_provider,
+                request_id, brief.decision_run_id, LLMTask.CONVERSATIONAL_EXPLANATION.value, configured_model, resolved_provider,
                 failure_stage, int((time.monotonic() - started) * 1000),
             )
             update_dict: dict[str, Any] = {
@@ -561,6 +641,40 @@ class DecisionNarrativeProvider:
             answer = " ".join([answer, *rendered])
         return fallback.model_copy(update={"summary": answer, "answer": answer, "why_this_plan": [answer]})
 
+    @staticmethod
+    def _semantic_budget_fallback(fallback, records: list[dict], language: str):
+        """Answer budget questions from the persisted snapshot, never live settings."""
+        budget = next((item for item in records if item.get("type") == "BUDGET_STATUS"), None)
+        if not budget or budget.get("availability") != "available":
+            answer = (
+                "This Decision Run does not contain enough budget information to determine whether the plan exceeds its budget."
+                if language == "en" else
+                "Decision Run này không có đủ thông tin ngân sách để xác định kế hoạch có vượt ngân sách hay không."
+            )
+        else:
+            limit = purchase_cost_display(budget.get("budget_limit")) or str(budget.get("budget_limit"))
+            spend = purchase_cost_display(budget.get("planned_spend")) or str(budget.get("planned_spend"))
+            if budget.get("exceeds_budget"):
+                over_by = purchase_cost_display(budget.get("over_by")) or str(budget.get("over_by"))
+                answer = (
+                    f"The plan is expected to spend {spend} against a budget of {limit}, exceeding it by about {over_by}."
+                    if language == "en" else
+                    f"Kế hoạch dự kiến chi {spend} trên ngân sách {limit}, tức vượt khoảng {over_by}."
+                )
+            else:
+                remaining = purchase_cost_display(budget.get("remaining_budget")) or str(budget.get("remaining_budget"))
+                answer = (
+                    f"The plan is expected to spend {spend} against a budget of {limit}, leaving about {remaining}."
+                    if language == "en" else
+                    f"Kế hoạch dự kiến chi {spend} trên ngân sách {limit}, còn khoảng {remaining}."
+                )
+            utilization = budget.get("budget_utilization_pct")
+            if isinstance(utilization, (int, float)):
+                rendered = budget.get("display_values", {}).get("budget_utilization_pct")
+                if rendered:
+                    answer += f" Budget utilization is {rendered}." if language == "en" else f" Mức sử dụng ngân sách là {rendered}."
+        return fallback.model_copy(update={"summary": answer, "answer": answer, "why_this_plan": [answer]})
+
     def _guard(
         self, raw, structured, evidence_items, brief, language, detail_level, intent,
         *, target_ingredient_id: str | None = None,
@@ -587,24 +701,38 @@ class DecisionNarrativeProvider:
             ids = claim.get("evidence_ids")
             if not isinstance(ids, list) or not ids or not set(ids) <= allowed_ids:
                 raise ValueError("unsupported_evidence_id")
-            claimed_evidence_ids.update(ids)
             supported_types = {structured_by_id[evidence_id]["type"] for evidence_id in ids}
             if claim.get("type") not in supported_types:
                 raise ValueError("unsupported_claim_type")
-            self._validate_numbers(claim["text"], [structured_by_id[evidence_id] for evidence_id in ids])
-            self._validate_entities(claim["text"], [structured_by_id[evidence_id] for evidence_id in ids], brief)
+            claim_text = claim["text"]
+            claim_items = [structured_by_id[evidence_id] for evidence_id in ids]
+            try:
+                self._validate_numbers(claim_text, claim_items)
+            except ValueError as exc:
+                if not str(exc).startswith("unsupported_numeric_claim"):
+                    raise
+                claim_text, repaired = self._repair_numeric_text(claim_text, claim_items)
+                if not repaired:
+                    # A local unsupported number may be discarded only when
+                    # other grounded claims still carry a useful answer.
+                    self._validate_entities(claim_text, claim_items, brief)
+                    self._validate_target_entity(claim_text, claim_items, brief, target_ingredient_id)
+                    continue
+                self._validate_numbers(claim_text, claim_items)
+            self._validate_entities(claim_text, claim_items, brief)
             self._validate_target_entity(
-                claim["text"], [structured_by_id[evidence_id] for evidence_id in ids],
+                claim_text, claim_items,
                 brief, target_ingredient_id,
             )
-            self._validate_supported_concepts(claim["text"], [structured_by_id[evidence_id] for evidence_id in ids])
-            self._validate_causal_language(claim["text"], [structured_by_id[evidence_id] for evidence_id in ids])
-            self._validate_strategy_selection_language(claim["text"], [structured_by_id[evidence_id] for evidence_id in ids])
-            self._validate_strategy_semantics(claim["text"], [structured_by_id[evidence_id] for evidence_id in ids])
-            self._validate_baseline_language(claim["text"], [structured_by_id[evidence_id] for evidence_id in ids])
-            self._validate_public_text(claim["text"])
+            self._validate_supported_concepts(claim_text, claim_items)
+            self._validate_causal_language(claim_text, claim_items)
+            self._validate_strategy_selection_language(claim_text, claim_items)
+            self._validate_strategy_semantics(claim_text, claim_items)
+            self._validate_baseline_language(claim_text, claim_items)
+            self._validate_public_text(claim_text)
             claim_source_ids = sorted({source_id for evidence_id in ids for source_id in structured_by_id[evidence_id].get("evidence_ids", [evidence_id])})
-            claims.append(ExplanationClaim(type=claim["type"], value=claim["text"], evidence_ids=claim_source_ids))
+            claims.append(ExplanationClaim(type=claim["type"], value=claim_text, evidence_ids=claim_source_ids))
+            claimed_evidence_ids.update(ids)
             for evidence_id in ids:
                 citation_ids.update(structured_by_id[evidence_id].get("evidence_ids", [evidence_id]))
         # The model must not reference an unknown ID, but Python owns the
@@ -613,51 +741,122 @@ class DecisionNarrativeProvider:
         used = claimed_evidence_ids
         self._validate_public_text(raw["answer"])
         answer_items = [structured_by_id[evidence_id] for evidence_id in used]
-        self._validate_numbers(raw["answer"], answer_items)
-        self._validate_entities(raw["answer"], answer_items, brief)
-        self._validate_target_entity(raw["answer"], answer_items, brief, target_ingredient_id)
-        self._validate_supported_concepts(raw["answer"], answer_items)
-        self._validate_causal_language(raw["answer"], answer_items)
-        self._validate_strategy_selection_language(raw["answer"], answer_items)
-        self._validate_strategy_semantics(raw["answer"], answer_items)
-        self._validate_baseline_language(raw["answer"], answer_items)
+        answer = raw["answer"]
+        try:
+            self._validate_numbers(answer, answer_items)
+        except ValueError as exc:
+            if not str(exc).startswith("unsupported_numeric_claim"):
+                raise
+            answer, repaired = self._repair_numeric_text(answer, answer_items)
+            if not repaired:
+                answer = self._remove_invalid_numeric_sentences(answer, answer_items)
+                if not answer:
+                    raise
+            self._validate_numbers(answer, answer_items)
+        self._validate_entities(answer, answer_items, brief)
+        self._validate_target_entity(answer, answer_items, brief, target_ingredient_id)
+        self._validate_supported_concepts(answer, answer_items)
+        self._validate_causal_language(answer, answer_items)
+        self._validate_strategy_selection_language(answer, answer_items)
+        self._validate_strategy_semantics(answer, answer_items)
+        self._validate_baseline_language(answer, answer_items)
         citations = [Citation(evidence_id=item.evidence_id, label=item.text, source_type=item.source_object) for item in evidence_items if item.evidence_id in citation_ids]
         entities = {"ingredient_ids": sorted({item.entities["ingredient_id"] for item in evidence_items if item.evidence_id in citation_ids and item.entities.get("ingredient_id")}), "supplier_ids": sorted({item.entities["supplier_id"] for item in evidence_items if item.evidence_id in citation_ids and item.entities.get("supplier_id")})}
-        return DecisionExplanationResponse(source="openrouter_qwen", language=language, detail_level=detail_level, summary=raw["answer"], why_this_plan=[raw["answer"]], main_risks=brief.critic.warnings, tradeoffs=[], important_assumptions=["Narrative is grounded only in the persisted decision package."], decision_run_id=brief.decision_run_id, answer=raw["answer"], intent=str(intent).upper(), entities=entities, claims=claims, citations=citations, grounded=True, provider="openrouter_qwen", raw_response=raw)
+        return DecisionExplanationResponse(source="openrouter_qwen", language=language, detail_level=detail_level, summary=answer, why_this_plan=[answer], main_risks=brief.critic.warnings, tradeoffs=[], important_assumptions=["Narrative is grounded only in the persisted decision package."], decision_run_id=brief.decision_run_id, answer=answer, intent=str(intent).upper(), entities=entities, claims=claims, citations=citations, grounded=True, provider="openrouter_qwen", raw_response=raw)
 
     @staticmethod
     def _validate_numbers(text: str, payloads: list[dict]):
-        remaining = text
-        allowed = {
-            mention for payload in payloads
-            for mention in payload.get("allowed_numeric_mentions", [])
-            if isinstance(mention, str)
-        }
-        for mention in sorted(allowed, key=len, reverse=True):
-            remaining = remaining.replace(mention, " ")
-        if re.search(r"(?<![\w-])\d+(?:[.,]\d+)?", remaining):
-            raise ValueError("unsupported_numeric_claim")
+        registry = build_numeric_authority(payloads)
         supplied_ranges = [
             str(value) for payload in payloads
             for value in (payload.get("display_values") or {}).values()
             if "–" in str(value)
         ]
+        protected_text = text
+        for supplied in supplied_ranges:
+            protected_text = protected_text.replace(supplied, " ")
+        # Dates are temporal evidence checked by the other grounding guards,
+        # not scalar numeric claims (both ISO and manager-facing dd/mm forms).
+        protected_text = re.sub(r"\b\d{4}-\d{2}-\d{2}\b|\b\d{1,2}/\d{1,2}\b", " ", protected_text)
         if any(value in text for value in supplied_ranges):
             if any(marker in text.lower() for marker in ("trung bình", "average", "mean")):
                 raise ValueError("range_semantics_contradicted")
-        return
-        numbers = re.findall(r"(?<![\w-])\d+(?:[.,]\d+)?", text)
-        supported = {round(float(value), 9) for payload in payloads for value in payload.values() if isinstance(value, (int, float))}
-        # Presentation-safe display strings (for example ``14/08`` and
-        # ``7,67 triệu đồng``) are produced by backend code and are therefore
-        # equally authoritative for numeric grounding.
-        for payload in payloads:
-            for key, value in payload.items():
-                if key.endswith("_display") and isinstance(value, str):
-                    supported.update(round(float(token.replace(",", ".")), 9) for token in re.findall(r"\d+(?:[.,]\d+)?", value))
-        for number in numbers:
-            if round(float(number.replace(",", ".")), 9) not in supported:
+        for mention in iter_numeric_mentions(protected_text):
+            # ISO dates are backend-owned temporal tokens, not scalar claims.
+            if re.fullmatch(r"\d{4}", mention.text) and text[mention.end:].startswith("-"):
+                continue
+            approximate = any(word in text[max(0, mention.start - 16):mention.start].lower() for word in _APPROX_WORDS)
+            if not DecisionNarrativeProvider._is_authorized_numeric(mention, registry, approximate):
                 raise ValueError("unsupported_numeric_claim")
+
+    @staticmethod
+    def _numeric_value(mention: str) -> tuple[Decimal | None, str]:
+        parsed = parse_numeric_mention(mention)
+        if parsed is None:
+            return None, "count"
+        value, kind, _unit = parsed
+        return value, (kind.value if kind is not None else "count")
+
+    @staticmethod
+    def _is_authorized_numeric(mention, registry, approximate: bool) -> bool:
+        return any(equivalent_or_rounded(mention, fact, approximate=approximate) for fact in registry)
+
+    @staticmethod
+    def _repair_numeric_text(text: str, payloads: list[dict]) -> tuple[str, int]:
+        """Replace one clearly monetary hallucination with a backend display value.
+
+        This deliberately repairs only a bounded local error. Multiple bad
+        numbers remain a whole-answer grounding failure.
+        """
+        bad = []
+        registry = build_numeric_authority(payloads)
+        for mention in iter_numeric_mentions(text):
+            if not DecisionNarrativeProvider._is_authorized_numeric(mention, registry, False):
+                bad.append(mention)
+        if len(bad) != 1:
+            return text, 0
+        mention = bad[0]
+        candidates = [fact for fact in registry if mention.kind is None or fact.kind is mention.kind]
+        if mention.kind is NumericKind.QUANTITY and mention.unit:
+            candidates = [fact for fact in candidates if not fact.unit or fact.unit == mention.unit]
+        context = text.casefold()
+        key_hints = (
+            (("vượt", "over by", "overage"), ("over_by",)),
+            (("còn", "remaining", "left"), ("remaining_budget",)),
+            (("dự kiến chi", "planned spend", "chi phí", "costs", "purchase cost"), ("planned_spend", "purchase_cost")),
+            (("ngân sách", "budget limit", "budget cap"), ("budget_limit",)),
+        )
+        for markers, keys in key_hints:
+            if any(marker in context for marker in markers):
+                narrowed = [fact for fact in candidates if fact.semantic_key in keys]
+                if narrowed:
+                    candidates = narrowed
+                break
+        # Evidence IDs plus kind/unit are the narrowing key.  This is never a
+        # closest-number operation: two candidate facts means no repair.
+        # Backend display compatibility can duplicate the same authoritative
+        # value under a projection key; identical replacements are not an
+        # ambiguity. Distinct values remain unrepairable.
+        unique = {(fact.value, fact.kind, fact.unit): fact for fact in candidates}
+        if len(unique) != 1:
+            return text, 0
+        fact = next(iter(unique.values()))
+        return text[:mention.start] + render_fact(fact) + text[mention.end:], 1
+
+    @staticmethod
+    def _remove_invalid_numeric_sentences(text: str, payloads: list[dict]) -> str:
+        kept: list[str] = []
+        for sentence in re.split(r"(?<=[.!?])\s+", text.strip()):
+            if not sentence:
+                continue
+            try:
+                DecisionNarrativeProvider._validate_numbers(sentence, payloads)
+            except ValueError as exc:
+                if not str(exc).startswith("unsupported_numeric_claim"):
+                    raise
+                continue
+            kept.append(sentence)
+        return " ".join(kept)
 
     @staticmethod
     def _validate_entities(text: str, items, brief):
@@ -717,7 +916,7 @@ class DecisionNarrativeProvider:
             ("moq", "đặt tối thiểu"): lambda: any(item["type"] == "MOQ" or item.get("code") == "MOQ_CONSTRAINT" for item in items),
             ("hạn dùng", "hết hạn"): lambda: any(item["type"] == "EXPIRY" or item.get("code") == "EXPIRING_INVENTORY" for item in items),
             ("lead time", "thời gian giao"): lambda: any(item["type"] == "LEAD_TIME" or item.get("code") == "LEAD_TIME_PRESSURE" for item in items),
-            ("ngân sách", "budget"): lambda: any(item["type"] == "BUDGET" or item.get("code") == "BUDGET_CONSTRAINT" for item in items),
+            ("ngân sách", "budget"): lambda: any(item["type"] in {"BUDGET", "BUDGET_STATUS"} or item.get("code") == "BUDGET_CONSTRAINT" for item in items),
             ("rủi ro", "xác suất thiếu"): lambda: any(
                 item["type"] == "RISK"
                 or item.get("code") == "STOCKOUT_RISK"

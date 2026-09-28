@@ -45,6 +45,39 @@ AS-IS facts, accepted targets, proposals, technical debt, and historical informa
 - [x] User numeric premises remain context only. Same-unit explicit procurement mismatches are corrected from persisted evidence without putting the user number into business claims/citations.
 - [x] Final verification: **675 passed, 22 warnings in 634.22s**; no API shape, persistence, migration, Decision Package, or business-computation change.
 
+## CHAT-1 Budget Explanation Facts & Routing — COMPLETE (2026-09-27)
+
+- [x] One bounded internal `BUDGET` scope recognizes normalized budget, remaining-budget, overage, and utilization questions before the older closed/generic paths. Existing plan-strategy and ingredient scopes remain unchanged.
+- [x] The Decision core adapter snapshots the resolved cap used at Decision Run creation; semantic evidence reads only this snapshot plus persisted selected-plan purchase cost. It derives budget status deterministically and fails closed for old packages with no snapshot. No live budget-settings lookup occurs during Explanation.
+- [x] Budget retrieval is primary-only `BUDGET_STATUS`; Qwen remains a guarded renderer and deterministic fallback reuses the same facts. No public Explanation DTO/OpenAPI change, migration, historical package rewrite, What-if bridge, or conversational-memory work is included.
+- [x] Follow-up scope: explicit budget-change What-if routing and conversation reference resolution remain separate slices.
+
+## CHAT-2 Budget What-if Bridge — COMPLETE (2026-09-27)
+
+- [x] Explanation recognizes standalone absolute and relative budget changes, uses a small deterministic money parser, and passes the backend-calculated `budget_limit` to the existing What-if use case.
+- [x] Relative changes require the persisted CHAT-1 snapshot; ambiguous/missing/invalid values fail closed without simulation. Qwen only narrates the existing What-if evidence.
+- [x] No public DTO/OpenAPI, persistence rewrite, conversation memory, or duplicate optimization implementation was added.
+
+
+## CHAT-4 Conversational Decision Explanation Context — COMPLETE (2026-09-27)
+
+- [x] Decision Explanation uses a dedicated conversational LLM task while retaining the current narrative OpenRouter profile and strict response/grounding compatibility schema.
+- [x] Deterministic retrieval selects current evidence, then a compact business brief and small turn hint are sent with bounded CHAT-3 history. The old communication plan, style examples, raw evidence records, and package diagnostics are not provider payload fields.
+- [x] No business computation, What-if implementation, fallback, response contract, persistence, Overall Summary, Strategy Explanation, or Ingredient Synthesis architecture changed.
+- [x] Final verification: CHAT-3 closure **733 passed, 22 warnings**; CHAT-4 targeted **80 passed, 1 warning**; full regression **734 passed, 22 warnings in 210.57s**. OpenAPI remains **59 paths / 71 operations**.
+## CHAT-3 Client-owned Explanation History — COMPLETE (2026-09-27)
+
+- [x] Additive bounded request history supports deterministic strategy, budget, and ingredient follow-up resolution without server persistence.
+- [x] History is untrusted context only; current package facts and What-if computation override it.
+
+## CHAT-5 Numeric Grounding, Local Repair & Safe Salvage — COMPLETE (2026-09-28)
+
+- [x] Selected structured evidence is normalized into one typed numeric-authority registry; legacy backend display projections are compatibility inputs to that registry, not an independent allow-list.
+- [x] Deterministic parser supports VND grouping/scales, percentage separators, quantities/units, counts, and days. Money/percentage have centralized bounded approximation; quantity/count/day stay strict unless their evidence explicitly says otherwise.
+- [x] One uniquely scoped numeric error may be repaired from the cited fact; ambiguity never selects a nearest value. One local unsupported sentence may be removed when a grounded answer remains; material/multiple errors retain deterministic whole-response fallback.
+- [x] Claim and answer revalidation preserves entity, causal, strategy, scenario, and public-text guards. Current Decision facts override CHAT-3 history; baseline/hypothetical What-if provenance remains distinct.
+- [x] Final verification: **744 passed, 22 warnings in 234.75s**; `compileall`, `git diff --check`, and generated OpenAPI (**59 paths / 71 operations**) passed. No public API, persistence, migration, optimizer, Strategy Explanation, Ingredient Synthesis, Overall Summary architecture, or What-if computation change.
+
 ## Small coherent-block stochastic support stabilization — COMPLETE (2026-09-23)
 
 - [x] ADR-018 accepts a small-pool evidence policy without changing the forecast, BOM, FEFO, optimizer, critic, risk-threshold, or strategy authorities.

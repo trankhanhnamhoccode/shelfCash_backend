@@ -514,6 +514,11 @@ ExplanationRequest
   detail_level: simple | manager | technical = simple
   question?: string (max 2000)
   ingredient_id?: string 1..255
+  history?: ChatHistoryTurn[] (max 6; total content max 4000)
+
+ChatHistoryTurn
+  role: user | assistant
+  content: string 1..1000
 
 WhatIfRequest
   demand_multiplier?: number > 0

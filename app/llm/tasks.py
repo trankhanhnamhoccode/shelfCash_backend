@@ -9,6 +9,7 @@ class LLMTask(str, Enum):
 
     EXCEL_MAPPING = "excel_mapping"
     DECISION_NARRATIVE = "decision_narrative"
+    CONVERSATIONAL_EXPLANATION = "conversational_explanation"
     PLAN_SUMMARY = "plan_summary"
     INGREDIENT_SYNTHESIS = "ingredient_synthesis"
     STRATEGY_EXPRESSION = "strategy_expression"

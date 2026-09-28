@@ -43,6 +43,10 @@ def detect_intent(question: str) -> str:
 
 
 def retrieve_narrative_evidence(brief, records: list[dict[str, Any]], *, question: str, ingredient_id: str | None, detail_level: str, question_scope: str | None = None) -> NarrativeRetrieval:
+    if question_scope == "budget":
+        return NarrativeRetrieval("BUDGET", None, _unique([
+            item for item in records if item.get("type") == "BUDGET_STATUS"
+        ]), False)
     if question_scope == "plan_strategy":
         return _retrieve_plan_strategy(records, question)
     intent = detect_intent(question)

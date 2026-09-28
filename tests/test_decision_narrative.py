@@ -60,7 +60,7 @@ def settings():
 
 def test_qwen_narrative_accepts_supported_quantity():
     def response(payload):
-        order = next(item for item in payload["evidence"] if item["type"] == "PROCUREMENT_QUANTITY")
+        order = next(item for item in payload["business_brief"] if item["type"] == "PROCUREMENT_QUANTITY")
         return {"answer": "Kế hoạch ghi nhận đặt 60 lít Sữa tươi.", "claims": [{"type": "PROCUREMENT_QUANTITY", "text": "Kế hoạch ghi nhận đặt 60 lít Sữa tươi.", "evidence_ids": [order["evidence_id"]]}], "used_evidence_ids": [order["evidence_id"]]}
     result = DecisionNarrativeProvider(MockQwen(response), settings()).explain(brief(), question="Tại sao phải nhập Sữa tươi?", language="vi", detail_level="simple")
     assert result.provider == "openrouter_qwen" and result.grounded is True
@@ -76,22 +76,23 @@ def test_narrative_uses_semantic_task_and_rejects_raw_schema_failure():
     )
 
     assert malformed.calls
-    assert malformed.calls[0]["kwargs"]["task"] is LLMTask.DECISION_NARRATIVE
+    assert malformed.calls[0]["kwargs"]["task"] is LLMTask.CONVERSATIONAL_EXPLANATION
     assert malformed.calls[0]["kwargs"]["request_context"]["decision_run_id"] == "narrative-run"
     assert result.provider == "deterministic_fallback"
 
 
-def test_qwen_unsupported_number_and_entity_fall_back():
+def test_qwen_repairs_a_uniquely_scoped_quantity():
     def response(payload):
-        order = next(item for item in payload["evidence"] if item["type"] == "PROCUREMENT_QUANTITY")
+        order = next(item for item in payload["business_brief"] if item["type"] == "PROCUREMENT_QUANTITY")
         return {"answer": "Nhập 70 lít Chuối.", "claims": [{"type": "PROCUREMENT_QUANTITY", "text": "Nhập 70 lít Chuối.", "evidence_ids": [order["evidence_id"]]}], "used_evidence_ids": [order["evidence_id"]]}
     result = DecisionNarrativeProvider(MockQwen(response), settings()).explain(brief(), question="Sữa tươi", language="vi", detail_level="simple")
-    assert result.provider == "deterministic_fallback"
+    assert result.provider == "openrouter_qwen"
+    assert "60 l" in result.answer
 
 
 def test_qwen_uuid_leakage_falls_back():
     def response(payload):
-        order = next(item for item in payload["evidence"] if item["type"] == "PROCUREMENT_QUANTITY")
+        order = next(item for item in payload["business_brief"] if item["type"] == "PROCUREMENT_QUANTITY")
         text = "Kế hoạch đề xuất nhập 60 lít Sữa tươi cho 123e4567-e89b-12d3-a456-426614174000."
         return {"answer": text, "claims": [{"type": "PROCUREMENT_QUANTITY", "text": text, "evidence_ids": [order["evidence_id"]]}], "used_evidence_ids": [order["evidence_id"]]}
 
@@ -100,21 +101,45 @@ def test_qwen_uuid_leakage_falls_back():
     ).provider == "deterministic_fallback"
 
 
-def test_narrative_payload_has_answer_first_communication_plan():
+def test_narrative_payload_has_compact_conversational_brief():
     gateway = MockQwen(lambda payload: {
         "answer": "Kế hoạch đề xuất nhập 60 lít Sữa tươi.",
-        "claims": [{"type": "PROCUREMENT_QUANTITY", "text": "Kế hoạch đề xuất nhập 60 lít Sữa tươi.", "evidence_ids": [next(item["evidence_id"] for item in payload["evidence"] if item["type"] == "PROCUREMENT_QUANTITY")]}],
+        "claims": [{"type": "PROCUREMENT_QUANTITY", "text": "Kế hoạch đề xuất nhập 60 lít Sữa tươi.", "evidence_ids": [next(item["evidence_id"] for item in payload["business_brief"] if item["type"] == "PROCUREMENT_QUANTITY")]}],
         "used_evidence_ids": [],
     })
     result = DecisionNarrativeProvider(gateway, settings()).explain(brief(), question="Bao nhiêu Sữa tươi?", language="vi", detail_level="simple")
 
     assert result.provider == "openrouter_qwen"
-    assert gateway.calls[0]["payload"]["communication_plan"]["answer_with"]
+    payload = gateway.calls[0]["payload"]
+    assert payload["business_brief"]
+    assert "communication_plan" not in payload and "style_examples" not in payload and "evidence" not in payload
+
+
+def test_conversational_payload_keeps_history_context_below_current_brief():
+    gateway = MockQwen(lambda payload: {
+        "answer": "The plan is recorded in the current brief.",
+        "claims": [{
+            "type": "PROCUREMENT_QUANTITY",
+            "text": "The plan is recorded in the current brief.",
+            "evidence_ids": [next(item["fact_id"] for item in payload["business_brief"] if item["type"] == "PROCUREMENT_QUANTITY")],
+        }],
+        "used_evidence_ids": [],
+    })
+    turn = type("Turn", (), {"role": "assistant", "content": "The budget is 20 million."})()
+    result = DecisionNarrativeProvider(gateway, settings()).explain(
+        brief(), question="What is planned?", language="en", detail_level="simple", history=[turn],
+    )
+
+    assert result.provider == "openrouter_qwen"
+    payload = gateway.calls[0]["payload"]
+    assert payload["recent_history"] == [{"role": "assistant", "content": "The budget is 20 million."}]
+    assert payload["business_brief"]
+    assert gateway.calls[0]["kwargs"]["task"] is LLMTask.CONVERSATIONAL_EXPLANATION
 
 
 def test_qwen_unsupported_safety_stock_cause_falls_back():
     def response(payload):
-        order = next(item for item in payload["evidence"] if item["type"] == "PROCUREMENT_QUANTITY")
+        order = next(item for item in payload["business_brief"] if item["type"] == "PROCUREMENT_QUANTITY")
         return {"answer": "Cần nhập để duy trì tồn an toàn.", "claims": [{"type": "PROCUREMENT_QUANTITY", "text": "Cần nhập để duy trì tồn an toàn.", "evidence_ids": [order["evidence_id"]]}], "used_evidence_ids": [order["evidence_id"]]}
     result = DecisionNarrativeProvider(MockQwen(response), settings()).explain(brief(), question="Sữa tươi", language="vi", detail_level="simple")
     assert result.provider == "deterministic_fallback"
@@ -122,7 +147,7 @@ def test_qwen_unsupported_safety_stock_cause_falls_back():
 
 def test_qwen_canonicalizes_used_evidence_ids_from_grounded_claims():
     def response(payload):
-        order = next(item for item in payload["evidence"] if item["type"] == "PROCUREMENT_QUANTITY")
+        order = next(item for item in payload["business_brief"] if item["type"] == "PROCUREMENT_QUANTITY")
         return {
             "answer": "Order 60 litres of milk.",
             "claims": [{"type": "PROCUREMENT_QUANTITY", "text": "Order 60 litres of milk.", "evidence_ids": [order["evidence_id"]]}],
@@ -134,6 +159,25 @@ def test_qwen_canonicalizes_used_evidence_ids_from_grounded_claims():
     )
     assert result.provider == "openrouter_qwen"
     assert result.claims[0].evidence_ids
+
+
+def test_conversational_numeric_parser_normalizes_money_separators_and_percentages():
+    provider = DecisionNarrativeProvider(None, None)
+    assert str(provider._numeric_value("7.390.000 VND")[0]) == "7390000"
+    assert str(provider._numeric_value("7,39 triệu")[0]) == "7390000.00"
+    assert str(provider._numeric_value("1,5 triệu")[0]) == "1500000.0"
+    assert str(provider._numeric_value("82,4%")[0]) == "82.4"
+
+
+def test_conversational_numeric_policy_keeps_equivalent_and_approximate_money_but_counts_exact():
+    payload = {"purchase_cost": 7_390_000, "fill_rate": 0.8237, "quantity": 1}
+    provider = DecisionNarrativeProvider(None, None)
+    provider._validate_numbers("7.390.000 VND", [payload])
+    provider._validate_numbers("7,39 triệu", [payload])
+    provider._validate_numbers("khoảng 7,4 triệu", [payload])
+    provider._validate_numbers("khoảng 82%", [payload])
+    with pytest.raises(ValueError, match="unsupported_numeric_claim"):
+        provider._validate_numbers("2", [payload])
 
 
 def test_qwen_malformed_and_unavailable_fall_back():

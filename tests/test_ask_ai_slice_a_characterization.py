@@ -182,9 +182,10 @@ def test_question_scope_classifies_plan_general_closed_and_entity_questions_dete
     for question in general_questions:
         assert classify_question_scope(question, has_explicit_ingredient_id=False) is QuestionScope.GENERAL_DECISION
 
-    closed_questions = ("Tổng chi phí là bao nhiêu?", "Kế hoạch nào được chọn?", "Có vượt ngân sách không?")
+    closed_questions = ("Tổng chi phí là bao nhiêu?", "Kế hoạch nào được chọn?")
     for question in closed_questions:
         assert classify_question_scope(question, has_explicit_ingredient_id=False) is QuestionScope.CLOSED_FACT
+    assert classify_question_scope("Có vượt ngân sách không?", has_explicit_ingredient_id=False) is QuestionScope.BUDGET
 
     entity_questions = ("Tại sao phải nhập chuối?", "Vì sao cần mua chuối?", "Nhu cầu chuối tuần tới?", "Why do we need to buy bananas?")
     for question in entity_questions:

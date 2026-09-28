@@ -131,11 +131,12 @@ class OpenRouterLLMGateway(LLMProvider):
         }
 
     def task_profile(self, task: LLMTask) -> OpenRouterTaskProfile:
-        if task not in (LLMTask.EXCEL_MAPPING, LLMTask.DECISION_NARRATIVE, LLMTask.PLAN_SUMMARY, LLMTask.INGREDIENT_SYNTHESIS, LLMTask.STRATEGY_EXPRESSION):
+        if task not in (LLMTask.EXCEL_MAPPING, LLMTask.DECISION_NARRATIVE, LLMTask.CONVERSATIONAL_EXPLANATION, LLMTask.PLAN_SUMMARY, LLMTask.INGREDIENT_SYNTHESIS, LLMTask.STRATEGY_EXPRESSION):
             raise ValueError(f"Unsupported LLM task: {task}")
         prefix = {
             LLMTask.EXCEL_MAPPING: "openrouter_mapping",
             LLMTask.DECISION_NARRATIVE: "openrouter_narrative",
+            LLMTask.CONVERSATIONAL_EXPLANATION: "openrouter_narrative",
             LLMTask.PLAN_SUMMARY: "openrouter_summary",
             LLMTask.INGREDIENT_SYNTHESIS: "openrouter_narrative",
             LLMTask.STRATEGY_EXPRESSION: "openrouter_narrative",
@@ -178,7 +179,7 @@ class OpenRouterLLMGateway(LLMProvider):
     def _response_schema(task: LLMTask) -> dict[str, Any]:
         if task is LLMTask.EXCEL_MAPPING:
             return MappingSuggestion.model_json_schema()
-        if task is LLMTask.DECISION_NARRATIVE:
+        if task in (LLMTask.DECISION_NARRATIVE, LLMTask.CONVERSATIONAL_EXPLANATION):
             return DecisionNarrativeLLMResponse.model_json_schema()
         if task is LLMTask.PLAN_SUMMARY:
             return DecisionOverallSummaryLLMResponse.model_json_schema()

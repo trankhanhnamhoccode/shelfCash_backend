@@ -141,12 +141,64 @@ class DecisionSemanticEvidenceBuilder:
         facts.extend(self._alignment_facts(brief, demand_facts))
         facts.extend(self._selected_risk_facts(brief))
         if isinstance(package, dict):
+            facts.extend(self._budget_facts(brief, package))
             facts.extend(self._operational_risk_facts(brief, package))
             facts.extend(self._baseline_facts(brief, package))
             facts.extend(self._stress_facts(brief, package))
             facts.extend(self._warning_facts(brief, package))
             facts.extend(self._strategy_facts(brief, package))
         return sorted(facts, key=lambda item: item.fact_id)
+
+    def _budget_facts(self, brief: DecisionBriefFacts, package: dict[str, Any]) -> list[SemanticFact]:
+        """Materialize only the budget cap snapshot used for this Decision Run."""
+        technical = package.get("technical_metrics")
+        diagnostics = technical.get("scenario_diagnostics") if isinstance(technical, dict) else None
+        snapshot = diagnostics.get("budget_snapshot") if isinstance(diagnostics, dict) else None
+        strategies = package.get("strategies")
+        strategies = strategies if isinstance(strategies, dict) else {}
+        selected = strategies.get(brief.recommendation.strategy or "", {})
+        planned_spend = _number(selected.get("purchase_cost")) if isinstance(selected, dict) else None
+        if not isinstance(snapshot, dict) or snapshot.get("budget_limit") is None:
+            values: dict[str, JsonValue] = {
+                "availability": "not_available", "budget_limit": None,
+                "planned_spend": planned_spend, "exceeds_budget": None,
+                "over_by": None, "remaining_budget": None,
+                "budget_utilization_pct": None, "currency": None,
+            }
+            source_path = "package.technical_metrics.scenario_diagnostics.budget_snapshot"
+        else:
+            budget_limit = _number(snapshot.get("budget_limit"))
+            if budget_limit is None or planned_spend is None:
+                values = {
+                    "availability": "incomplete", "budget_limit": budget_limit,
+                    "planned_spend": planned_spend, "exceeds_budget": None,
+                    "over_by": None, "remaining_budget": None,
+                    "budget_utilization_pct": None, "currency": snapshot.get("currency"),
+                }
+            else:
+                exceeds = planned_spend > budget_limit
+                values = {
+                    "availability": "available", "budget_limit": budget_limit,
+                    "planned_spend": planned_spend, "exceeds_budget": exceeds,
+                    "over_by": max(planned_spend - budget_limit, 0.0),
+                    "remaining_budget": max(budget_limit - planned_spend, 0.0),
+                    "budget_utilization_pct": (planned_spend / budget_limit * 100) if budget_limit > 0 else None,
+                    "currency": snapshot.get("currency"),
+                }
+            source_path = "package.technical_metrics.scenario_diagnostics.budget_snapshot + package.strategies[selected].purchase_cost"
+        return [SemanticFact(
+            fact_id=_fact_id(brief.decision_run_id, "BUDGET_STATUS", SemanticFactScope.RUN, {}),
+            fact_type="BUDGET_STATUS", decision_run_id=brief.decision_run_id,
+            classification=SemanticFactClassification.OBSERVATION, scope=SemanticFactScope.RUN,
+            values=values,
+            source_evidence_ids=[_source_id(source_path)],
+            provenance=SemanticFactProvenance(
+                source_type="DecisionRun.package_json", source_module="app.services.budget_resolver",
+                source_path=source_path,
+                source_field="resolved Decision Run budget snapshot and selected purchase_cost",
+                semantics_note="No live budget settings are read for explanation.",
+            ),
+        )]
 
     def _operational_risk_facts(self, brief: DecisionBriefFacts, package: dict[str, Any]) -> list[SemanticFact]:
         """Expose already-computed selected-plan ingredient risks for ranking."""

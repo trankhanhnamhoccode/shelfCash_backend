@@ -236,7 +236,16 @@ class CoreProcurementAdapter:
             if engine_mode == "stochastic" and risk_scenarios
             else scenarios
         )
-        budget = BudgetResolver(self.session).resolve(store_id, decision_date, budget_override, horizon_end).limit
+        resolved_budget = BudgetResolver(self.session).resolve(
+            store_id, decision_date, budget_override, horizon_end,
+        )
+        budget = resolved_budget.limit
+        # Persist the exact cap used by this Decision Run.  Explanation must
+        # never re-resolve live store settings for a historical run.
+        scenario_metadata["budget_snapshot"] = {
+            **resolved_budget.trace,
+            "budget_limit": budget,
+        }
         # BOM contributions already include canonical recipe/yield/loss and
         # combo expansion.  Derive one base shortage assumption per decision.
         product_prices = {row.product_id: row.price for row in self.session.scalars(

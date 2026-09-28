@@ -716,7 +716,7 @@ def test_decision_narrative_openrouter_grounded_success():
         available = True
 
         async def generate_json(self, system, payload, **kwargs):
-            order = next(item for item in payload["evidence"] if item["type"] == "PROCUREMENT_QUANTITY")
+            order = next(item for item in payload["business_brief"] if item["type"] == "PROCUREMENT_QUANTITY")
             return {
                 "answer": "Kế hoạch ghi nhận đặt 60 lít Sữa tươi.",
                 "claims": [{"type": "PROCUREMENT_QUANTITY", "text": "Kế hoạch ghi nhận đặt 60 lít Sữa tươi.", "evidence_ids": [order["evidence_id"]]}],

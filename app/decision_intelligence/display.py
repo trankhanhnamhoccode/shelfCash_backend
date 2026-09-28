@@ -100,6 +100,11 @@ def add_numeric_display_contract(record: dict) -> dict:
             display_values["daily_demand_range"] = rendered
             allowed.append(rendered)
 
+    if record.get("type") == "BUDGET_STATUS" and isinstance(record.get("budget_utilization_pct"), (int, float)):
+        rendered = f"{vi_number(record['budget_utilization_pct'])}%"
+        display_values["budget_utilization_pct"] = rendered
+        allowed.append(rendered)
+
     record["display_values"] = display_values
     record["allowed_numeric_mentions"] = list(dict.fromkeys(item for item in allowed if item))
     return record

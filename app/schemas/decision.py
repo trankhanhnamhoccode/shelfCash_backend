@@ -1,7 +1,7 @@
 from datetime import date
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from shelfcash_core.inventory.contracts import InventorySimulationPackage
 from shelfcash_core.optimization.contracts import ProcurementDecisionLine
 
@@ -21,12 +21,24 @@ class DecisionRunRequest(_Strict):
     random_seed: int | None = None
 
 
+class ChatHistoryTurn(_Strict):
+    role: Literal["user", "assistant"]
+    content: str = Field(min_length=1, max_length=1000)
+
+
 class ExplanationRequest(_Strict):
     language: Literal["vi", "en"] = "vi"
     detail_level: Literal["simple", "manager", "technical"] = "simple"
     question: str | None = Field(default=None, max_length=2000)
     # Optional so existing question-only explanation requests remain valid.
     ingredient_id: str | None = Field(default=None, min_length=1, max_length=255)
+    history: list[ChatHistoryTurn] = Field(default_factory=list, max_length=6)
+
+    @model_validator(mode="after")
+    def bounded_history_content(self):
+        if sum(len(turn.content) for turn in self.history) > 4000:
+            raise ValueError("history content must not exceed 4000 characters")
+        return self
 
 
 class WhatIfRequest(_Strict):

@@ -383,6 +383,8 @@ def test_qwen_cannot_promote_a_question_number_to_an_authorized_claim():
         }
 
     response, _ = _explain(invented_quantity, question="Why order 70 kg of Banana?")
-    assert response.provider == "deterministic_fallback"
-    assert "records 30 kg" in response.answer
+    # CHAT-5 repairs the one uniquely scoped quantity from the cited
+    # procurement fact instead of accepting the question's invented number.
+    assert response.provider == "openrouter_qwen"
+    assert "30 kg" in response.answer
     assert all("70" not in str(claim.value) for claim in response.claims)

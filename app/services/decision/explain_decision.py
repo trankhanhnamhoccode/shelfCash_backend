@@ -17,18 +17,26 @@ logger = logging.getLogger("shelfcash.planning")
 class ExplainDecision:
     """Explain authorized Decision facts without recomputing or persisting them."""
 
-    def __init__(self, build_decision_brief, read_decision_package, settings, llm_provider, session_factory=None):
+    def __init__(self, build_decision_brief, read_decision_package, settings, llm_provider, session_factory=None, what_if_decision=None):
         self._build_decision_brief = build_decision_brief
         self._read_decision_package = read_decision_package
         self._session_factory = session_factory or getattr(build_decision_brief, "_session_factory", None)
         self._settings = settings
         self._llm_provider = llm_provider
+        self._what_if_decision = what_if_decision
 
     def explain(self, decision_run_id: str, body):
         from app.decision_intelligence.narrative import DecisionNarrativeProvider
         from app.decision_intelligence.semantic_evidence import DecisionSemanticEvidenceBuilder
 
         package = self._read_decision_package.read(decision_run_id)
+        if getattr(body, "history", None):
+            from app.services.decision.explanation_history import resolve_follow_up
+            history_brief = self._build_decision_brief.build(decision_run_id)
+            resolution = resolve_follow_up(body.question, body.history, history_brief)
+            if resolution.clarification:
+                return self._history_clarification(decision_run_id, body, resolution.clarification)
+            body = body.model_copy(update={"question": resolution.question})
         requested_ingredient_id = body.ingredient_id
         question_scope = classify_question_scope(
             body.question, has_explicit_ingredient_id=bool(requested_ingredient_id),
@@ -40,6 +48,8 @@ class ExplainDecision:
                 {"query_classification": "unsupported"},
                 http_status=422,
             )
+        if question_scope is QuestionScope.BUDGET_WHAT_IF:
+            return self._explain_budget_what_if(decision_run_id, body, package)
         if requested_ingredient_id:
             # Validate against the immutable Decision Run snapshot before any LLM call.
             # An ID in another store/current inventory must not be substituted here.
@@ -69,7 +79,7 @@ class ExplainDecision:
                 return DecisionNarrativeProvider(self._llm_provider, self._settings).explain(
                     brief, question=body.question, language=body.language,
                     detail_level=body.detail_level, semantic_facts=semantic_facts,
-                    question_scope=question_scope.value,
+                    question_scope=question_scope.value, history=getattr(body, "history", []),
                 ).model_dump(mode="json")
             resolution = self._resolve_question(body.question, brief.store_id, package)
             if resolution.status == "ambiguous":
@@ -94,13 +104,51 @@ class ExplainDecision:
             return DecisionNarrativeProvider(self._llm_provider, self._settings).explain(
                 brief, question=body.question, language=body.language,
                 detail_level=body.detail_level, semantic_facts=semantic_facts,
-                question_scope=question_scope.value,
+                question_scope=question_scope.value, history=getattr(body, "history", []),
             ).model_dump(mode="json")
         except PlanningError:
             raise
         except Exception:
             logger.exception("decision_intelligence_failed decision_run_id=%s", decision_run_id)
             return self._template_explanation(decision_run_id, body)
+
+    def _explain_budget_what_if(self, decision_run_id: str, body, package: dict):
+        from app.schemas.decision import WhatIfRequest
+        from app.services.decision.budget_what_if import current_budget_snapshot, resolve_budget_mutation
+
+        mutation = resolve_budget_mutation(body.question, current_budget=current_budget_snapshot(package))
+        if mutation.budget_limit is None:
+            message = {
+                "amount_required": "Bạn muốn đặt hoặc thay đổi ngân sách thành bao nhiêu để tôi so sánh?",
+                "current_budget_unavailable": "Decision Run này không có đủ thông tin ngân sách hiện tại để tính mức thay đổi.",
+                "invalid_amount": "Mức ngân sách sau thay đổi phải không âm.",
+            }.get(mutation.issue, "Không thể xác định mức ngân sách giả định.")
+            return self._budget_what_if_message(decision_run_id, body, message)
+        if self._what_if_decision is None:
+            return self._budget_what_if_message(decision_run_id, body, "Không thể chạy mô phỏng ngân sách ở thời điểm này.")
+        result = self._what_if_decision(decision_run_id, WhatIfRequest(budget_limit=mutation.budget_limit))
+        explanation = result.get("grounded_explanation") if isinstance(result, dict) else None
+        if isinstance(explanation, dict):
+            return explanation
+        return self._budget_what_if_message(decision_run_id, body, "Không thể tạo phần giải thích cho mô phỏng ngân sách.")
+
+    @staticmethod
+    def _budget_what_if_message(decision_run_id: str, body, message: str):
+        return {"source": "template", "language": body.language, "detail_level": body.detail_level,
+                "summary": message, "why_this_plan": [message], "main_risks": [], "tradeoffs": [],
+                "important_assumptions": ["A specific budget is required for a deterministic What-if."],
+                "decision_run_id": decision_run_id, "answer": message, "intent": "BUDGET_WHAT_IF",
+                "entities": {"ingredient_ids": [], "supplier_ids": []}, "claims": [], "citations": [],
+                "grounded": True, "provider": "shelfcash_decision_intelligence"}
+
+    @staticmethod
+    def _history_clarification(decision_run_id: str, body, message: str):
+        return {"source": "template", "language": body.language, "detail_level": body.detail_level,
+                "summary": message, "why_this_plan": [message], "main_risks": [], "tradeoffs": [],
+                "important_assumptions": ["Conversation history is context, not business evidence."],
+                "decision_run_id": decision_run_id, "answer": message, "intent": "CLARIFICATION",
+                "entities": {"ingredient_ids": [], "supplier_ids": []}, "claims": [], "citations": [],
+                "grounded": True, "provider": "shelfcash_decision_intelligence"}
 
     def _resolve_question(self, question, store_id: str, package: dict):
         if self._session_factory is None:
@@ -124,6 +172,7 @@ class ExplainDecision:
             brief, question=body.question, language=body.language,
             detail_level=body.detail_level, semantic_facts=semantic_facts,
             ingredient_id=ingredient_id,
+            history=getattr(body, "history", []),
         ).model_dump(mode="json")
 
     @staticmethod

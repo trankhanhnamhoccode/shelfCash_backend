@@ -4,9 +4,12 @@ from enum import StrEnum
 import re
 
 from app.core.names import normalize_lookup_name
+from app.services.decision.budget_what_if import is_budget_what_if_question
 
 
 class QuestionScope(StrEnum):
+    BUDGET_WHAT_IF = "budget_what_if"
+    BUDGET = "budget"
     ENTITY_OPERATIONAL = "entity_operational"
     PLAN_STRATEGY = "plan_strategy"
     GENERAL_DECISION = "general_decision"
@@ -29,6 +32,11 @@ _CLOSED_FACT_MARKERS = (
     "tong chi phi", "total cost", "ke hoach nao duoc chon", "phuong an nao duoc chon",
     "which plan is selected", "vuot ngan sach", "over budget",
 )
+_BUDGET_MARKERS = (
+    "ngan sach", "budget", "con du", "con bao nhieu tien", "con bao nhieu ngan sach",
+    "vuot bao nhieu", "lo ngan sach", "lo budget", "dung bao nhieu ngan sach",
+    "dung het ngan sach",
+)
 
 
 def classify_question_scope(question: str | None, *, has_explicit_ingredient_id: bool) -> QuestionScope:
@@ -46,6 +54,13 @@ def classify_question_scope(question: str | None, *, has_explicit_ingredient_id:
         return QuestionScope.UNSUPPORTED
     if has_explicit_ingredient_id:
         return QuestionScope.ENTITY_OPERATIONAL
+    if is_budget_what_if_question(question):
+        return QuestionScope.BUDGET_WHAT_IF
+    # Budget is a single bounded evidence family.  It must win over the older
+    # CLOSED_FACT marker so budget questions never fall through to generic
+    # narration without the Decision Run budget snapshot.
+    if _contains_any(normalized, _BUDGET_MARKERS):
+        return QuestionScope.BUDGET
     if _contains_any(normalized, _CLOSED_FACT_MARKERS):
         return QuestionScope.CLOSED_FACT
     if _contains_any(normalized, _PLAN_STRATEGY_MARKERS):
