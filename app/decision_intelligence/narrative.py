@@ -17,6 +17,7 @@ from app.decision_intelligence.adapter import (
 )
 from app.decision_intelligence.contracts import Citation, ConversationalExplanationLLMResponse, DecisionBriefFacts, DecisionExplanationResponse, ExplanationClaim
 from app.decision_intelligence.semantic_state import validate_semantic_state
+from app.decision_intelligence.causal_assertion import asserts_cause, is_causal_limitation
 from app.decision_intelligence.communication_plan import narrative_communication_plan
 from app.decision_intelligence.display import add_numeric_display_contract, purchase_cost_display
 from app.decision_intelligence.narrative_retrieval import retrieve_narrative_evidence
@@ -32,6 +33,7 @@ from app.decision_intelligence.numeric_authority import (
 )
 from app.llm.tasks import LLMFailureStage, LLMTask
 from app.llm.runtime import generate_json_sync
+from app.services.decision.explanation_strategy_aliases import mentioned_strategies
 
 logger = logging.getLogger("shelfcash.decision_narrative")
 
@@ -398,15 +400,28 @@ def _business_brief(selected: list[dict[str, Any]]) -> list[dict[str, str]]:
             magnitude = (item.get("display_values") or {}).get("absolute_gap_magnitude", values.get("absolute_gap_magnitude"))
             text = f"Derived comparison: planned purchase is {direction} p50 demand by {magnitude} {values.get('unit')}. This gap is not a shortage or a procurement reason."
         elif fact_type == "NO_PLANNED_PURCHASE_BASELINE":
-            text = f"Baseline scenario excluding planned Decision Run purchases (existing inbound retained): simulated shortage is {values.get('shortage_quantity')} {values.get('unit')}. This is not selected-plan shortage."
+            display = item.get("display_values") or {}
+            shortage = display.get("shortage_quantity", values.get("shortage_quantity"))
+            fill_rate = display.get("fill_rate")
+            stockout = display.get("projected_stockout_date", values.get("projected_stockout_date"))
+            text = f"No-purchase baseline: excluding planned purchases from this Decision Run (existing inbound retained), simulated shortage is {shortage} {values.get('unit')}."
+            if fill_rate is not None:
+                text += f" Fill rate: {fill_rate}."
+            if stockout:
+                text += f" Projected stockout date: {stockout}."
+            text += " This is a baseline scenario, not selected-plan shortage."
         elif fact_type == "PROCUREMENT_REASON":
             text = f"Authoritative procurement reason: {values.get('meaning') or values.get('reason')}."
+        elif fact_type == "PLAN_OVERVIEW":
+            text = f"Selected plan: {values.get('strategy')}; recommendation available: {values.get('available')}."
+        elif fact_type == "STRATEGY_SELECTION_PROOF":
+            text = f"Verified selection rule: {values.get('rule')}; selected: {values.get('selected_strategy')}; eligible candidates: {values.get('eligible_strategies')}. Only this proof authorizes a selection cause."
         elif fact_type == "STRATEGY_COMPARISON":
-            entities = item.get("entities") if isinstance(item.get("entities"), dict) else {}
+            entities = item.get("entities") if isinstance(item.get("entities"), dict) else values
             deltas = "; ".join(f"{key}: {value}" for key, value in values.items() if value is not None and key.endswith("_delta"))
             text = f"Comparison {entities.get('left_strategy')} vs {entities.get('right_strategy')}. {deltas or 'No authoritative delta is available.'}"
         elif fact_type == "STRATEGY_CANDIDATE_METRICS":
-            entities = item.get("entities") if isinstance(item.get("entities"), dict) else {}
+            entities = item.get("entities") if isinstance(item.get("entities"), dict) else values
             useful = "; ".join(f"{key}: {value}" for key, value in values.items() if value is not None and key in {"purchase_cost", "fill_rate", "stockout_probability", "shortage_quantity", "feasible"})
             text = f"Strategy {entities.get('strategy')}: {useful}."
         else:
@@ -423,6 +438,7 @@ def _turn_hint(intent: str) -> str:
         "STRATEGY_COMPARISON": "Explain only the requested strategy trade-off from the supplied comparison facts.",
         "PLAN_STRATEGY": "Explain the selected strategy and relevant trade-offs.",
         "WHY_PROCUREMENT": "Use an authoritative procurement reason only if supplied. Otherwise describe the recommendation, demand, derived comparison, and baseline as separate facts; say the exact cause is unavailable.",
+        "BASELINE": "Answer the no-purchase scenario directly from the baseline card. Keep it distinct from the selected plan.",
     }
     return hints.get(intent, "Answer the user's question from the supplied facts without summarizing the whole plan.")
 
@@ -444,6 +460,32 @@ class _ConversationalPayload(dict):
         if key == "target" and self._legacy_target is not None:
             return self._legacy_target
         return super().__getitem__(key)
+
+
+def _fallback_with_provenance(fallback, lines: list[tuple[str, dict]], evidence_items: list):
+    """Publish only sentences whose selected fact has a public citation."""
+    by_id = {item.evidence_id: item for item in evidence_items}
+    supported: list[str] = []
+    claims: list[ExplanationClaim] = []
+    cited: dict[str, Citation] = {}
+    for sentence, record in lines:
+        if not record:
+            continue
+        source_ids = list(dict.fromkeys(record.get("evidence_ids") or [record.get("evidence_id")]))
+        if not source_ids or any(source_id not in by_id for source_id in source_ids):
+            continue
+        supported.append(sentence)
+        claims.append(ExplanationClaim(type=str(record.get("type") or "FACT"), value=sentence, evidence_ids=source_ids))
+        for source_id in source_ids:
+            item = by_id[source_id]
+            cited[source_id] = Citation(evidence_id=source_id, label=item.text, source_type=item.source_object)
+    if not supported:
+        return fallback
+    answer = " ".join(supported)
+    return fallback.model_copy(update={
+        "summary": answer, "answer": answer, "why_this_plan": supported,
+        "claims": claims, "citations": list(cited.values()), "grounded": True,
+    })
 
 
 class DecisionNarrativeProvider:
@@ -477,10 +519,12 @@ class DecisionNarrativeProvider:
             )
         if question_scope == "plan_strategy":
             records = self._selected_semantic_records(brief, question, detail_level, semantic_facts, question_scope)
-            fallback = self._semantic_plan_fallback(fallback, records, language)
+            evidence_items = self.deterministic._evidence(brief, semantic_facts=semantic_facts).items
+            fallback = self._semantic_plan_fallback(fallback, records, language, evidence_items)
         elif question_scope == "budget":
             records = self._selected_semantic_records(brief, question, detail_level, semantic_facts, question_scope)
-            fallback = self._semantic_budget_fallback(fallback, records, language)
+            evidence_items = self.deterministic._evidence(brief, semantic_facts=semantic_facts).items
+            fallback = self._semantic_budget_fallback(fallback, records, language, evidence_items)
         if not self.llm_provider or not self.llm_provider.available:
             return fallback
         return self._qwen_or_fallback(
@@ -535,9 +579,9 @@ class DecisionNarrativeProvider:
             selected_ids = set(plan.evidence_ids)
             selected = [item for item in structured if item["evidence_id"] in selected_ids]
             if question_scope == "plan_strategy":
-                fallback = self._semantic_plan_fallback(fallback, selected, language)
+                fallback = self._semantic_plan_fallback(fallback, selected, language, evidence.items)
             elif question_scope == "budget":
-                fallback = self._semantic_budget_fallback(fallback, selected, language)
+                fallback = self._semantic_budget_fallback(fallback, selected, language, evidence.items)
             payload = _ConversationalPayload({
                 "question": resolved_question,
                 "task_hint": _turn_hint(str(intent)),
@@ -650,31 +694,29 @@ class DecisionNarrativeProvider:
         return retrieval.evidence
 
     @staticmethod
-    def _semantic_plan_fallback(fallback, records: list[dict], language: str):
+    def _semantic_plan_fallback(fallback, records: list[dict], language: str, evidence_items: list):
         """Render only already-materialized strategy facts; never calculate."""
         overview = next((item for item in records if item.get("type") == "PLAN_OVERVIEW"), None)
         selected = str((overview or {}).get("strategy") or "").upper()
         proof = next((item for item in records if item.get("type") == "STRATEGY_SELECTION_PROOF"), None)
         comparisons = [item for item in records if item.get("type") == "STRATEGY_COMPARISON"]
+        lines: list[tuple[str, dict]] = []
         if proof and proof.get("rule") == "lowest_valid_candidate_cost_then_strategy_name":
-            answer = f"{selected} được chọn vì đây là phương án có chi phí mua thấp nhất trong các phương án đủ điều kiện."
+            lines.append((f"{selected} được chọn vì đây là phương án có chi phí mua thấp nhất trong các phương án đủ điều kiện.", proof))
         elif selected:
-            answer = f"{selected} là phương án được chọn, nhưng dữ liệu Decision Run hiện không đủ để xác nhận lý do lựa chọn."
+            lines.append((f"{selected} là phương án được chọn, nhưng dữ liệu Decision Run hiện không đủ để xác nhận lý do lựa chọn.", overview))
         else:
             return fallback
-        rendered = []
         for item in comparisons[:2]:
             left, right = str(item.get("left_strategy", "")).upper(), str(item.get("right_strategy", "")).upper()
             if isinstance(item.get("purchase_cost_delta"), (int, float)) and item["purchase_cost_delta"] < 0:
-                rendered.append(f"{left} có chi phí mua thấp hơn {right}.")
+                lines.append((f"{left} có chi phí mua thấp hơn {right}.", item))
             elif isinstance(item.get("stockout_probability_delta"), (int, float)) and item["stockout_probability_delta"] < 0:
-                rendered.append(f"{left} có xác suất thiếu hàng thấp hơn {right}.")
-        if rendered:
-            answer = " ".join([answer, *rendered])
-        return fallback.model_copy(update={"summary": answer, "answer": answer, "why_this_plan": [answer]})
+                lines.append((f"{left} có xác suất thiếu hàng thấp hơn {right}.", item))
+        return _fallback_with_provenance(fallback, lines, evidence_items)
 
     @staticmethod
-    def _semantic_budget_fallback(fallback, records: list[dict], language: str):
+    def _semantic_budget_fallback(fallback, records: list[dict], language: str, evidence_items: list):
         """Answer budget questions from the persisted snapshot, never live settings."""
         budget = next((item for item in records if item.get("type") == "BUDGET_STATUS"), None)
         if not budget or budget.get("availability") != "available":
@@ -705,7 +747,7 @@ class DecisionNarrativeProvider:
                 rendered = budget.get("display_values", {}).get("budget_utilization_pct")
                 if rendered:
                     answer += f" Budget utilization is {rendered}." if language == "en" else f" Mức sử dụng ngân sách là {rendered}."
-        return fallback.model_copy(update={"summary": answer, "answer": answer, "why_this_plan": [answer]})
+        return _fallback_with_provenance(fallback, [(answer, budget)] if budget else [], evidence_items)
 
     def _guard(
         self, raw, structured, evidence_items, brief, language, detail_level, intent,
@@ -809,15 +851,17 @@ class DecisionNarrativeProvider:
             types.add("BUDGET_STATUS")
         if any(token in lowered for token in ("nhập", "đặt", "order", "ordering", "procurement")):
             types.add("PROCUREMENT_QUANTITY")
-        if any(token in lowered for token in ("balanced", "lean", "protected", "cân bằng", "tiết kiệm", "an toàn", "strategy", "chiến lược", "fill rate", "mức đáp ứng", "purchase cost", "chi phí mua", "stockout")):
+        if mentioned_strategies(text) or any(token in lowered for token in ("cân bằng", "tiết kiệm", "an toàn", "strategy", "chiến lược", "fill rate", "mức đáp ứng", "purchase cost", "chi phí mua", "stockout")):
             if any(token in lowered for token in ("được chọn", "selected", "lowest", "thấp nhất", "cheapest")):
                 if any(token in lowered for token in ("lowest", "thấp nhất", "cheapest")):
                     types.update({"STRATEGY_SELECTION_PROOF", "PLAN_OVERVIEW"})
+                elif not any(token in lowered for token in ("than", "hơn", "so với", "compared")):
+                    types.add("PLAN_OVERVIEW")
                 else:
                     types.add("STRATEGY_COMPARISON")
             else:
                 types.add("STRATEGY_COMPARISON")
-        if any(token in lowered for token in ("vì", "because", "due to", "nguyên nhân")):
+        if asserts_cause(text):
             causal = [item for item in candidates if item.get("classification") == "CAUSAL" or item.get("type") == "PROCUREMENT_REASON"]
             if causal:
                 candidates = causal
@@ -826,17 +870,14 @@ class DecisionNarrativeProvider:
             if typed:
                 candidates = typed
         normalized = _semantic_normalize(text)
-        mentioned_strategies = {
-            strategy for strategy in ("balanced", "lean", "protected")
-            if any(alias in normalized for alias in _strategy_aliases(strategy))
-        }
-        if len(mentioned_strategies) >= 2:
+        mentioned = mentioned_strategies(text)
+        if len(mentioned) >= 2:
             pairwise = [
                 item for item in candidates
                 if item.get("type") != "STRATEGY_COMPARISON" or {
                     _semantic_normalize(item.get("left_strategy")),
                     _semantic_normalize(item.get("right_strategy")),
-                } <= mentioned_strategies
+                } <= mentioned
             ]
             if pairwise:
                 candidates = pairwise
@@ -1001,7 +1042,7 @@ class DecisionNarrativeProvider:
     def _validate_ingredient_semantics(text: str, items: list[dict]):
         normalized = _semantic_normalize(text).replace("đ", "d")
         ingredient_scope = any(item.get("type") in {"PROCUREMENT_QUANTITY", "DEMAND_HORIZON_SUMMARY", "DEMAND_ORDER_ALIGNMENT", "NO_PLANNED_PURCHASE_BASELINE", "INGREDIENT_OPERATIONAL_RISK"} for item in items)
-        if ingredient_scope and any(word in normalized for word in ("thieu hut", "du kien thieu", "shortage")):
+        if ingredient_scope and not is_causal_limitation(text) and any(word in normalized for word in ("thieu hut", "du kien thieu", "shortage")):
             shortage_items = [item for item in items if item.get("type") in {"NO_PLANNED_PURCHASE_BASELINE", "INGREDIENT_OPERATIONAL_RISK"}]
             if not shortage_items:
                 raise ValueError("unsupported_shortage_concept")
@@ -1009,7 +1050,14 @@ class DecisionNarrativeProvider:
             if mentioned_shortage:
                 mention = next(iter_numeric_mentions(mentioned_shortage.group(1)), None)
                 shortage_facts = [fact for fact in build_numeric_authority(shortage_items) if fact.semantic_key == "shortage_quantity"]
-                if mention is None or not any(equivalent_or_rounded(mention, fact, approximate=False) for fact in shortage_facts):
+                if mention is None or not any(
+                    equivalent_or_rounded(mention, fact, approximate=False)
+                    or any(
+                        (parsed := parse_numeric_mention(display)) is not None and parsed[0] == mention.value
+                        for display in fact.display_mentions
+                    )
+                    for fact in shortage_facts
+                ):
                     raise ValueError("unsupported_shortage_quantity")
             if any(phrase in normalized for phrase in ("ke hoach hien tai thieu", "selected plan shortage", "current plan shortage")):
                 if not any(item.get("type") == "INGREDIENT_OPERATIONAL_RISK" for item in shortage_items):
@@ -1056,20 +1104,7 @@ class DecisionNarrativeProvider:
 
     @staticmethod
     def _validate_causal_language(text: str, items: list[dict]):
-        lowered = f" {text.lower()} "
-        causal_markers = (
-            " vÃ¬ ", " do ", " nÃªn ", " dáº«n Ä‘áº¿n ", " Ä‘á»ƒ trÃ¡nh ",
-            " because ", " due to ", " therefore ", " caused by ",
-        )
-        # Keep the Vietnamese markers ASCII-escaped: this file contains
-        # historical mojibake literals, while model output is UTF-8 text.
-        causal_markers = (
-            " v\u00ec ", " do ", " n\u00ean ", " d\u1eabn \u0111\u1ebfn ",
-            " b\u1edfi ", " do \u0111\u00f3 ", " khi\u1ebfn ", " \u0111\u1ec3 tr\u00e1nh ",
-            " nguy\u00ean nh\u00e2n ", " xu\u1ea5t ph\u00e1t t\u1eeb ",
-            " because ", " due to ", " therefore ", " caused by ",
-        )
-        if not any(marker in lowered for marker in causal_markers):
+        if not asserts_cause(text):
             return
         if any(item.get("classification") == "CAUSAL" or item.get("type") == "PROCUREMENT_REASON" for item in items):
             return
@@ -1120,8 +1155,8 @@ def _semantic_normalize(text: str) -> str:
 def _strategy_aliases(strategy: object) -> tuple[str, ...]:
     normalized = _semantic_normalize(str(strategy))
     return {
-        "balanced": ("balanced", "can bang"),
-        "protected": ("protected", "an toan"),
+        "balanced": ("balanced", "balance", "can bang"),
+        "protected": ("protected", "protect", "an toan"),
         "lean": ("lean", "tiet kiem"),
     }.get(normalized, (normalized,))
 

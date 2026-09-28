@@ -124,7 +124,7 @@ def test_why_brief_includes_authoritative_no_purchase_baseline():
     )
     cards = gateway.payload["business_brief"]
     baseline = next(card for card in cards if card["type"] == "NO_PLANNED_PURCHASE_BASELINE")
-    assert "8.95" in baseline["text"]
+    assert "8,95" in baseline["text"]
     assert "existing inbound retained" in baseline["text"]
 
 

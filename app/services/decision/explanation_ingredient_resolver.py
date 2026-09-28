@@ -72,7 +72,7 @@ class ExplanationIngredientResolver:
         prefix_matches = [
             term for term in [*canonical, *aliases]
             if any(
-                len(token) >= 3 and _contains_phrase(lookup_question, token)
+                len(token) >= 3 and _family_token_present(lookup_question, token)
                 for token in self._term_key(term, "canonical_normalized").split()
             )
         ]
@@ -167,3 +167,14 @@ class ExplanationIngredientResolver:
 def _contains_phrase(text: str, term: str) -> bool:
     return bool(re.search(rf"(?<![a-z0-9]){re.escape(term)}(?![a-z0-9])", text))
 
+
+_AFTER_FAMILY = {"co", "can", "trong", "nay", "do", "khong", "thi", "sao", "duoc", "voi", "va", "hay", "la", "nhap", "mua", "dat", "need", "in", "the", "plan", "why", "order", "buy"}
+
+
+def _family_token_present(question: str, token: str) -> bool:
+    """Allow a bare family name, but not an unknown qualified ingredient."""
+    for match in re.finditer(rf"(?<![a-z0-9]){re.escape(token)}(?![a-z0-9])", question):
+        following = re.match(r"\s+([a-z0-9]+)", question[match.end():])
+        if following is None or following.group(1) in _AFTER_FAMILY:
+            return True
+    return False

@@ -1,6 +1,7 @@
 """Focused application orchestration for one persisted Decision explanation."""
 
 import logging
+import re
 
 from app.core.exceptions import PlanningError
 from app.services.decision.decision_run_ingredient_scope import decision_run_ingredient_ids
@@ -72,6 +73,23 @@ class ExplainDecision:
             )
         try:
             brief = self._build_decision_brief.build(decision_run_id)
+            resolution = None
+            if question_scope not in {QuestionScope.BUDGET, QuestionScope.BUDGET_WHAT_IF, QuestionScope.PLAN_STRATEGY, QuestionScope.CLOSED_FACT}:
+                resolution = self._resolve_question(body.question, brief.store_id, package)
+                if resolution.status == "ambiguous":
+                    names = [name for _, name in resolution.candidates]
+                    message = "Bạn muốn hỏi " + (" hay ".join(names) if len(names) == 2 else ", ".join(names[:-1]) + " hay " + names[-1]) + "?"
+                    return self._history_clarification(decision_run_id, body, message)
+                if resolution.ingredient_id:
+                    if resolution.source == "decision_run_id":
+                        from app.decision_intelligence.adapter import ShelfCashDecisionIntelligenceAdapter
+                        return ShelfCashDecisionIntelligenceAdapter().explain(
+                            brief, question=body.question, language=body.language,
+                            detail_level=body.detail_level,
+                        ).model_dump(mode="json")
+                    return self._explain_ingredient(
+                        decision_run_id, body, package, resolution.ingredient_id, brief=brief,
+                    )
             if question_scope is not QuestionScope.ENTITY_OPERATIONAL:
                 # QuestionScope is authoritative for broad retrieval scope.
                 # Slice C gives PLAN_STRATEGY a distinct evidence path.
@@ -81,14 +99,7 @@ class ExplainDecision:
                     detail_level=body.detail_level, semantic_facts=semantic_facts,
                     question_scope=question_scope.value, history=getattr(body, "history", []),
                 ).model_dump(mode="json")
-            resolution = self._resolve_question(body.question, brief.store_id, package)
-            if resolution.status == "ambiguous":
-                raise PlanningError(
-                    "INGREDIENT_RESOLUTION_AMBIGUOUS",
-                    "Unable to identify a unique ingredient from the question.",
-                    {"mention": resolution.mention, "candidates": [{"ingredient_id": ingredient_id, "ingredient_name": name} for ingredient_id, name in resolution.candidates]},
-                    http_status=422,
-                )
+            resolution = resolution or self._resolve_question(body.question, brief.store_id, package)
             if resolution.status == "not_found" and resolution.mention:
                 raise PlanningError(
                     "INGREDIENT_RESOLUTION_NOT_FOUND",
@@ -96,16 +107,9 @@ class ExplainDecision:
                     {"mention": resolution.mention, "resolution_scope": "decision_run"},
                     http_status=422,
                 )
-            if resolution.ingredient_id:
-                return self._explain_ingredient(
-                    decision_run_id, body, package, resolution.ingredient_id, brief=brief,
-                )
-            semantic_facts = DecisionSemanticEvidenceBuilder().build(brief, package)
-            return DecisionNarrativeProvider(self._llm_provider, self._settings).explain(
-                brief, question=body.question, language=body.language,
-                detail_level=body.detail_level, semantic_facts=semantic_facts,
-                question_scope=question_scope.value, history=getattr(body, "history", []),
-            ).model_dump(mode="json")
+            return self._history_clarification(
+                decision_run_id, body, "Bạn muốn hỏi nguyên liệu nào trong Decision Run này?",
+            )
         except PlanningError:
             raise
         except Exception:
@@ -151,8 +155,11 @@ class ExplainDecision:
                 "grounded": True, "provider": "shelfcash_decision_intelligence"}
 
     def _resolve_question(self, question, store_id: str, package: dict):
+        from app.services.decision.explanation_ingredient_resolver import IngredientResolution
+        for ingredient_id in sorted(decision_run_ingredient_ids(package), key=lambda value: (-len(value), value)):
+            if re.search(rf"(?<![\w-]){re.escape(ingredient_id)}(?![\w-])", question or "", re.IGNORECASE):
+                return IngredientResolution(status="resolved", ingredient_id=ingredient_id, mention=ingredient_id, source="decision_run_id")
         if self._session_factory is None:
-            from app.services.decision.explanation_ingredient_resolver import IngredientResolution
             return IngredientResolution(status="not_found")
         with self._session_factory() as session:
             return ExplanationIngredientResolver(session).resolve(

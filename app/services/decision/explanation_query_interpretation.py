@@ -5,6 +5,7 @@ import re
 
 from app.core.names import normalize_lookup_name
 from app.services.decision.budget_what_if import is_budget_what_if_question
+from app.services.decision.explanation_strategy_aliases import mentioned_strategies
 
 
 class QuestionScope(StrEnum):
@@ -63,10 +64,14 @@ def classify_question_scope(question: str | None, *, has_explicit_ingredient_id:
         return QuestionScope.BUDGET
     if _contains_any(normalized, _CLOSED_FACT_MARKERS):
         return QuestionScope.CLOSED_FACT
+    if mentioned_strategies(question):
+        return QuestionScope.PLAN_STRATEGY
     if _contains_any(normalized, _PLAN_STRATEGY_MARKERS):
         return QuestionScope.PLAN_STRATEGY
     if _contains_any(normalized, _GENERAL_DECISION_MARKERS):
         return QuestionScope.GENERAL_DECISION
+    if any(marker in normalized for marker in ("bo nguyen lieu", "bo khoi don")):
+        return QuestionScope.ENTITY_OPERATIONAL
     if _contains_any(normalized, _ENTITY_OPERATIONAL_MARKERS):
         return QuestionScope.ENTITY_OPERATIONAL
     if _contains_any(normalized, _WHY_MARKERS):

@@ -5,6 +5,8 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+from app.services.decision.explanation_strategy_aliases import mentioned_strategies
+
 
 @dataclass(frozen=True)
 class NarrativeRetrieval:
@@ -25,7 +27,7 @@ def resolve_ingredient_id(brief, question: str, explicit_id: str | None = None) 
 
 def detect_intent(question: str) -> str:
     lowered = question.lower()
-    if any(token in lowered for token in ("nếu không", "không nhập", "without purchase", "without ordering", "no new")):
+    if any(token in lowered for token in ("nếu không", "không nhập", "không mua", "bỏ nguyên liệu", "bỏ khỏi đơn", "without purchase", "without ordering", "no new")):
         return "BASELINE"
     if any(token in lowered for token in ("tại sao", "vì sao", "why")) or ("cần nhập" in lowered and not any(token in lowered for token in ("bao nhiêu", "lượng", "quantity"))):
         return "WHY_PROCUREMENT"
@@ -37,7 +39,7 @@ def detect_intent(question: str) -> str:
         return "DEMAND_HORIZON"
     if any(token in lowered for token in ("thiếu", "stockout", "rủi ro", "risk")):
         return "RISK"
-    if any(token in lowered for token in ("chiến lược", "strategy", "lean", "balanced", "protected", "an toàn", "cân bằng")):
+    if mentioned_strategies(question) or any(token in lowered for token in ("chiến lược", "strategy", "an toàn", "cân bằng")):
         return "STRATEGY_COMPARISON"
     return "PLAN"
 
@@ -90,7 +92,7 @@ def _retrieve_plan_strategy(records: list[dict[str, Any]], question: str) -> Nar
     """Select existing plan/strategy facts without re-inferring broad scope."""
     lowered = question.lower()
     selected = next((str(item.get("strategy")).lower() for item in records if item.get("type") == "PLAN_OVERVIEW" and item.get("strategy")), None)
-    mentioned = {name for name in ("lean", "balanced", "protected") if re.search(rf"(?<![a-z0-9]){name}(?![a-z0-9])", lowered)}
+    mentioned = mentioned_strategies(question)
     alternatives = mentioned - ({selected} if selected else set())
     tradeoff = any(token in lowered for token in ("trade-off", "trade off", "tradeoff"))
     comparison = len(mentioned) >= 2 or bool(alternatives)

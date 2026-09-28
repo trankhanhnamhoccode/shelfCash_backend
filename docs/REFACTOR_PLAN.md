@@ -4,6 +4,15 @@
 
 The current Decision Explanation path validates explicit budget availability and exceeded-state assertions against `BUDGET_STATUS`, keeps numeric values under Numeric Authority, and gives ingredient why-questions typed recommendation/demand/alignment/baseline cards. The signed alignment renderer now preserves direction. There is no new public API, persistence, model-setting, or ADR change. The current backend lacks an authoritative `PROCUREMENT_REASON` fact; future causal decomposition would require a separate deterministic business decision. Live provider quality remains unmeasured locally without an OpenRouter credential.
 
+## CHAT-9 conversational resolution and public provenance — COMPLETE (2026-09-29)
+
+- [x] Distinguish asserted procurement causality from negated/uncertain statements without relaxing the positive-cause guard.
+- [x] Place persisted no-purchase baseline first for no-purchase questions; preserve backend display quantity and Numeric Authority rejection of unsupported shortage values.
+- [x] Resolve current-run ingredient names before generic PLAN narration; clarify ambiguous family names, preserve unique/exact matches, and keep unknown qualified names away from unrelated procurement evidence. Bounded client history can complete a clarification, with no server-side memory.
+- [x] Normalize high-confidence strategy aliases including `BALANCE`; route pairwise questions to selected/comparison facts.
+- [x] Attach matching claims and citations to every rendered deterministic strategy comparison/selection sentence and budget fallback sentence.
+- [x] Preserve answer-only Qwen schema, business authority, frozen narrative defaults, public DTO/OpenAPI, and no-persistence-change boundary. New CHAT-9 regressions **20 passed**; final `pytest -q` **784 passed, 23 warnings** (including one local pytest-cache access warning). Live model quality remains unmeasured without a credential.
+
 This document is a migration plan, not runtime truth. Runtime facts come from current code/tests and the two pre-refactor AS-IS snapshots. Accepted target intent comes only from `DECISIONS.md`.
 
 ## Refactor principles

@@ -84,7 +84,7 @@ def build_numeric_authority(evidence: list[dict[str, Any]]) -> list[AuthorizedNu
                 if legacy_kind is None:
                     legacy_kind = (
                         NumericKind.QUANTITY
-                        if str(item.get("type")) in {"DEMAND_HORIZON_SUMMARY", "DEMAND_ORDER_ALIGNMENT", "PROCUREMENT_QUANTITY"}
+                        if str(item.get("type")) in {"DEMAND_HORIZON_SUMMARY", "DEMAND_ORDER_ALIGNMENT", "PROCUREMENT_QUANTITY", "NO_PLANNED_PURCHASE_BASELINE", "INGREDIENT_OPERATIONAL_RISK"}
                         else NumericKind.COUNT
                     )
                 facts.append(AuthorizedNumericFact(
