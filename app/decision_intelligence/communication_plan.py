@@ -88,6 +88,12 @@ def narrative_communication_plan(records: list[dict[str, Any]], intent: str) -> 
     elif upper_intent == "BASELINE":
         primary = _ids(records, lambda item: item.get("type") == "NO_PLANNED_PURCHASE_BASELINE", 1)
         supporting = []
+    elif upper_intent == "RISK":
+        primary = _ids(records, lambda item: item.get("type") in {
+            "SELECTED_PLAN_RISK_METRICS", "RISK", "INGREDIENT_OPERATIONAL_RISK",
+            "STRESS_SHORTAGE_OBSERVED", "STRESS_CAPACITY_VIOLATION",
+        }, 2)
+        supporting = []
     elif any(token in upper_intent for token in ("PLAN_SELECTION", "STRATEGY_COMPARISON", "PLAN_TRADEOFF")):
         primary = _ids(records, lambda item: item.get("type") in {"PLAN_OVERVIEW", "STRATEGY_COMPARISON", "STRATEGY_SELECTION_PROOF"})
         supporting = _ids(records, lambda item: item.get("type") == "STRATEGY_CANDIDATE_METRICS")

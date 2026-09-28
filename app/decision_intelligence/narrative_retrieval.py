@@ -82,7 +82,16 @@ def retrieve_narrative_evidence(brief, records: list[dict[str, Any]], *, questio
             selected.extend(types("DEMAND_ORDER_ALIGNMENT")[:1])
         return NarrativeRetrieval(intent, target, _unique(selected), False)
     if intent == "RISK":
-        return NarrativeRetrieval(intent, target, _unique(types("INGREDIENT_OPERATIONAL_RISK", "RISK", "STRESS_SHORTAGE_OBSERVED")[:2]), False)
+        selected = [item for item in types("SELECTED_PLAN_RISK_METRICS", "RISK") if any(
+            isinstance(item.get(key), (int, float)) and item[key] > 0
+            for key in ("shortage_quantity", "stockout_probability")
+        ) or isinstance(item.get("expected_fill_rate"), (int, float)) and item["expected_fill_rate"] < 1]
+        operational = types("INGREDIENT_OPERATIONAL_RISK")
+        stress = [item for item in types("STRESS_SHORTAGE_OBSERVED") if item.get("shortage_quantity") is not None]
+        stress_capacity = [item for item in types("STRESS_CAPACITY_VIOLATION") if item.get("capacity_violation_quantity") is not None]
+        warnings = [item for item in types("STRESS_SHORTAGE_OBSERVED", "STRESS_CAPACITY_VIOLATION") if item.get("shortage_quantity") is None and item.get("capacity_violation_quantity") is None]
+        limitations = [item for item in scoped if item.get("classification") == "LIMITATION"]
+        return NarrativeRetrieval(intent, target, _unique([*selected[:1], *operational[:2], *stress[:2], *stress_capacity[:1], *warnings[:1], *limitations[:1]]), False)
     if intent == "STRATEGY_COMPARISON":
         return NarrativeRetrieval(intent, target, _unique(types("STRATEGY_COMPARISON", "STRATEGY_SELECTION_PROOF", "STRATEGY_CANDIDATE_METRICS")), False)
     return NarrativeRetrieval(intent, target, _unique(types("PLAN_OVERVIEW", "PROCUREMENT_QUANTITY", "SELECTED_PLAN_RISK_METRICS")[:3]), False)

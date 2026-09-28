@@ -77,9 +77,16 @@ class ExplainDecision:
             if question_scope not in {QuestionScope.BUDGET, QuestionScope.BUDGET_WHAT_IF, QuestionScope.PLAN_STRATEGY, QuestionScope.CLOSED_FACT}:
                 resolution = self._resolve_question(body.question, brief.store_id, package)
                 if resolution.status == "ambiguous":
-                    names = [name for _, name in resolution.candidates]
-                    message = "Bạn muốn hỏi " + (" hay ".join(names) if len(names) == 2 else ", ".join(names[:-1]) + " hay " + names[-1]) + "?"
-                    return self._history_clarification(decision_run_id, body, message)
+                    raise PlanningError(
+                        "INGREDIENT_RESOLUTION_AMBIGUOUS",
+                        "Multiple Decision Run ingredients match the question.",
+                        {"mention": resolution.mention, "resolution_scope": "decision_run",
+                         "candidates": [
+                             {"ingredient_id": ingredient_id, "ingredient_name": name}
+                             for ingredient_id, name in resolution.candidates
+                         ]},
+                        http_status=422,
+                    )
                 if resolution.ingredient_id:
                     if resolution.source == "decision_run_id":
                         from app.decision_intelligence.adapter import ShelfCashDecisionIntelligenceAdapter

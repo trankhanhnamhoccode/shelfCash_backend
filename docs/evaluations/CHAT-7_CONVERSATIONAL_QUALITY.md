@@ -22,6 +22,16 @@ Representative simulated RAW → FINAL: negated causal answer → `ACCEPTED`; po
 
 **PARTIAL — provider quality is not measured.** The local runtime has no `OPENROUTER_API_KEY`; no model call, fabricated answer, or quality conclusion was made.
 
+## Final corrective patch before CHAT Exit Review (2026-09-29)
+
+User-supplied live risk evidence showed a Qwen risk answer rejected as `unsupported_causal_concept`, followed by generic English critic/recommendation fallback. Deterministic fixture reproduction traced this to missing direct risk prioritization, an overly narrow risk concept allow-list, and the unrelated generic fallback. Risk facts now carry explicit selected-plan/stress/conservative scenario labels; the fallback uses persisted risk evidence and matching public claims/citations. An unsupported causal sentence still falls back, while “Rủi ro chính là nguy cơ thiếu hàng trong kịch bản stress” is accepted when stress evidence exists. Warning codes alone never supply a shortage quantity; stress capacity is distinct from shortage and uses its own persisted quantity when present.
+
+The previous CHAT-9 200 clarification was backend-safe but did not provide structured candidates to the existing frontend. The final patch restores HTTP 422 `INGREDIENT_RESOLUTION_AMBIGUOUS` with `details.candidates`, so existing candidate buttons appear without text parsing. Clicking a candidate retains the original question and sends its canonical ID. Typed candidate replies use bounded client history and current-run ingredient resolution; no server chat state was added. The historical CHAT-9 fixture line above describing 200 `CLARIFICATION` is superseded by this compatibility correction.
+
+**LIVE RETEST NOT RUN:** no `OPENROUTER_API_KEY` exists in process environment or local `.env`. No post-patch Qwen acceptance or provider-frequency claim is made. A small non-production RAW-to-FINAL check remains an Exit Review activity, not a new implementation phase.
+
+Final deterministic gates: **16 final-patch regressions passed**, **272 focused backend tests passed**, `pytest -q` **800 passed, 23 warnings**; frontend logic **305 passed** and production build passed. OpenAPI remains **59 paths / 71 operations**. These counts do not represent live-model acceptance statistics.
+
 ## Environment
 
 - Provider configured: `false`

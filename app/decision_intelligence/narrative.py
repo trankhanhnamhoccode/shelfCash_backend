@@ -20,7 +20,7 @@ from app.decision_intelligence.semantic_state import validate_semantic_state
 from app.decision_intelligence.causal_assertion import asserts_cause, is_causal_limitation
 from app.decision_intelligence.communication_plan import narrative_communication_plan
 from app.decision_intelligence.display import add_numeric_display_contract, purchase_cost_display
-from app.decision_intelligence.narrative_retrieval import retrieve_narrative_evidence
+from app.decision_intelligence.narrative_retrieval import detect_intent, retrieve_narrative_evidence
 from app.decision_intelligence.semantic_evidence import DecisionSemanticEvidenceBuilder, SemanticFact
 from app.decision_intelligence.style_examples import retrieve_style_examples
 from app.decision_intelligence.numeric_authority import (
@@ -339,7 +339,7 @@ def aggregate_evidence(
                 **fact.values,
                 "evidence_ids": source_ids,
             })
-        elif fact.fact_type not in {"PROCUREMENT_QUANTITY", "SELECTED_PLAN_RISK_METRICS"}:
+        elif fact.fact_type != "PROCUREMENT_QUANTITY":
             semantic_item = semantic_items.get(fact.fact_id)
             if semantic_item is None:
                 continue
@@ -424,6 +424,36 @@ def _business_brief(selected: list[dict[str, Any]]) -> list[dict[str, str]]:
             entities = item.get("entities") if isinstance(item.get("entities"), dict) else values
             useful = "; ".join(f"{key}: {value}" for key, value in values.items() if value is not None and key in {"purchase_cost", "fill_rate", "stockout_probability", "shortage_quantity", "feasible"})
             text = f"Strategy {entities.get('strategy')}: {useful}."
+        elif fact_type in {"SELECTED_PLAN_RISK_METRICS", "RISK"}:
+            display = item.get("display_values") or {}
+            metrics = []
+            if isinstance(values.get("shortage_quantity"), (int, float)) and values["shortage_quantity"] > 0:
+                metrics.append(f"projected shortage: {display.get('shortage_quantity', values['shortage_quantity'])}")
+            if isinstance(values.get("stockout_probability"), (int, float)) and values["stockout_probability"] > 0:
+                metrics.append(f"stockout probability: {display.get('stockout_probability', values['stockout_probability'])}")
+            if isinstance(values.get("expected_fill_rate"), (int, float)) and values["expected_fill_rate"] < 1:
+                metrics.append(f"expected demand fill rate: {display.get('expected_fill_rate', values['expected_fill_rate'])}")
+            text = f"Selected-plan risk observation: {'; '.join(metrics)}. These are projected metrics, not an actual stockout."
+        elif fact_type == "INGREDIENT_OPERATIONAL_RISK":
+            display = item.get("display_values") or {}
+            basis = "conservative design scenario" if values.get("basis_kind") == "conservative_design_scenario" else "persisted scenario"
+            shortage = display.get("shortage_quantity", values.get("shortage_quantity"))
+            detail = (f"simulated shortage {shortage} {values.get('unit') or ''}" if isinstance(values.get("shortage_quantity"), (int, float)) and values["shortage_quantity"] > 0 else
+                      f"projected stockout date {display.get('first_stockout_date', values.get('first_stockout_date'))}" if values.get("first_stockout_date") else
+                      "a projected stockout event")
+            text = f"Operational risk observation in the {basis}: {detail} for {values.get('ingredient_name') or 'an ingredient'}. This is not an actual stockout."
+        elif fact_type == "STRESS_SHORTAGE_OBSERVED":
+            display = item.get("display_values") or {}
+            shortage = values.get("shortage_quantity")
+            text = (f"Stress-scenario risk observation: simulated shortage {display.get('shortage_quantity', shortage)} {values.get('unit') or ''}. This is not selected-plan or actual shortage."
+                    if isinstance(shortage, (int, float)) and shortage > 0 else
+                    "Stress-scenario warning: shortage was observed in a stress simulation. No shortage quantity is supplied by this warning code.")
+        elif fact_type == "STRESS_CAPACITY_VIOLATION":
+            display = item.get("display_values") or {}
+            amount = values.get("capacity_violation_quantity")
+            text = (f"Stress-scenario capacity observation: simulated violation {display.get('capacity_violation_quantity', amount)} {values.get('unit') or ''}. This is not a selected-plan or actual capacity violation."
+                    if isinstance(amount, (int, float)) and amount > 0 else
+                    "Stress-scenario warning: capacity violation was observed in a stress simulation. No quantity is supplied by this warning code.")
         else:
             display = item.get("display_values") if isinstance(item.get("display_values"), dict) else values
             concise = "; ".join(f"{key}: {value}" for key, value in display.items() if value is not None)
@@ -439,6 +469,7 @@ def _turn_hint(intent: str) -> str:
         "PLAN_STRATEGY": "Explain the selected strategy and relevant trade-offs.",
         "WHY_PROCUREMENT": "Use an authoritative procurement reason only if supplied. Otherwise describe the recommendation, demand, derived comparison, and baseline as separate facts; say the exact cause is unavailable.",
         "BASELINE": "Answer the no-purchase scenario directly from the baseline card. Keep it distinct from the selected plan.",
+        "RISK": "Answer with the direct risk observation first. Distinguish selected-plan projections from stress or conservative scenarios; never describe simulated stockout as already occurring.",
     }
     return hints.get(intent, "Answer the user's question from the supplied facts without summarizing the whole plan.")
 
@@ -525,6 +556,10 @@ class DecisionNarrativeProvider:
             records = self._selected_semantic_records(brief, question, detail_level, semantic_facts, question_scope)
             evidence_items = self.deterministic._evidence(brief, semantic_facts=semantic_facts).items
             fallback = self._semantic_budget_fallback(fallback, records, language, evidence_items)
+        elif question and detect_intent(question) == "RISK":
+            records = self._selected_semantic_records(brief, question, detail_level, semantic_facts, question_scope)
+            evidence_items = self.deterministic._evidence(brief, semantic_facts=semantic_facts).items
+            fallback = self._semantic_risk_fallback(fallback, records, language, evidence_items)
         if not self.llm_provider or not self.llm_provider.available:
             return fallback
         return self._qwen_or_fallback(
@@ -582,6 +617,8 @@ class DecisionNarrativeProvider:
                 fallback = self._semantic_plan_fallback(fallback, selected, language, evidence.items)
             elif question_scope == "budget":
                 fallback = self._semantic_budget_fallback(fallback, selected, language, evidence.items)
+            elif intent == "RISK":
+                fallback = self._semantic_risk_fallback(fallback, selected, language, evidence.items)
             payload = _ConversationalPayload({
                 "question": resolved_question,
                 "task_hint": _turn_hint(str(intent)),
@@ -749,6 +786,61 @@ class DecisionNarrativeProvider:
                     answer += f" Budget utilization is {rendered}." if language == "en" else f" Mức sử dụng ngân sách là {rendered}."
         return _fallback_with_provenance(fallback, [(answer, budget)] if budget else [], evidence_items)
 
+    @staticmethod
+    def _semantic_risk_fallback(fallback, records: list[dict], language: str, evidence_items: list):
+        """Answer a risk question from one persisted scenario fact, never critic prose."""
+        for item in records:
+            kind = item.get("type")
+            values = item.get("display_values") or {}
+            quantity = item.get("shortage_quantity")
+            rendered = values.get("shortage_quantity", quantity)
+            unit = item.get("unit") or ""
+            if kind in {"SELECTED_PLAN_RISK_METRICS", "RISK"} and isinstance(quantity, (int, float)) and quantity > 0:
+                sentence = (f"The selected plan has a projected shortage of {rendered}." if language == "en" else
+                            f"Kế hoạch được chọn có nguy cơ thiếu hàng theo mô phỏng, với lượng thiếu dự kiến {rendered}.")
+            elif kind in {"SELECTED_PLAN_RISK_METRICS", "RISK"} and isinstance(item.get("stockout_probability"), (int, float)) and item["stockout_probability"] > 0:
+                probability = values.get("stockout_probability", item["stockout_probability"])
+                sentence = (f"The selected plan has a projected stockout probability of {probability}." if language == "en" else
+                            f"Kế hoạch được chọn có xác suất thiếu hàng dự kiến {probability} theo dữ liệu mô phỏng.")
+            elif kind in {"SELECTED_PLAN_RISK_METRICS", "RISK"} and isinstance(item.get("expected_fill_rate"), (int, float)) and item["expected_fill_rate"] < 1:
+                fill_rate = values.get("expected_fill_rate", item["expected_fill_rate"])
+                sentence = (f"The selected plan's expected demand fill rate is {fill_rate}." if language == "en" else
+                            f"Tỷ lệ đáp ứng nhu cầu dự kiến của kế hoạch được chọn là {fill_rate}; đây là chỉ số cần theo dõi.")
+            elif kind == "INGREDIENT_OPERATIONAL_RISK":
+                basis = "kịch bản nhu cầu bảo thủ" if item.get("basis_kind") == "conservative_design_scenario" else "kịch bản mô phỏng đã lưu"
+                name = item.get("ingredient_name") or "một nguyên liệu"
+                if isinstance(quantity, (int, float)) and quantity > 0:
+                    sentence = (f"The persisted scenario projects a shortage of {rendered} {unit} for {name}." if language == "en" else
+                                f"Trong {basis}, mô phỏng ghi nhận nguy cơ thiếu hàng ở {name}: {rendered} {unit}.")
+                else:
+                    date = values.get("first_stockout_date", item.get("first_stockout_date"))
+                    sentence = (f"The persisted scenario projects a stockout for {name}" + (f" on {date}." if date else ".") if language == "en" else
+                                f"Trong {basis}, mô phỏng ghi nhận nguy cơ hết hàng ở {name}" + (f" từ {date}." if date else "."))
+            elif kind == "STRESS_SHORTAGE_OBSERVED" and isinstance(quantity, (int, float)) and quantity > 0:
+                sentence = (f"The stress scenario simulates a shortage of {rendered} {unit}." if language == "en" else
+                            f"Trong kịch bản stress, mô phỏng ghi nhận nguy cơ thiếu hàng: {rendered} {unit}.")
+            elif kind == "STRESS_SHORTAGE_OBSERVED":
+                sentence = ("A stress-scenario warning reports possible shortage; no quantity is supplied." if language == "en" else
+                            "Cảnh báo của kịch bản stress ghi nhận nguy cơ thiếu hàng; cảnh báo này không cung cấp lượng thiếu cụ thể.")
+            elif kind == "STRESS_CAPACITY_VIOLATION":
+                amount = item.get("capacity_violation_quantity")
+                if isinstance(amount, (int, float)) and amount > 0:
+                    rendered_amount = values.get("capacity_violation_quantity", amount)
+                    sentence = (f"The stress scenario simulates a capacity violation of {rendered_amount} {unit}." if language == "en" else
+                                f"Trong kịch bản stress, mô phỏng ghi nhận vi phạm sức chứa {rendered_amount} {unit}.")
+                else:
+                    sentence = ("A stress-scenario warning reports a capacity violation without a quantity." if language == "en" else
+                                "Cảnh báo của kịch bản stress ghi nhận vi phạm sức chứa; cảnh báo này không cung cấp lượng cụ thể.")
+            else:
+                continue
+            return _fallback_with_provenance(fallback, [(sentence, item)], evidence_items)
+        message = ("This Decision Run does not contain enough evidence to identify the main risk." if language == "en" else
+                   "Dữ liệu Decision Run hiện chưa đủ để xác định rủi ro chính.")
+        return fallback.model_copy(update={
+            "summary": message, "answer": message, "why_this_plan": [],
+            "claims": [], "citations": [], "grounded": False,
+        })
+
     def _guard(
         self, raw, structured, evidence_items, brief, language, detail_level, intent,
         *, target_ingredient_id: str | None = None,
@@ -788,6 +880,8 @@ class DecisionNarrativeProvider:
                 fragment, repaired = self._validate_or_repair_fragment(
                     fragment, items, brief, target_ingredient_id,
                 )
+                if intent == "RISK":
+                    self._validate_risk_shortage_concept(fragment, items)
             except ValueError as exc:
                 # CHAT-5 permits a single unsupported numeric sentence to be
                 # removed when a coherent grounded answer remains. Other
@@ -830,6 +924,7 @@ class DecisionNarrativeProvider:
         self._validate_supported_concepts(text, items)
         validate_semantic_state(text, items)
         self._validate_ingredient_semantics(text, items)
+        self._validate_risk_provenance(text, items)
         self._validate_causal_language(text, items)
         self._validate_strategy_selection_language(text, items)
         self._validate_strategy_semantics(text, items)
@@ -869,6 +964,18 @@ class DecisionNarrativeProvider:
             typed = [item for item in candidates if item.get("type") in types]
             if typed:
                 candidates = typed
+        if any(item.get("type") in {"SELECTED_PLAN_RISK_METRICS", "RISK", "INGREDIENT_OPERATIONAL_RISK", "STRESS_SHORTAGE_OBSERVED", "STRESS_CAPACITY_VIOLATION"} for item in candidates):
+            normalized_risk = _semantic_normalize(text).replace("đ", "d")
+            if any(marker in normalized_risk for marker in ("stress", "kiem tra suc chiu dung")):
+                risk_scoped = [item for item in candidates if item.get("type") in {"STRESS_SHORTAGE_OBSERVED", "STRESS_CAPACITY_VIOLATION"}]
+            elif any(marker in normalized_risk for marker in ("kich ban nhu cau bao thu", "conservative scenario")):
+                risk_scoped = [item for item in candidates if item.get("type") == "INGREDIENT_OPERATIONAL_RISK" and item.get("basis_kind") == "conservative_design_scenario"]
+            elif any(marker in normalized_risk for marker in ("ke hoach duoc chon", "ke hoach hien tai", "selected plan", "current plan")):
+                risk_scoped = [item for item in candidates if item.get("type") in {"SELECTED_PLAN_RISK_METRICS", "RISK"}]
+            else:
+                risk_scoped = []
+            if risk_scoped:
+                candidates = risk_scoped
         normalized = _semantic_normalize(text)
         mentioned = mentioned_strategies(text)
         if len(mentioned) >= 2:
@@ -1088,8 +1195,9 @@ class DecisionNarrativeProvider:
             ("hạn dùng", "hết hạn"): lambda: any(item["type"] == "EXPIRY" or item.get("code") == "EXPIRING_INVENTORY" for item in items),
             ("lead time", "thời gian giao"): lambda: any(item["type"] == "LEAD_TIME" or item.get("code") == "LEAD_TIME_PRESSURE" for item in items),
             ("ngân sách", "budget"): lambda: any(item["type"] in {"BUDGET", "BUDGET_STATUS"} or item.get("code") == "BUDGET_CONSTRAINT" for item in items),
-            ("rủi ro", "xác suất thiếu"): lambda: any(
+            ("rủi ro",): lambda: any(
                 item["type"] == "RISK"
+                or item["type"] in {"SELECTED_PLAN_RISK_METRICS", "INGREDIENT_OPERATIONAL_RISK", "STRESS_SHORTAGE_OBSERVED", "STRESS_CAPACITY_VIOLATION"}
                 or item.get("code") == "STOCKOUT_RISK"
                 or (
                     item["type"] in {"STRATEGY_CANDIDATE_METRICS", "STRATEGY_COMPARISON"}
@@ -1097,10 +1205,53 @@ class DecisionNarrativeProvider:
                 )
                 for item in items
             ),
+            ("xác suất thiếu", "stockout probability"): lambda: any(
+                item.get("stockout_probability") is not None or item.get("stockout_probability_delta") is not None
+                for item in items
+            ),
         }
         for phrases, is_supported in required.items():
             if any(phrase in lowered for phrase in phrases) and not is_supported():
                 raise ValueError("unsupported_causal_concept")
+
+    @staticmethod
+    def _validate_risk_provenance(text: str, items: list[dict]):
+        """A stress projection cannot be narrated as selected-plan or actual stockout."""
+        risk_types = {"SELECTED_PLAN_RISK_METRICS", "RISK", "INGREDIENT_OPERATIONAL_RISK", "STRESS_SHORTAGE_OBSERVED", "STRESS_CAPACITY_VIOLATION"}
+        if not any(item.get("type") in risk_types for item in items):
+            return
+        normalized = _semantic_normalize(text).replace("đ", "d")
+        if any(phrase in normalized for phrase in ("da xay ra", "da het hang", "actually ran out", "actual stockout")):
+            raise ValueError("projected_risk_misrepresented_as_actual")
+        selected_shortage = any(
+            (item.get("type") in {"SELECTED_PLAN_RISK_METRICS", "RISK"}
+             or item.get("type") == "INGREDIENT_OPERATIONAL_RISK" and item.get("basis_kind") != "conservative_design_scenario")
+            and isinstance(item.get("shortage_quantity"), (int, float)) and item["shortage_quantity"] > 0
+            for item in items
+        )
+        selected_shortage_claim = any(phrase in normalized for phrase in (
+            "ke hoach hien tai thieu", "ke hoach duoc chon thieu", "ke hoach nay se thieu",
+            "selected plan shortage", "current plan shortage",
+        )) or bool(re.search(r"ke hoach (?:duoc chon|hien tai|nay) (?:co nguy co|se|dang) (?:thieu|het hang)", normalized))
+        if not selected_shortage and selected_shortage_claim:
+            raise ValueError("stress_risk_misrepresented_as_selected_plan")
+
+    @staticmethod
+    def _validate_risk_shortage_concept(text: str, items: list[dict]):
+        """Only the risk-chat scope needs this stricter shortage-versus-capacity check."""
+        lowered = text.casefold()
+        if not any(marker in lowered for marker in ("nguy cơ thiếu", "thiếu hàng", "shortage")):
+            return
+        if any(
+            item.get("type") == "STRESS_SHORTAGE_OBSERVED"
+            or item.get("type") == "INGREDIENT_OPERATIONAL_RISK" and (
+                (item.get("shortage_quantity") or 0) > 0 or (item.get("stockout_event_count") or 0) > 0
+            )
+            or item.get("type") in {"SELECTED_PLAN_RISK_METRICS", "RISK"} and (item.get("shortage_quantity") or 0) > 0
+            for item in items
+        ):
+            return
+        raise ValueError("unsupported_risk_shortage_concept")
 
     @staticmethod
     def _validate_causal_language(text: str, items: list[dict]):

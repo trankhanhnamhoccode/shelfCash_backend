@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.core.exceptions import PlanningError
 from app.decision_intelligence.contracts import (
     CriticBrief, DecisionBriefFacts, ForecastBrief, IngredientDemandBrief,
     ProcurementRowBrief, RecommendationBrief, RiskBrief,
@@ -139,11 +140,10 @@ def test_milk_ambiguity_precedes_generic_plan_and_uses_clarification(client):
             normalized_name=name.casefold(), base_unit="kg", active=True, source="test") for key, name in names)
         session.commit()
     service = _milk_service(client, names)
-    result = service.explain("chat9-milk", ExplanationRequest(question="Sữa trong kế hoạch có cần thiết không?"))
-    assert result["intent"] == "CLARIFICATION"
-    assert "Sữa tươi" in result["answer"] and "Sữa đặc" in result["answer"]
-    assert "không có đề xuất mua sữa" not in result["answer"].casefold()
-    assert result["claims"] == [] and result["citations"] == []
+    with pytest.raises(PlanningError) as captured:
+        service.explain("chat9-milk", ExplanationRequest(question="Sữa trong kế hoạch có cần thiết không?"))
+    assert captured.value.code == "INGREDIENT_RESOLUTION_AMBIGUOUS"
+    assert {item["ingredient_name"] for item in captured.value.details["candidates"]} == {"Sữa tươi", "Sữa đặc"}
     exact = service.explain("chat9-milk", ExplanationRequest(question="Sữa đặc có cần nhập không?"))
     assert exact["entities"]["ingredient_ids"] == ["condensed"]
     unknown = service.explain("chat9-milk", ExplanationRequest(question="Bột cacao có cần nhập không?"))

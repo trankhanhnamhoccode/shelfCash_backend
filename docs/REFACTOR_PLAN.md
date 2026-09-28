@@ -1,5 +1,12 @@
 # ShelfCash Backend Refactor Plan
 
+## Final Explanation Chat corrective patch before Exit Review (2026-09-29)
+
+- [x] Make inventory-risk retrieval, compact brief, concept validation, scenario provenance, and deterministic fallback answer the risk question from persisted facts, with public claims/citations and no invented risk metric.
+- [x] Restore the established structured 422 ingredient-ambiguity error with `details.candidates`; preserve the 200 success DTO and existing frontend candidate-button behavior. Client-owned bounded history now supports a typed candidate follow-up without server persistence or parsing assistant text.
+- [x] Preserve CHAT-5 through CHAT-9 guards, answer-only Qwen, frozen presentation defaults, business authority, and provider settings. Run focused/full/backend and frontend gates, inspect OpenAPI, then proceed to CHAT Exit Review; no CHAT-10 implementation is created here.
+- [x] Final verification: backend focused **272 passed** and full **800 passed, 23 warnings**; frontend logic **305 passed** and build passed; compile/diff/OpenAPI **59 paths / 71 operations** passed. Local Qwen retest unavailable without a credential; FE repository-wide typecheck has unrelated existing errors outside the changed chat files.
+
 ## CHAT-8 semantic grounding correction (2026-09-29)
 
 The current Decision Explanation path validates explicit budget availability and exceeded-state assertions against `BUDGET_STATUS`, keeps numeric values under Numeric Authority, and gives ingredient why-questions typed recommendation/demand/alignment/baseline cards. The signed alignment renderer now preserves direction. There is no new public API, persistence, model-setting, or ADR change. The current backend lacks an authoritative `PROCUREMENT_REASON` fact; future causal decomposition would require a separate deterministic business decision. Live provider quality remains unmeasured locally without an OpenRouter credential.
