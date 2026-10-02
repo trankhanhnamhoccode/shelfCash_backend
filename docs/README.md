@@ -19,6 +19,7 @@ and Pydantic contracts remain the runtime API authority.
 - [FORECAST_MODEL_PREPROCESSING_SCHEMA.md](FORECAST_MODEL_PREPROCESSING_SCHEMA.md) — forecast preprocessing contract.
 - [INVENTORY_CONSTRAINT_CONTRACT.md](INVENTORY_CONSTRAINT_CONTRACT.md) — inventory constraints.
 - [MENU_IMPORT_AND_API.md](MENU_IMPORT_AND_API.md) — menu import and API guidance.
+- [IMPORT_PREPROCESSING_AND_MAPPING.md](IMPORT_PREPROCESSING_AND_MAPPING.md) — Excel upload, sheet profiling, mapping and normalization flow.
 - [examples/decision_assistant_frontend_examples.json](examples/decision_assistant_frontend_examples.json) — illustrative frontend payloads.
 - [forecast_core_payload.example.json](forecast_core_payload.example.json) — illustrative Forecast Core payload.
 
